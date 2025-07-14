@@ -4,7 +4,7 @@ use std::mem;
 
 const LOAD_FACTOR: f64 = 0.75;
 
-// The struct to hold the key, value, and the pre-computed hash.
+/// Internal structure used to hold entries in the [`PoMap`].
 #[derive(Clone, Debug)]
 struct Entry<K: Hash + Eq + Clone, V: Clone> {
     key: K,
@@ -12,12 +12,12 @@ struct Entry<K: Hash + Eq + Clone, V: Clone> {
     hash: u64,
 }
 
-/// A Prefix-Ordered Hash Map (POHM).
+/// A Prefix-Ordered Hash Map (POHM) or just PoMap.
 ///
 /// This map uses a cache-conscious, array-based layout to provide fast lookups
 /// and an elegant, single-pass resize operation.
 #[derive(Clone, Debug)]
-pub struct PohmMap<K: Hash + Eq + Clone, V: Clone> {
+pub struct PoMap<K: Hash + Eq + Clone, V: Clone> {
     capacity: usize,
     len: usize,
     k: usize, // Bucket size: K = log(capacity)
@@ -29,7 +29,7 @@ pub struct PohmMap<K: Hash + Eq + Clone, V: Clone> {
     indices: Vec<Option<u8>>,
 }
 
-impl<K: Hash + Eq + Clone, V: Clone> PohmMap<K, V> {
+impl<K: Hash + Eq + Clone, V: Clone> PoMap<K, V> {
     /// Creates a new, empty PohmMap with an initial capacity.
     pub fn new() -> Self {
         Self::with_capacity(0) // Start with a default capacity
@@ -275,14 +275,14 @@ mod tests {
 
     #[test]
     fn test_new() {
-        let map: PohmMap<String, i32> = PohmMap::new();
+        let map: PoMap<String, i32> = PoMap::new();
         assert_eq!(map.len(), 0);
         assert_eq!(map.capacity, 0);
     }
 
     #[test]
     fn test_insert_and_get() {
-        let mut map = PohmMap::new();
+        let mut map = PoMap::new();
         map.insert("key1".to_string(), 42);
         assert_eq!(map.len(), 1);
         assert_eq!(map.get(&"key1".to_string()), Some(&42));
@@ -290,14 +290,14 @@ mod tests {
 
     #[test]
     fn test_get_nonexistent() {
-        let mut map = PohmMap::new();
+        let mut map = PoMap::new();
         map.insert("key1".to_string(), 42);
         assert_eq!(map.get(&"key2".to_string()), None);
     }
 
     #[test]
     fn test_update() {
-        let mut map = PohmMap::new();
+        let mut map = PoMap::new();
         map.insert("key1".to_string(), 42);
         let old_value = map.insert("key1".to_string(), 99);
         assert_eq!(map.len(), 1);
@@ -307,7 +307,7 @@ mod tests {
 
     #[test]
     fn test_resize() {
-        let mut map = PohmMap::with_capacity(16);
+        let mut map = PoMap::with_capacity(16);
         assert_eq!(map.capacity(), 16);
 
         // Insert enough elements to trigger a resize.
@@ -327,7 +327,7 @@ mod tests {
 
     #[test]
     fn test_many_insertions() {
-        let mut map = PohmMap::new();
+        let mut map = PoMap::new();
         let num_items = 1_000;
 
         for i in 0..num_items {
@@ -343,7 +343,7 @@ mod tests {
 
     #[test]
     fn test_zero_capacity() {
-        let mut map: PohmMap<i32, i32> = PohmMap::with_capacity(0);
+        let mut map: PoMap<i32, i32> = PoMap::with_capacity(0);
         assert_eq!(map.len(), 0);
         assert_eq!(map.capacity(), 0);
 

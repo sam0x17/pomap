@@ -3,5 +3,5 @@
 version = 4
 
 [[package]]
-name = "pohm"
+name = "pomap"
 version = "0.1.0"

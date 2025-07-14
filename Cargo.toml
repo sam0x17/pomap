@@ -1,5 +1,5 @@
 [package]
-name = "pohm"
+name = "pomap"
 version = "0.1.0"
 edition = "2024"
 authors = ["sam0x17"]
