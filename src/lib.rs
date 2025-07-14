@@ -104,14 +104,41 @@ impl<K: Hash + Eq + Clone + Default, V: Clone + Default> PoMap<K, V> {
 
         let index_slice = &self.indices[index_base + 1..index_base + 1 + len];
 
-        for (i, rel_idx) in index_slice.iter().enumerate() {
-            let abs_idx = data_base + *rel_idx as usize;
-            let entry = &self.data[abs_idx];
-            if entry.hash == hash && entry.key == *key {
-                // Return absolute data index and position within the index slice
-                return Some((abs_idx, i));
+        // Since the index is sorted by hash, we can use binary search.
+        if let Ok(i) = index_slice.binary_search_by_key(&hash, |rel_idx| {
+            self.data[data_base + *rel_idx as usize].hash
+        }) {
+            // We found an entry with the same hash. Now we need to check for key equality.
+            // There could be multiple entries with the same hash (hash collisions),
+            // so we need to scan linearly in both directions from the found index.
+
+            // Scan backwards
+            for j in (0..=i).rev() {
+                let rel_idx = index_slice[j];
+                let abs_idx = data_base + rel_idx as usize;
+                let entry = &self.data[abs_idx];
+                if entry.hash != hash {
+                    break; // Moved past all entries with this hash
+                }
+                if entry.key == *key {
+                    return Some((abs_idx, j));
+                }
+            }
+
+            // Scan forwards from i + 1
+            for j in (i + 1)..len {
+                let rel_idx = index_slice[j];
+                let abs_idx = data_base + rel_idx as usize;
+                let entry = &self.data[abs_idx];
+                if entry.hash != hash {
+                    break; // Moved past all entries with this hash
+                }
+                if entry.key == *key {
+                    return Some((abs_idx, j));
+                }
             }
         }
+
         None
     }
 
