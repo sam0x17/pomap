@@ -593,34 +593,15 @@ impl<K: Hash + Eq + Clone, V: Clone> PoMap<K, V> {
                     let new_index_base = new_bucket_idx * (self.k + 1);
                     let len = unsafe { *self.indices.add(new_index_base) } as usize;
 
-                    // The relative data index is just the current length of the bucket.
+                    // Relative index is just current length (defragment buckets)
                     let rel_data_idx = len as u8;
                     unsafe {
                         self.data
                             .add(new_data_base + rel_data_idx as usize)
                             .write(element);
-                    }
-
-                    // Find insertion point to keep indices sorted by hash
-                    let new_index_slice_start = unsafe { self.indices.add(new_index_base + 1) };
-                    let insert_pos = unsafe {
-                        let slice = std::slice::from_raw_parts(new_index_slice_start, len);
-                        let hash_to_insert =
-                            (*self.data.add(new_data_base + rel_data_idx as usize)).hash;
-                        match slice.binary_search_by_key(&hash_to_insert, |rel_idx| {
-                            (*self.data.add(new_data_base + *rel_idx as usize)).hash
-                        }) {
-                            Ok(pos) => pos,
-                            Err(pos) => pos,
-                        }
-                    };
-
-                    let insert_offset = new_index_base + 1 + insert_pos;
-                    unsafe {
-                        let slice_ptr = self.indices.add(insert_offset);
-                        ptr::copy(slice_ptr, slice_ptr.add(1), len - insert_pos);
-                        *slice_ptr = rel_data_idx;
-                        *self.indices.add(new_index_base) += 1; // Increment len
+                        // append index directly since we are processing in hash order
+                        *self.indices.add(new_index_base + 1 + len) = rel_data_idx;
+                        *self.indices.add(new_index_base) += 1;
                     }
                 }
             }
