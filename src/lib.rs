@@ -35,6 +35,18 @@ impl<K: Hash + Eq + Clone + Default, V: Clone + Default> PoMap<K, V> {
         Self::with_capacity(0)
     }
 
+    /// Clears the map, removing all key-value pairs while retaining the allocated capacity.
+    pub fn clear(&mut self) {
+        self.len = 0;
+        if self.capacity > 0 {
+            // Just set all bucket lengths to 0. The data in `self.data` is now
+            // garbage, but it will be overwritten as new items are inserted.
+            for i in 0..self.num_buckets {
+                self.indices[i * (self.k + 1)] = 0;
+            }
+        }
+    }
+
     /// Creates a new PoMap with a specified initial capacity.
     pub fn with_capacity(capacity: usize) -> Self {
         if capacity == 0 {
@@ -93,6 +105,10 @@ impl<K: Hash + Eq + Clone + Default, V: Clone + Default> PoMap<K, V> {
         self.len
     }
 
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
     pub fn capacity(&self) -> usize {
         self.capacity
     }
@@ -143,6 +159,8 @@ impl<K: Hash + Eq + Clone + Default, V: Clone + Default> PoMap<K, V> {
     }
 
     pub fn insert(&mut self, key: K, value: V) -> Option<V> {
+        // --- Resize Logic ---
+        // Stage 1: Check if we need to resize due to the load factor.
         if self.capacity == 0 || self.len + 1 > (self.capacity as f64 * LOAD_FACTOR) as usize {
             let new_capacity = if self.capacity == 0 {
                 16
@@ -152,23 +170,30 @@ impl<K: Hash + Eq + Clone + Default, V: Clone + Default> PoMap<K, V> {
             self.resize(new_capacity);
         }
 
+        // Stage 2: Check if the target bucket is full. This requires re-calculating
+        // the hash and bucket index in case the first resize happened.
         let hash = Self::hash_key(&key);
-        let bucket_idx = self.get_bucket_idx(hash);
+        let mut bucket_idx = self.get_bucket_idx(hash);
 
+        let mut index_base = bucket_idx * (self.k + 1);
+        let mut len = self.indices[index_base] as usize;
+
+        if len >= self.k {
+            self.resize(self.capacity * 2);
+            // After this resize, we MUST re-calculate all layout-dependent variables.
+            bucket_idx = self.get_bucket_idx(hash);
+            index_base = bucket_idx * (self.k + 1);
+        }
+        // --- End Resize Logic ---
+
+        // Now that we've resized (if necessary), we can safely proceed.
         if let Some((abs_idx, _)) = self.find_key_in_bucket(bucket_idx, &key, hash) {
             return Some(mem::replace(&mut self.data[abs_idx].value, value));
         }
 
+        // Re-fetch len as it might have changed if we resized due to bucket overflow.
+        len = self.indices[index_base] as usize;
         let data_base = bucket_idx * self.k;
-        let index_base = bucket_idx * (self.k + 1);
-        let len = self.indices[index_base] as usize;
-
-        if len >= self.k {
-            self.resize(self.capacity * 2);
-            return self.insert(key, value);
-        }
-
-        // The relative data index is just the current length of the bucket.
         let rel_data_idx = len as u8;
         self.data[data_base + rel_data_idx as usize] = Entry { key, value, hash };
 
@@ -176,8 +201,8 @@ impl<K: Hash + Eq + Clone + Default, V: Clone + Default> PoMap<K, V> {
         let insert_pos = match index_slice.binary_search_by_key(&hash, |rel_idx| {
             self.data[data_base + *rel_idx as usize].hash
         }) {
-            Ok(pos) => pos,  // Found an existing hash, insert after it
-            Err(pos) => pos, // Not found, insert at this position to maintain order
+            Ok(pos) => pos,
+            Err(pos) => pos,
         };
 
         let insert_offset = index_base + 1 + insert_pos;
@@ -189,7 +214,7 @@ impl<K: Hash + Eq + Clone + Default, V: Clone + Default> PoMap<K, V> {
     }
 
     pub fn get(&self, key: &K) -> Option<&V> {
-        if self.len == 0 {
+        if self.is_empty() {
             return None;
         }
         let hash = Self::hash_key(key);
@@ -200,7 +225,7 @@ impl<K: Hash + Eq + Clone + Default, V: Clone + Default> PoMap<K, V> {
     }
 
     pub fn remove(&mut self, key: &K) -> Option<V> {
-        if self.len == 0 {
+        if self.is_empty() {
             return None;
         }
         let hash = Self::hash_key(key);
@@ -248,11 +273,12 @@ impl<K: Hash + Eq + Clone + Default, V: Clone + Default> PoMap<K, V> {
         let mut new_data = vec![Default::default(); new_capacity];
         let mut new_indices = vec![0; new_num_buckets * (new_k + 1)];
 
+        let old_num_buckets = self.num_buckets;
         let mut old_data = mem::take(&mut self.data);
         let old_indices = mem::take(&mut self.indices);
 
-        if self.num_buckets > 0 {
-            for old_bucket_idx in 0..self.num_buckets {
+        if old_num_buckets > 0 {
+            for old_bucket_idx in 0..old_num_buckets {
                 let old_data_base = old_bucket_idx * self.k;
                 let old_index_base = old_bucket_idx * (self.k + 1);
                 let old_len = old_indices[old_index_base] as usize;
@@ -300,6 +326,12 @@ impl<K: Hash + Eq + Clone + Default, V: Clone + Default> PoMap<K, V> {
     }
 }
 
+impl<K: Hash + Eq + Clone + Default, V: Clone + Default> Default for PoMap<K, V> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 // --- Unit Tests ---
 #[cfg(test)]
 mod tests {
@@ -312,6 +344,28 @@ mod tests {
         map.insert("key1".to_string(), 42);
         assert_eq!(map.len(), 1);
         assert_eq!(map.get(&"key1".to_string()), Some(&42));
+    }
+
+    #[test]
+    fn test_clear() {
+        let mut map = PoMap::new();
+        map.insert("key1".to_string(), 1);
+        map.insert("key2".to_string(), 2);
+        let capacity_before = map.capacity();
+        map.clear();
+        assert_eq!(map.len(), 0);
+        assert_eq!(map.capacity(), capacity_before); // Should not deallocate
+        assert_eq!(map.get(&"key1".to_string()), None);
+        map.insert("key3".to_string(), 3);
+        assert_eq!(map.len(), 1);
+        assert_eq!(map.get(&"key3".to_string()), Some(&3));
+    }
+
+    #[test]
+    fn test_default() {
+        let map: PoMap<String, i32> = PoMap::default();
+        assert_eq!(map.len(), 0);
+        assert_eq!(map.capacity(), 0);
     }
 
     #[test]
@@ -350,17 +404,25 @@ mod tests {
     }
 
     #[test]
-    fn test_resize() {
+    fn test_resize_and_rehash() {
         let mut map = PoMap::with_capacity(16);
         assert_eq!(map.capacity(), 16);
+        assert_eq!(map.k, 4); // k = 16.ilog2()
 
-        for i in 0..13 {
+        // Insert enough items to trigger a resize.
+        // Load factor is 0.75, so 16 * 0.75 = 12. The 13th element will resize.
+        for i in 0..12 {
             map.insert(i.to_string(), i);
         }
+        assert_eq!(map.len(), 12);
+        assert_eq!(map.capacity(), 64);
 
+        map.insert("12".to_string(), 12);
         assert_eq!(map.len(), 13);
-        assert!(map.capacity() >= 32);
+        assert_eq!(map.capacity(), 64);
+        assert_eq!(map.k, 6);
 
+        // Verify all old and new elements are present.
         for i in 0..13 {
             assert_eq!(map.get(&i.to_string()), Some(&i));
         }
@@ -387,6 +449,140 @@ mod tests {
             } else {
                 assert_eq!(map.get(&i), Some(&(i * 2)));
             }
+        }
+    }
+
+    #[derive(Debug, Clone, Eq, Default)]
+    struct CollidingKey {
+        val: u64,
+        hash: u64,
+    }
+
+    impl Hash for CollidingKey {
+        fn hash<H: Hasher>(&self, state: &mut H) {
+            self.hash.hash(state);
+        }
+    }
+
+    impl PartialEq for CollidingKey {
+        fn eq(&self, other: &Self) -> bool {
+            self.val == other.val
+        }
+    }
+
+    #[test]
+    fn test_hash_collisions() {
+        let mut map = PoMap::new();
+        let key1 = CollidingKey { val: 1, hash: 123 };
+        let key2 = CollidingKey { val: 2, hash: 123 };
+        let key3 = CollidingKey { val: 3, hash: 123 };
+
+        map.insert(key1.clone(), 10);
+        map.insert(key2.clone(), 20);
+        map.insert(key3.clone(), 30);
+
+        assert_eq!(map.len(), 3);
+        assert_eq!(map.get(&key1), Some(&10));
+        assert_eq!(map.get(&key2), Some(&20));
+        assert_eq!(map.get(&key3), Some(&30));
+
+        // Test update on collision
+        map.insert(key2.clone(), 25);
+        assert_eq!(map.len(), 3);
+        assert_eq!(map.get(&key2), Some(&25));
+
+        // Test remove on collision
+        assert_eq!(map.remove(&key1), Some(10));
+        assert_eq!(map.len(), 2);
+        assert_eq!(map.get(&key1), None);
+        assert_eq!(map.get(&key2), Some(&25));
+        assert_eq!(map.get(&key3), Some(&30));
+    }
+
+    #[test]
+    fn test_bucket_overflow_and_resize() {
+        let mut map = PoMap::with_capacity(16);
+
+        // Create keys that all map to the same bucket.
+        // We can achieve this by crafting hashes. A key's bucket is `(hash >> (64 - p)) % num_buckets`.
+        // With C=16, k=4, num_buckets=4, p=2.
+        // We need `(hash >> 62) % 4` to be constant.
+        let collision_hash_base: u64 = 1 << 62;
+
+        for i in 0..4 {
+            // These should all go to the same bucket.
+            let key = CollidingKey {
+                val: i,
+                hash: collision_hash_base + i,
+            };
+            map.insert(key, i as i32);
+        }
+        assert_eq!(map.len(), 4);
+        assert_eq!(map.capacity(), 16);
+
+        // This should trigger a resize because the target bucket is full (len=k=4).
+        let key = CollidingKey {
+            val: 4,
+            hash: collision_hash_base + 4,
+        };
+        map.insert(key, 4);
+        assert_eq!(map.len(), 5);
+        assert_eq!(map.capacity(), 16);
+
+        // Check that all values are still there.
+        for i in 0..5 {
+            let key_to_check = CollidingKey {
+                val: i,
+                hash: collision_hash_base + i,
+            };
+            assert_eq!(map.get(&key_to_check), Some(&(i as i32)));
+        }
+    }
+
+    #[test]
+    fn test_random_insert_remove_comprehensive() {
+        use std::collections::HashMap;
+
+        let mut pomap = PoMap::new();
+        let mut hashmap = HashMap::new();
+        let num_items = 2_000;
+
+        let mut items: Vec<(i32, i32)> = (0..num_items).map(|i| (i, i * 10)).collect();
+
+        // Simple shuffle
+        for i in 0..items.len() {
+            let j = (i * 7) % items.len();
+            items.swap(i, j);
+        }
+
+        // Insert all items
+        for (k, v) in &items {
+            pomap.insert(*k, *v);
+            hashmap.insert(*k, *v);
+            assert_eq!(pomap.len(), hashmap.len());
+        }
+
+        assert_eq!(pomap.len(), num_items as usize);
+        for (k, v) in &items {
+            assert_eq!(pomap.get(k), Some(v));
+        }
+
+        // Remove about half the items
+        let mut removed_count = 0;
+        for (i, (k, v)) in items.iter().enumerate() {
+            if i % 2 == 0 {
+                assert_eq!(pomap.remove(k), Some(*v));
+                hashmap.remove(k);
+                removed_count += 1;
+            }
+            assert_eq!(pomap.len(), hashmap.len());
+        }
+
+        assert_eq!(pomap.len(), (num_items - removed_count) as usize);
+
+        // Check final state
+        for (k, _) in &items {
+            assert_eq!(pomap.get(k), hashmap.get(k));
         }
     }
 
