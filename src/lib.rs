@@ -12,7 +12,7 @@ struct Entry<K: Hash + Eq + Clone, V: Clone> {
     hash: u64,
 }
 
-/// A Prefix-Ordered Hash Map (POHM) or just PoMap.
+/// A Prefix-Ordered Hash Map (PoMap).
 ///
 /// This map uses a cache-conscious, array-based layout to provide fast lookups
 /// and an elegant, single-pass resize operation.
