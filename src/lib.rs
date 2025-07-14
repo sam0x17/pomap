@@ -173,14 +173,12 @@ impl<K: Hash + Eq + Clone + Default, V: Clone + Default> PoMap<K, V> {
         self.data[data_base + rel_data_idx as usize] = Entry { key, value, hash };
 
         let index_slice = &self.indices[index_base + 1..index_base + 1 + len];
-        let mut insert_pos = len;
-        for (i, existing_rel_idx) in index_slice.iter().enumerate() {
-            let existing_hash = self.data[data_base + *existing_rel_idx as usize].hash;
-            if hash < existing_hash {
-                insert_pos = i;
-                break;
-            }
-        }
+        let insert_pos = match index_slice.binary_search_by_key(&hash, |rel_idx| {
+            self.data[data_base + *rel_idx as usize].hash
+        }) {
+            Ok(pos) => pos,  // Found an existing hash, insert after it
+            Err(pos) => pos, // Not found, insert at this position to maintain order
+        };
 
         let insert_offset = index_base + 1 + insert_pos;
         self.indices[insert_offset..index_base + 1 + len + 1].rotate_right(1);
@@ -259,15 +257,13 @@ impl<K: Hash + Eq + Clone + Default, V: Clone + Default> PoMap<K, V> {
                     // Find insertion point to keep indices sorted by hash
                     let new_index_slice =
                         &new_indices[new_index_base + 1..new_index_base + 1 + len];
-                    let mut insert_pos = len;
-                    for (i, existing_rel_idx) in new_index_slice.iter().enumerate() {
-                        let existing_hash =
-                            new_data[new_data_base + *existing_rel_idx as usize].hash;
-                        if new_data[new_data_base + rel_data_idx as usize].hash < existing_hash {
-                            insert_pos = i;
-                            break;
-                        }
-                    }
+                    let insert_pos = match new_index_slice.binary_search_by_key(
+                        &new_data[new_data_base + rel_data_idx as usize].hash,
+                        |rel_idx| new_data[new_data_base + *rel_idx as usize].hash,
+                    ) {
+                        Ok(pos) => pos,
+                        Err(pos) => pos,
+                    };
 
                     let insert_offset = new_index_base + 1 + insert_pos;
                     new_indices[insert_offset..new_index_base + 1 + len + 1].rotate_right(1);
