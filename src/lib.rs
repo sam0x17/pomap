@@ -22,7 +22,7 @@ pub struct PoMap<K: Hash + Eq + Clone, V: Clone> {
     capacity: usize,
     len: usize,
     k: usize, // Bucket size: K = log(capacity)
-    p: u32,   // Number of prefix bits
+    p: u8,    // Number of prefix bits
     num_buckets: usize,
     data: Vec<Option<Entry<K, V>>>,
     indices: Vec<Option<u8>>,
@@ -63,7 +63,7 @@ impl<K: Hash + Eq + Clone, V: Clone> PoMap<K, V> {
     }
 
     /// Calculates the layout parameters for a given capacity.
-    fn calculate_layout(capacity: usize) -> (usize, u32, usize) {
+    fn calculate_layout(capacity: usize) -> (usize, u8, usize) {
         if capacity == 0 {
             return (0, 0, 0);
         }
@@ -74,7 +74,7 @@ impl<K: Hash + Eq + Clone, V: Clone> PoMap<K, V> {
             num_buckets.ilog2()
         } else {
             0
-        };
+        } as u8;
         (k, p, num_buckets)
     }
 
