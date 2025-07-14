@@ -1,12 +1,14 @@
+use std::alloc::{self, Layout};
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
-use std::mem;
+use std::marker::PhantomData;
+use std::ptr;
 
 const LOAD_FACTOR: f64 = 0.75;
 
 /// Internal structure used to hold entries in the [`PoMap`].
-#[derive(Clone, Debug, Default)]
-struct Entry<K: Hash + Eq + Clone + Default, V: Clone + Default> {
+#[derive(Clone, Debug)]
+struct Entry<K: Hash + Eq + Clone, V: Clone> {
     key: K,
     value: V,
     hash: u64,
@@ -17,59 +19,141 @@ struct Entry<K: Hash + Eq + Clone + Default, V: Clone + Default> {
 /// This map uses a cache-conscious, array-based layout to provide fast lookups
 /// and an elegant, single-pass resize operation.
 #[derive(Clone, Debug)]
-pub struct PoMap<K: Hash + Eq + Clone + Default, V: Clone + Default> {
+pub struct PoMap<K: Hash + Eq + Clone, V: Clone> {
     capacity: usize,
     len: usize,
     k: usize, // Bucket size: K = log(capacity)
     p: u32,   // Number of prefix bits
     num_buckets: usize,
-    data: Vec<Entry<K, V>>,
+    data: *mut Entry<K, V>,
     // Index buckets are length-prefixed. The first u8 is the length,
     // followed by K u8 relative offsets.
-    indices: Vec<u8>,
+    indices: *mut u8,
+    _marker: PhantomData<(K, V)>,
 }
 
-impl<K: Hash + Eq + Clone + Default, V: Clone + Default> PoMap<K, V> {
-    /// Creates a new, empty PoMap.
+impl<K: Hash + Eq + Clone, V: Clone> Drop for PoMap<K, V> {
+    fn drop(&mut self) {
+        if self.capacity == 0 {
+            return;
+        }
+
+        // Drop all valid entries in place.
+        if self.len > 0 {
+            for bucket_idx in 0..self.num_buckets {
+                let index_base = bucket_idx * (self.k + 1);
+                let len = unsafe { *self.indices.add(index_base) } as usize;
+                if len == 0 {
+                    continue;
+                }
+
+                let data_base = bucket_idx * self.k;
+                let index_slice_start = unsafe { self.indices.add(index_base + 1) };
+
+                for i in 0..len {
+                    let rel_idx = unsafe { *index_slice_start.add(i) } as usize;
+                    let abs_idx = data_base + rel_idx;
+                    unsafe {
+                        ptr::drop_in_place(self.data.add(abs_idx));
+                    }
+                }
+            }
+        }
+
+        // Deallocate the memory.
+        unsafe {
+            let data_layout = Layout::array::<Entry<K, V>>(self.capacity).unwrap();
+            alloc::dealloc(self.data as *mut u8, data_layout);
+
+            let indices_layout = Layout::array::<u8>(self.num_buckets * (self.k + 1)).unwrap();
+            alloc::dealloc(self.indices, indices_layout);
+        }
+    }
+}
+
+impl<K: Hash + Eq + Clone, V: Clone> Default for PoMap<K, V> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<K: Hash + Eq + Clone, V: Clone> PoMap<K, V> {
     pub fn new() -> Self {
-        Self::with_capacity(0)
+        Self {
+            p: 0,
+            k: 0,
+            len: 0,
+            capacity: 0,
+            num_buckets: 0,
+            data: ptr::null_mut(),
+            indices: ptr::null_mut(),
+            _marker: PhantomData,
+        }
     }
 
     /// Clears the map, removing all key-value pairs while retaining the allocated capacity.
     pub fn clear(&mut self) {
-        self.len = 0;
-        if self.capacity > 0 {
-            // Just set all bucket lengths to 0. The data in `self.data` is now
-            // garbage, but it will be overwritten as new items are inserted.
-            for i in 0..self.num_buckets {
-                self.indices[i * (self.k + 1)] = 0;
+        if self.len == 0 {
+            return;
+        }
+
+        // Drop all valid entries in place.
+        for bucket_idx in 0..self.num_buckets {
+            let index_base = bucket_idx * (self.k + 1);
+            let len = unsafe { *self.indices.add(index_base) } as usize;
+            if len == 0 {
+                continue;
+            }
+
+            let data_base = bucket_idx * self.k;
+            let index_slice_start = unsafe { self.indices.add(index_base + 1) };
+
+            for i in 0..len {
+                let rel_idx = unsafe { *index_slice_start.add(i) } as usize;
+                let abs_idx = data_base + rel_idx;
+                unsafe {
+                    ptr::drop_in_place(self.data.add(abs_idx));
+                }
+            }
+            // Reset bucket length.
+            unsafe {
+                *self.indices.add(index_base) = 0;
             }
         }
+        self.len = 0;
     }
 
     /// Creates a new PoMap with a specified initial capacity.
     pub fn with_capacity(capacity: usize) -> Self {
         if capacity == 0 {
-            return Self {
-                capacity: 0,
-                len: 0,
-                k: 0,
-                p: 0,
-                num_buckets: 0,
-                data: Vec::new(),
-                indices: Vec::new(),
-            };
+            return Self::new();
         }
+        let capacity = capacity.next_power_of_two();
         let (k, p, num_buckets) = Self::calculate_layout(capacity);
+
+        let data = unsafe {
+            let layout = Layout::array::<Entry<K, V>>(capacity).unwrap();
+            alloc::alloc(layout) as *mut Entry<K, V>
+        };
+
+        let indices = unsafe {
+            let layout = Layout::array::<u8>(num_buckets * (k + 1)).unwrap();
+            alloc::alloc_zeroed(layout)
+        };
+
+        if data.is_null() || indices.is_null() {
+            panic!("memory allocation failed");
+        }
+
         Self {
-            capacity,
-            len: 0,
-            k,
             p,
+            k,
+            len: 0,
+            capacity,
             num_buckets,
-            data: vec![Default::default(); capacity],
-            // Each bucket gets K slots for indices + 1 slot for its length.
-            indices: vec![0; num_buckets * (k + 1)],
+            data,
+            indices,
+            _marker: PhantomData,
         }
     }
 
@@ -101,6 +185,7 @@ impl<K: Hash + Eq + Clone + Default, V: Clone + Default> PoMap<K, V> {
         (hash >> (64 - self.p)) as usize % self.num_buckets
     }
 
+    /// Returns the number of elements in the map.
     pub fn len(&self) -> usize {
         self.len
     }
@@ -116,23 +201,28 @@ impl<K: Hash + Eq + Clone + Default, V: Clone + Default> PoMap<K, V> {
     fn find_key_in_bucket(&self, bucket_idx: usize, key: &K, hash: u64) -> Option<(usize, usize)> {
         let data_base = bucket_idx * self.k;
         let index_base = bucket_idx * (self.k + 1);
-        let len = self.indices[index_base] as usize;
+        let len = unsafe { *self.indices.add(index_base) } as usize;
 
-        let index_slice = &self.indices[index_base + 1..index_base + 1 + len];
+        let index_slice_start = unsafe { self.indices.add(index_base + 1) };
 
         // Since the index is sorted by hash, we can use binary search.
-        if let Ok(i) = index_slice.binary_search_by_key(&hash, |rel_idx| {
-            self.data[data_base + *rel_idx as usize].hash
-        }) {
+        let search_result = unsafe {
+            let slice = std::slice::from_raw_parts(index_slice_start, len);
+            slice.binary_search_by_key(&hash, |rel_idx| {
+                (*self.data.add(data_base + *rel_idx as usize)).hash
+            })
+        };
+
+        if let Ok(i) = search_result {
             // We found an entry with the same hash. Now we need to check for key equality.
             // There could be multiple entries with the same hash (hash collisions),
             // so we need to scan linearly in both directions from the found index.
 
             // Scan backwards
             for j in (0..=i).rev() {
-                let rel_idx = index_slice[j];
+                let rel_idx = unsafe { *index_slice_start.add(j) };
                 let abs_idx = data_base + rel_idx as usize;
-                let entry = &self.data[abs_idx];
+                let entry = unsafe { &*self.data.add(abs_idx) };
                 if entry.hash != hash {
                     break; // Moved past all entries with this hash
                 }
@@ -143,9 +233,9 @@ impl<K: Hash + Eq + Clone + Default, V: Clone + Default> PoMap<K, V> {
 
             // Scan forwards from i + 1
             for j in (i + 1)..len {
-                let rel_idx = index_slice[j];
+                let rel_idx = unsafe { *index_slice_start.add(j) };
                 let abs_idx = data_base + rel_idx as usize;
-                let entry = &self.data[abs_idx];
+                let entry = unsafe { &*self.data.add(abs_idx) };
                 if entry.hash != hash {
                     break; // Moved past all entries with this hash
                 }
@@ -176,7 +266,7 @@ impl<K: Hash + Eq + Clone + Default, V: Clone + Default> PoMap<K, V> {
         let mut bucket_idx = self.get_bucket_idx(hash);
 
         let mut index_base = bucket_idx * (self.k + 1);
-        let mut len = self.indices[index_base] as usize;
+        let mut len = unsafe { *self.indices.add(index_base) } as usize;
 
         if len >= self.k {
             self.resize(self.capacity * 2);
@@ -188,27 +278,45 @@ impl<K: Hash + Eq + Clone + Default, V: Clone + Default> PoMap<K, V> {
 
         // Now that we've resized (if necessary), we can safely proceed.
         if let Some((abs_idx, _)) = self.find_key_in_bucket(bucket_idx, &key, hash) {
-            return Some(mem::replace(&mut self.data[abs_idx].value, value));
+            unsafe {
+                let entry_ptr = self.data.add(abs_idx);
+                // Safety: entry_ptr is valid and points to an existing element.
+                // ptr::replace swaps the value and returns the old one, which is what we want.
+                let old_value = ptr::replace(&mut (*entry_ptr).value, value);
+                return Some(old_value);
+            }
         }
 
         // Re-fetch len as it might have changed if we resized due to bucket overflow.
-        len = self.indices[index_base] as usize;
+        len = unsafe { *self.indices.add(index_base) } as usize;
         let data_base = bucket_idx * self.k;
         let rel_data_idx = len as u8;
-        self.data[data_base + rel_data_idx as usize] = Entry { key, value, hash };
+        unsafe {
+            self.data
+                .add(data_base + rel_data_idx as usize)
+                .write(Entry { key, value, hash });
+        }
 
-        let index_slice = &self.indices[index_base + 1..index_base + 1 + len];
-        let insert_pos = match index_slice.binary_search_by_key(&hash, |rel_idx| {
-            self.data[data_base + *rel_idx as usize].hash
-        }) {
-            Ok(pos) => pos,
-            Err(pos) => pos,
+        let index_slice_start = unsafe { self.indices.add(index_base + 1) };
+        let insert_pos = unsafe {
+            let slice = std::slice::from_raw_parts(index_slice_start, len);
+            match slice.binary_search_by_key(&hash, |rel_idx| {
+                (*self.data.add(data_base + *rel_idx as usize)).hash
+            }) {
+                Ok(pos) => pos,
+                Err(pos) => pos,
+            }
         };
 
         let insert_offset = index_base + 1 + insert_pos;
-        self.indices[insert_offset..index_base + 1 + len + 1].rotate_right(1);
-        self.indices[insert_offset] = rel_data_idx;
-        self.indices[index_base] += 1; // Increment length
+        unsafe {
+            let slice_ptr = self.indices.add(insert_offset);
+            ptr::copy(slice_ptr, slice_ptr.add(1), len - insert_pos);
+            *slice_ptr = rel_data_idx;
+        }
+        unsafe {
+            *self.indices.add(index_base) += 1; // Increment length
+        }
         self.len += 1;
         None
     }
@@ -221,7 +329,7 @@ impl<K: Hash + Eq + Clone + Default, V: Clone + Default> PoMap<K, V> {
         let bucket_idx = self.get_bucket_idx(hash);
 
         self.find_key_in_bucket(bucket_idx, key, hash)
-            .map(|(abs_idx, _)| &self.data[abs_idx].value)
+            .map(|(abs_idx, _)| unsafe { &(*self.data.add(abs_idx)).value })
     }
 
     pub fn remove(&mut self, key: &K) -> Option<V> {
@@ -234,88 +342,73 @@ impl<K: Hash + Eq + Clone + Default, V: Clone + Default> PoMap<K, V> {
         let (abs_idx_to_remove, index_pos_to_remove) =
             self.find_key_in_bucket(bucket_idx, key, hash)?;
 
-        // The value to be returned
-        let value = mem::take(&mut self.data[abs_idx_to_remove].value);
+        // Read the entire entry out. This leaves the slot logically uninitialized.
+        // The key will be dropped at the end of this function, and we return the value.
+        let entry_to_remove = unsafe { ptr::read(self.data.add(abs_idx_to_remove)) };
+        let value = entry_to_remove.value;
 
         let data_base = bucket_idx * self.k;
         let index_base = bucket_idx * (self.k + 1);
-        let len = self.indices[index_base] as usize;
+        let len = unsafe { *self.indices.add(index_base) } as usize;
         let rel_idx_to_remove = (abs_idx_to_remove - data_base) as u8;
 
         // Shift data elements to the left to fill the gap.
-        // This is a small local shift, so a simple loop is fine.
         for i in abs_idx_to_remove..(data_base + len - 1) {
-            self.data[i] = mem::take(&mut self.data[i + 1]);
+            unsafe {
+                let src = self.data.add(i + 1);
+                let dst = self.data.add(i);
+                ptr::copy_nonoverlapping(src, dst, 1);
+            }
         }
 
         // Update indices that pointed to shifted elements.
         // Any index greater than the one we removed needs to be decremented.
-        let index_slice = &mut self.indices[index_base + 1..index_base + 1 + len];
-        for rel_idx in index_slice.iter_mut() {
-            if *rel_idx > rel_idx_to_remove {
-                *rel_idx -= 1;
+        let index_slice_start = unsafe { self.indices.add(index_base + 1) };
+        for i in 0..len {
+            let rel_idx_ptr = unsafe { index_slice_start.add(i) };
+            let rel_idx = unsafe { *rel_idx_ptr };
+            if rel_idx > rel_idx_to_remove {
+                unsafe {
+                    *rel_idx_ptr -= 1;
+                }
             }
         }
 
         // Now, remove the index from the sorted index list
-        let index_slice_start = index_base + 1 + index_pos_to_remove;
-        let index_slice_end = index_base + 1 + len;
+        let index_slice_start_for_remove = unsafe { index_slice_start.add(index_pos_to_remove) };
+        unsafe {
+            ptr::copy(
+                index_slice_start_for_remove.add(1),
+                index_slice_start_for_remove,
+                len - index_pos_to_remove - 1,
+            );
+        }
 
-        self.indices[index_slice_start..index_slice_end].rotate_left(1);
-
-        self.indices[index_base] -= 1; // Decrement length
+        unsafe {
+            *self.indices.add(index_base) -= 1; // Decrement length
+        }
         self.len -= 1;
         Some(value)
     }
 
     fn resize(&mut self, new_capacity: usize) {
         let (new_k, new_p, new_num_buckets) = Self::calculate_layout(new_capacity);
-        let mut new_data = vec![Default::default(); new_capacity];
-        let mut new_indices = vec![0; new_num_buckets * (new_k + 1)];
+
+        let new_data_layout = Layout::array::<Entry<K, V>>(new_capacity).unwrap();
+        let new_data = unsafe { alloc::alloc(new_data_layout) as *mut Entry<K, V> };
+
+        let new_indices_layout = Layout::array::<u8>(new_num_buckets * (new_k + 1)).unwrap();
+        let new_indices = unsafe { alloc::alloc_zeroed(new_indices_layout) };
+
+        if new_data.is_null() || new_indices.is_null() {
+            panic!("Failed to allocate memory for PoMap resize");
+        }
 
         let old_num_buckets = self.num_buckets;
-        let mut old_data = mem::take(&mut self.data);
-        let old_indices = mem::take(&mut self.indices);
-
-        if old_num_buckets > 0 {
-            for old_bucket_idx in 0..old_num_buckets {
-                let old_data_base = old_bucket_idx * self.k;
-                let old_index_base = old_bucket_idx * (self.k + 1);
-                let old_len = old_indices[old_index_base] as usize;
-
-                let old_index_slice =
-                    &old_indices[old_index_base + 1..old_index_base + 1 + old_len];
-
-                for rel_old_idx in old_index_slice {
-                    let abs_old_idx = old_data_base + *rel_old_idx as usize;
-                    let element = mem::take(&mut old_data[abs_old_idx]);
-                    let new_bucket_idx = (element.hash >> (64 - new_p)) as usize % new_num_buckets;
-                    let new_data_base = new_bucket_idx * new_k;
-                    let new_index_base = new_bucket_idx * (new_k + 1);
-                    let len = new_indices[new_index_base] as usize;
-
-                    // The relative data index is just the current length of the bucket.
-                    let rel_data_idx = len as u8;
-                    new_data[new_data_base + rel_data_idx as usize] = element;
-
-                    // Find insertion point to keep indices sorted by hash
-                    let new_index_slice =
-                        &new_indices[new_index_base + 1..new_index_base + 1 + len];
-                    let insert_pos = match new_index_slice.binary_search_by_key(
-                        &new_data[new_data_base + rel_data_idx as usize].hash,
-                        |rel_idx| new_data[new_data_base + *rel_idx as usize].hash,
-                    ) {
-                        Ok(pos) => pos,
-                        Err(pos) => pos,
-                    };
-
-                    let insert_offset = new_index_base + 1 + insert_pos;
-                    new_indices[insert_offset..new_index_base + 1 + len + 1].rotate_right(1);
-                    new_indices[insert_offset] = rel_data_idx;
-                    new_indices[new_index_base] += 1; // Increment len
-                }
-            }
-        }
+        let old_data = self.data;
+        let old_indices = self.indices;
+        let old_capacity = self.capacity;
+        let old_k = self.k;
 
         self.capacity = new_capacity;
         self.k = new_k;
@@ -323,12 +416,64 @@ impl<K: Hash + Eq + Clone + Default, V: Clone + Default> PoMap<K, V> {
         self.num_buckets = new_num_buckets;
         self.data = new_data;
         self.indices = new_indices;
-    }
-}
 
-impl<K: Hash + Eq + Clone + Default, V: Clone + Default> Default for PoMap<K, V> {
-    fn default() -> Self {
-        Self::new()
+        if old_capacity > 0 {
+            for old_bucket_idx in 0..old_num_buckets {
+                let old_data_base = old_bucket_idx * old_k;
+                let old_index_base = old_bucket_idx * (old_k + 1);
+                let old_len = unsafe { *old_indices.add(old_index_base) } as usize;
+
+                let old_index_slice_start = unsafe { old_indices.add(old_index_base + 1) };
+
+                for i in 0..old_len {
+                    let rel_old_idx = unsafe { *old_index_slice_start.add(i) } as usize;
+                    let abs_old_idx = old_data_base + rel_old_idx;
+                    let element = unsafe { ptr::read(old_data.add(abs_old_idx)) };
+                    let new_bucket_idx = self.get_bucket_idx(element.hash);
+
+                    let new_data_base = new_bucket_idx * self.k;
+                    let new_index_base = new_bucket_idx * (self.k + 1);
+                    let len = unsafe { *self.indices.add(new_index_base) } as usize;
+
+                    // The relative data index is just the current length of the bucket.
+                    let rel_data_idx = len as u8;
+                    unsafe {
+                        self.data
+                            .add(new_data_base + rel_data_idx as usize)
+                            .write(element);
+                    }
+
+                    // Find insertion point to keep indices sorted by hash
+                    let new_index_slice_start = unsafe { self.indices.add(new_index_base + 1) };
+                    let insert_pos = unsafe {
+                        let slice = std::slice::from_raw_parts(new_index_slice_start, len);
+                        let hash_to_insert =
+                            (*self.data.add(new_data_base + rel_data_idx as usize)).hash;
+                        match slice.binary_search_by_key(&hash_to_insert, |rel_idx| {
+                            (*self.data.add(new_data_base + *rel_idx as usize)).hash
+                        }) {
+                            Ok(pos) => pos,
+                            Err(pos) => pos,
+                        }
+                    };
+
+                    let insert_offset = new_index_base + 1 + insert_pos;
+                    unsafe {
+                        let slice_ptr = self.indices.add(insert_offset);
+                        ptr::copy(slice_ptr, slice_ptr.add(1), len - insert_pos);
+                        *slice_ptr = rel_data_idx;
+                        *self.indices.add(new_index_base) += 1; // Increment len
+                    }
+                }
+            }
+
+            // Deallocate old memory
+            let old_data_layout = Layout::array::<Entry<K, V>>(old_capacity).unwrap();
+            unsafe { alloc::dealloc(old_data as *mut u8, old_data_layout) };
+
+            let old_indices_layout = Layout::array::<u8>(old_num_buckets * (old_k + 1)).unwrap();
+            unsafe { alloc::dealloc(old_indices, old_indices_layout) };
+        }
     }
 }
 
@@ -452,7 +597,7 @@ mod tests {
         }
     }
 
-    #[derive(Debug, Clone, Eq, Default)]
+    #[derive(Debug, Clone, Eq)]
     struct CollidingKey {
         val: u64,
         hash: u64,
