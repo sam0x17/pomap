@@ -209,12 +209,30 @@ impl<K: Hash + Eq + Clone + Default, V: Clone + Default> PoMap<K, V> {
         let (abs_idx_to_remove, index_pos_to_remove) =
             self.find_key_in_bucket(bucket_idx, key, hash)?;
 
+        // The value to be returned
         let value = mem::take(&mut self.data[abs_idx_to_remove].value);
-        // We don't need to clear the whole entry, just the value.
-        // The slot will be overwritten by a new entry or ignored based on length.
 
+        let data_base = bucket_idx * self.k;
         let index_base = bucket_idx * (self.k + 1);
         let len = self.indices[index_base] as usize;
+        let rel_idx_to_remove = (abs_idx_to_remove - data_base) as u8;
+
+        // Shift data elements to the left to fill the gap.
+        // This is a small local shift, so a simple loop is fine.
+        for i in abs_idx_to_remove..(data_base + len - 1) {
+            self.data[i] = mem::take(&mut self.data[i + 1]);
+        }
+
+        // Update indices that pointed to shifted elements.
+        // Any index greater than the one we removed needs to be decremented.
+        let index_slice = &mut self.indices[index_base + 1..index_base + 1 + len];
+        for rel_idx in index_slice.iter_mut() {
+            if *rel_idx > rel_idx_to_remove {
+                *rel_idx -= 1;
+            }
+        }
+
+        // Now, remove the index from the sorted index list
         let index_slice_start = index_base + 1 + index_pos_to_remove;
         let index_slice_end = index_base + 1 + len;
 
