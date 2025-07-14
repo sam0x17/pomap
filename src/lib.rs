@@ -17,7 +17,14 @@ struct Entry<K: Hash + Eq + Clone, V: Clone> {
 /// A Prefix-Ordered Hash Map (PoMap).
 ///
 /// This map uses a cache-conscious, array-based layout to provide fast lookups
-/// and an elegant, single-pass resize operation.
+/// and an elegant, single-pass resize operation. It is implemented using manually
+/// allocated memory, giving it the same performance characteristics as `Vec`
+/// without requiring `K: Default` or `V: Default` trait bounds.
+///
+/// The core idea is to partition the key space by the top `p` bits of their hash.
+/// These partitions are called buckets. Each bucket has a capacity of `k`, where
+/// `k` is `log(capacity)`. Within each bucket, entries are kept sorted by their
+/// full hash value, allowing for binary search during lookups and insertions.
 #[derive(Clone, Debug)]
 pub struct PoMap<K: Hash + Eq + Clone, V: Clone> {
     capacity: usize,
@@ -78,6 +85,16 @@ impl<K: Hash + Eq + Clone, V: Clone> Default for PoMap<K, V> {
 }
 
 impl<K: Hash + Eq + Clone, V: Clone> PoMap<K, V> {
+    /// Creates an empty `PoMap`.
+    ///
+    /// The map will not allocate until the first element is inserted.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use pomap::PoMap;
+    /// let mut map: PoMap<&str, i32> = PoMap::new();
+    /// ```
     pub fn new() -> Self {
         Self {
             p: 0,
@@ -92,38 +109,77 @@ impl<K: Hash + Eq + Clone, V: Clone> PoMap<K, V> {
     }
 
     /// Clears the map, removing all key-value pairs while retaining the allocated capacity.
+    ///
+    /// # Time Complexity
+    ///
+    /// `O(N)` where N is the number of elements, because it must drop each element.
+    /// If the key and value types do not need to be dropped (e.g., are `Copy`),
+    /// the complexity is `O(1)` because it can zero out the index memory directly.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use pomap::PoMap;
+    /// let mut map = PoMap::new();
+    /// map.insert("a", 1);
+    /// map.clear();
+    /// assert!(map.is_empty());
+    /// ```
     pub fn clear(&mut self) {
         if self.len == 0 {
             return;
         }
 
-        // Drop all valid entries in place.
-        for bucket_idx in 0..self.num_buckets {
-            let index_base = bucket_idx * (self.k + 1);
-            let len = unsafe { *self.indices.add(index_base) } as usize;
-            if len == 0 {
-                continue;
-            }
+        if std::mem::needs_drop::<Entry<K, V>>() {
+            // Drop all valid entries in place.
+            for bucket_idx in 0..self.num_buckets {
+                let index_base = bucket_idx * (self.k + 1);
+                let len = unsafe { *self.indices.add(index_base) } as usize;
+                if len == 0 {
+                    continue;
+                }
 
-            let data_base = bucket_idx * self.k;
-            let index_slice_start = unsafe { self.indices.add(index_base + 1) };
+                let data_base = bucket_idx * self.k;
+                let index_slice_start = unsafe { self.indices.add(index_base + 1) };
 
-            for i in 0..len {
-                let rel_idx = unsafe { *index_slice_start.add(i) } as usize;
-                let abs_idx = data_base + rel_idx;
+                for i in 0..len {
+                    let rel_idx = unsafe { *index_slice_start.add(i) } as usize;
+                    let abs_idx = data_base + rel_idx;
+                    unsafe {
+                        ptr::drop_in_place(self.data.add(abs_idx));
+                    }
+                }
+                // Reset bucket length.
                 unsafe {
-                    ptr::drop_in_place(self.data.add(abs_idx));
+                    *self.indices.add(index_base) = 0;
                 }
             }
-            // Reset bucket length.
+        } else {
+            // If no elements need dropping, we can just zero out the indices array.
+            // This is much faster as it avoids iterating through individual elements.
+            let indices_byte_size = self.num_buckets * (self.k + 1);
             unsafe {
-                *self.indices.add(index_base) = 0;
+                ptr::write_bytes(self.indices, 0, indices_byte_size);
             }
         }
+
         self.len = 0;
     }
 
-    /// Creates a new PoMap with a specified initial capacity.
+    /// Creates an empty `PoMap` with at least the specified capacity.
+    ///
+    /// The map will be able to hold at least `capacity` elements without
+    /// reallocating. If `capacity` is 0, the map will not allocate.
+    ///
+    /// The actual capacity will be the next power of two.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use pomap::PoMap;
+    /// let mut map: PoMap<&str, i32> = PoMap::with_capacity(10);
+    /// assert!(map.capacity() >= 10);
+    /// ```
     pub fn with_capacity(capacity: usize) -> Self {
         if capacity == 0 {
             return Self::new();
@@ -186,14 +242,44 @@ impl<K: Hash + Eq + Clone, V: Clone> PoMap<K, V> {
     }
 
     /// Returns the number of elements in the map.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use pomap::PoMap;
+    /// let mut map = PoMap::new();
+    /// assert_eq!(map.len(), 0);
+    /// map.insert("a", 1);
+    /// assert_eq!(map.len(), 1);
+    /// ```
     pub fn len(&self) -> usize {
         self.len
     }
 
+    /// Returns `true` if the map contains no elements.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use pomap::PoMap;
+    /// let mut map = PoMap::new();
+    /// assert!(map.is_empty());
+    /// map.insert("a", 1);
+    /// assert!(!map.is_empty());
+    /// ```
     pub fn is_empty(&self) -> bool {
         self.len == 0
     }
 
+    /// Returns the number of elements the map can hold without reallocating.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use pomap::PoMap;
+    /// let map: PoMap<i32, i32> = PoMap::with_capacity(10);
+    /// assert!(map.capacity() >= 10);
+    /// ```
     pub fn capacity(&self) -> usize {
         self.capacity
     }
@@ -248,6 +334,41 @@ impl<K: Hash + Eq + Clone, V: Clone> PoMap<K, V> {
         None
     }
 
+    /// Inserts a key-value pair into the map.
+    ///
+    /// If the map did not have this key present, `None` is returned.
+    ///
+    /// If the map did have this key present, the value is updated, and the old
+    /// value is returned. The key is not updated, though; this matters for
+    /// types that can be `==` without being identical.
+    ///
+    /// # Time Complexity
+    ///
+    /// The average time complexity is `O(log N)` where N is the number of elements in the map.
+    /// This is because finding the insertion point involves a binary search within a bucket
+    /// of size `log(N)`, followed by shifting elements within that bucket.
+    ///
+    /// The worst-case complexity is also `O(log N)`, unless there are many hash collisions,
+    /// in which case the linear scan for the correct key can dominate.
+    ///
+    /// When insertion triggers a resize, the complexity is `O(N)`, but this is amortized
+    /// to `O(log N)` over many insertions.
+    ///
+    /// It is worth noting that the resize operation is particularly efficient and runs in a
+    /// single linear scan.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use pomap::PoMap;
+    /// let mut map = PoMap::new();
+    /// assert_eq!(map.insert("a", 1), None);
+    /// assert!(!map.is_empty());
+    ///
+    /// map.insert("a", 2);
+    /// assert_eq!(map.insert("a", 3), Some(2));
+    /// assert_eq!(map.get(&"a"), Some(&3));
+    /// ```
     pub fn insert(&mut self, key: K, value: V) -> Option<V> {
         // --- Resize Logic ---
         // Stage 1: Check if we need to resize due to the load factor.
@@ -321,6 +442,25 @@ impl<K: Hash + Eq + Clone, V: Clone> PoMap<K, V> {
         None
     }
 
+    /// Returns a reference to the value corresponding to the key.
+    ///
+    /// # Time Complexity
+    ///
+    /// The average time complexity is `O(log(log N))` where N is the number of elements.
+    /// This is because lookup is a binary search within a bucket of size `log(N)`.
+    ///
+    /// The worst-case complexity due to hash collisions is `O(log N)`, as it may require
+    /// scanning the entire bucket.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use pomap::PoMap;
+    /// let mut map = PoMap::new();
+    /// map.insert("a", 1);
+    /// assert_eq!(map.get(&"a"), Some(&1));
+    /// assert_eq!(map.get(&"b"), None);
+    /// ```
     pub fn get(&self, key: &K) -> Option<&V> {
         if self.is_empty() {
             return None;
@@ -332,6 +472,24 @@ impl<K: Hash + Eq + Clone, V: Clone> PoMap<K, V> {
             .map(|(abs_idx, _)| unsafe { &(*self.data.add(abs_idx)).value })
     }
 
+    /// Removes a key from the map, returning the value at the key if the key
+    /// was previously in the map.
+    ///
+    /// # Time Complexity
+    ///
+    /// The average and worst-case time complexity is `O(log N)` where N is the number of elements.
+    /// This is because `remove` must find the element (a `O(log(log N))` binary search) and then
+    /// compact the data and index arrays by shifting elements, which takes `O(log N)` time.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use pomap::PoMap;
+    /// let mut map = PoMap::new();
+    /// map.insert("a", 1);
+    /// assert_eq!(map.remove(&"a"), Some(1));
+    /// assert_eq!(map.remove(&"a"), None);
+    /// ```
     pub fn remove(&mut self, key: &K) -> Option<V> {
         if self.is_empty() {
             return None;
