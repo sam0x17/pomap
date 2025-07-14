@@ -38,8 +38,8 @@ impl<K: Hash + Eq + Clone, V: Clone> Drop for PoMap<K, V> {
             return;
         }
 
-        // Drop all valid entries in place.
-        if self.len > 0 {
+        // Drop all valid entries in place, but only if the type actually needs dropping.
+        if self.len > 0 && std::mem::needs_drop::<Entry<K, V>>() {
             for bucket_idx in 0..self.num_buckets {
                 let index_base = bucket_idx * (self.k + 1);
                 let len = unsafe { *self.indices.add(index_base) } as usize;
