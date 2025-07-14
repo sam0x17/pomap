@@ -5,8 +5,8 @@ use std::mem;
 const LOAD_FACTOR: f64 = 0.75;
 
 /// Internal structure used to hold entries in the [`PoMap`].
-#[derive(Clone, Debug)]
-struct Entry<K: Hash + Eq + Clone, V: Clone> {
+#[derive(Clone, Debug, Default)]
+struct Entry<K: Hash + Eq + Clone + Default, V: Clone + Default> {
     key: K,
     value: V,
     hash: u64,
@@ -17,19 +17,19 @@ struct Entry<K: Hash + Eq + Clone, V: Clone> {
 /// This map uses a cache-conscious, array-based layout to provide fast lookups
 /// and an elegant, single-pass resize operation.
 #[derive(Clone, Debug)]
-pub struct PoMap<K: Hash + Eq + Clone, V: Clone> {
+pub struct PoMap<K: Hash + Eq + Clone + Default, V: Clone + Default> {
     capacity: usize,
     len: usize,
     k: usize, // Bucket size: K = log(capacity)
     p: u32,   // Number of prefix bits
     num_buckets: usize,
-    data: Vec<Option<Entry<K, V>>>,
+    data: Vec<Entry<K, V>>,
     // Index buckets are length-prefixed. The first u8 is the length,
     // followed by K u8 relative offsets.
     indices: Vec<u8>,
 }
 
-impl<K: Hash + Eq + Clone, V: Clone> PoMap<K, V> {
+impl<K: Hash + Eq + Clone + Default, V: Clone + Default> PoMap<K, V> {
     /// Creates a new, empty PoMap.
     pub fn new() -> Self {
         Self::with_capacity(0)
@@ -55,7 +55,7 @@ impl<K: Hash + Eq + Clone, V: Clone> PoMap<K, V> {
             k,
             p,
             num_buckets,
-            data: vec![None; capacity],
+            data: vec![Default::default(); capacity],
             // Each bucket gets K slots for indices + 1 slot for its length.
             indices: vec![0; num_buckets * (k + 1)],
         }
@@ -106,11 +106,10 @@ impl<K: Hash + Eq + Clone, V: Clone> PoMap<K, V> {
 
         for (i, rel_idx) in index_slice.iter().enumerate() {
             let abs_idx = data_base + *rel_idx as usize;
-            if let Some(entry) = &self.data[abs_idx] {
-                if entry.hash == hash && entry.key == *key {
-                    // Return absolute data index and position within the index slice
-                    return Some((abs_idx, i));
-                }
+            let entry = &self.data[abs_idx];
+            if entry.hash == hash && entry.key == *key {
+                // Return absolute data index and position within the index slice
+                return Some((abs_idx, i));
             }
         }
         None
@@ -130,10 +129,7 @@ impl<K: Hash + Eq + Clone, V: Clone> PoMap<K, V> {
         let bucket_idx = self.get_bucket_idx(hash);
 
         if let Some((abs_idx, _)) = self.find_key_in_bucket(bucket_idx, &key, hash) {
-            return Some(mem::replace(
-                &mut self.data[abs_idx].as_mut().unwrap().value,
-                value,
-            ));
+            return Some(mem::replace(&mut self.data[abs_idx].value, value));
         }
 
         let data_base = bucket_idx * self.k;
@@ -145,24 +141,14 @@ impl<K: Hash + Eq + Clone, V: Clone> PoMap<K, V> {
             return self.insert(key, value);
         }
 
-        let mut rel_data_idx: Option<u8> = None;
-        for i in 0..self.k {
-            if self.data[data_base + i].is_none() {
-                rel_data_idx = Some(i as u8);
-                break;
-            }
-        }
-        let rel_data_idx = rel_data_idx.unwrap(); // Should always find a slot if len < k
-
-        self.data[data_base + rel_data_idx as usize] = Some(Entry { key, value, hash });
+        // The relative data index is just the current length of the bucket.
+        let rel_data_idx = len as u8;
+        self.data[data_base + rel_data_idx as usize] = Entry { key, value, hash };
 
         let index_slice = &self.indices[index_base + 1..index_base + 1 + len];
         let mut insert_pos = len;
         for (i, existing_rel_idx) in index_slice.iter().enumerate() {
-            let existing_hash = self.data[data_base + *existing_rel_idx as usize]
-                .as_ref()
-                .unwrap()
-                .hash;
+            let existing_hash = self.data[data_base + *existing_rel_idx as usize].hash;
             if hash < existing_hash {
                 insert_pos = i;
                 break;
@@ -185,7 +171,7 @@ impl<K: Hash + Eq + Clone, V: Clone> PoMap<K, V> {
         let bucket_idx = self.get_bucket_idx(hash);
 
         self.find_key_in_bucket(bucket_idx, key, hash)
-            .and_then(|(abs_idx, _)| self.data[abs_idx].as_ref().map(|e| &e.value))
+            .map(|(abs_idx, _)| &self.data[abs_idx].value)
     }
 
     pub fn remove(&mut self, key: &K) -> Option<V> {
@@ -198,7 +184,9 @@ impl<K: Hash + Eq + Clone, V: Clone> PoMap<K, V> {
         let (abs_idx_to_remove, index_pos_to_remove) =
             self.find_key_in_bucket(bucket_idx, key, hash)?;
 
-        let removed_entry = self.data[abs_idx_to_remove].take().unwrap();
+        let value = mem::take(&mut self.data[abs_idx_to_remove].value);
+        // We don't need to clear the whole entry, just the value.
+        // The slot will be overwritten by a new entry or ignored based on length.
 
         let index_base = bucket_idx * (self.k + 1);
         let len = self.indices[index_base] as usize;
@@ -209,15 +197,15 @@ impl<K: Hash + Eq + Clone, V: Clone> PoMap<K, V> {
 
         self.indices[index_base] -= 1; // Decrement length
         self.len -= 1;
-        Some(removed_entry.value)
+        Some(value)
     }
 
     fn resize(&mut self, new_capacity: usize) {
         let (new_k, new_p, new_num_buckets) = Self::calculate_layout(new_capacity);
-        let mut new_data = vec![None; new_capacity];
+        let mut new_data = vec![Default::default(); new_capacity];
         let mut new_indices = vec![0; new_num_buckets * (new_k + 1)];
 
-        let old_data = mem::take(&mut self.data);
+        let mut old_data = mem::take(&mut self.data);
         let old_indices = mem::take(&mut self.indices);
 
         if self.num_buckets > 0 {
@@ -231,22 +219,33 @@ impl<K: Hash + Eq + Clone, V: Clone> PoMap<K, V> {
 
                 for rel_old_idx in old_index_slice {
                     let abs_old_idx = old_data_base + *rel_old_idx as usize;
+                    let element = mem::take(&mut old_data[abs_old_idx]);
+                    let new_bucket_idx = (element.hash >> (64 - new_p)) as usize % new_num_buckets;
+                    let new_data_base = new_bucket_idx * new_k;
+                    let new_index_base = new_bucket_idx * (new_k + 1);
+                    let len = new_indices[new_index_base] as usize;
 
-                    if let Some(element) = &old_data[abs_old_idx] {
-                        let new_bucket_idx =
-                            (element.hash >> (64 - new_p)) as usize % new_num_buckets;
-                        let new_data_base = new_bucket_idx * new_k;
-                        let new_index_base = new_bucket_idx * (new_k + 1);
+                    // The relative data index is just the current length of the bucket.
+                    let rel_data_idx = len as u8;
+                    new_data[new_data_base + rel_data_idx as usize] = element;
 
-                        let rel_data_idx = new_indices[new_index_base]; // current len is next free slot
-                        let abs_new_data_idx = new_data_base + rel_data_idx as usize;
-                        new_data[abs_new_data_idx] = Some(element.clone());
-
-                        let rel_index_pos = new_indices[new_index_base];
-                        let abs_new_index_pos = new_index_base + 1 + rel_index_pos as usize;
-                        new_indices[abs_new_index_pos] = rel_data_idx;
-                        new_indices[new_index_base] += 1; // Increment len
+                    // Find insertion point to keep indices sorted by hash
+                    let new_index_slice =
+                        &new_indices[new_index_base + 1..new_index_base + 1 + len];
+                    let mut insert_pos = len;
+                    for (i, existing_rel_idx) in new_index_slice.iter().enumerate() {
+                        let existing_hash =
+                            new_data[new_data_base + *existing_rel_idx as usize].hash;
+                        if new_data[new_data_base + rel_data_idx as usize].hash < existing_hash {
+                            insert_pos = i;
+                            break;
+                        }
                     }
+
+                    let insert_offset = new_index_base + 1 + insert_pos;
+                    new_indices[insert_offset..new_index_base + 1 + len + 1].rotate_right(1);
+                    new_indices[insert_offset] = rel_data_idx;
+                    new_indices[new_index_base] += 1; // Increment len
                 }
             }
         }
