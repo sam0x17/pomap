@@ -25,7 +25,7 @@ struct Entry<K: Hash + Eq + Clone, V: Clone> {
 /// These partitions are called buckets. Each bucket has a capacity of `k`, where
 /// `k` is `log(capacity)`. Within each bucket, entries are kept sorted by their
 /// full hash value, allowing for binary search during lookups and insertions.
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub struct PoMap<K: Hash + Eq + Clone, V: Clone> {
     capacity: usize,
     len: usize,
@@ -37,6 +37,72 @@ pub struct PoMap<K: Hash + Eq + Clone, V: Clone> {
     // followed by K u8 relative offsets.
     indices: *mut u8,
     _marker: PhantomData<(K, V)>,
+}
+
+impl<K: Hash + Eq + Clone, V: Clone> Clone for PoMap<K, V> {
+    fn clone(&self) -> Self {
+        if self.capacity == 0 {
+            return Self::new();
+        }
+
+        let new_capacity = self.capacity;
+        let (k, p, num_buckets) = Self::calculate_layout(new_capacity);
+
+        let new_data = unsafe {
+            let layout = Layout::array::<Entry<K, V>>(new_capacity).unwrap();
+            alloc::alloc(layout) as *mut Entry<K, V>
+        };
+
+        let indices_byte_size = num_buckets * (k + 1);
+        let new_indices = unsafe {
+            let layout = Layout::array::<u8>(indices_byte_size).unwrap();
+            alloc::alloc(layout)
+        };
+
+        if new_data.is_null() || new_indices.is_null() {
+            panic!("memory allocation failed for clone");
+        }
+
+        // Copy the indices memory directly.
+        unsafe {
+            ptr::copy_nonoverlapping(self.indices, new_indices, indices_byte_size);
+        }
+
+        // Clone each element in the data array.
+        if self.len > 0 {
+            for bucket_idx in 0..self.num_buckets {
+                let index_base = bucket_idx * (self.k + 1);
+                let len = unsafe { *self.indices.add(index_base) } as usize;
+                if len == 0 {
+                    continue;
+                }
+
+                let data_base = bucket_idx * self.k;
+                let index_slice_start = unsafe { self.indices.add(index_base + 1) };
+
+                for i in 0..len {
+                    let rel_idx = unsafe { *index_slice_start.add(i) } as usize;
+                    let abs_idx = data_base + rel_idx;
+                    unsafe {
+                        let original_entry = self.data.add(abs_idx);
+                        let new_entry = new_data.add(abs_idx);
+                        ptr::write(new_entry, (*original_entry).clone());
+                    }
+                }
+            }
+        }
+
+        Self {
+            capacity: new_capacity,
+            len: self.len,
+            k,
+            p,
+            num_buckets,
+            data: new_data,
+            indices: new_indices,
+            _marker: PhantomData,
+        }
+    }
 }
 
 impl<K: Hash + Eq + Clone, V: Clone> Drop for PoMap<K, V> {
@@ -880,5 +946,112 @@ mod tests {
         assert_eq!(map.len(), 1);
         assert_eq!(map.capacity(), 16);
         assert_eq!(map.get(&1), Some(&1));
+    }
+
+    #[test]
+    fn test_clone() {
+        let mut map = PoMap::new();
+        map.insert("a", 1);
+        map.insert("b", 2);
+
+        let mut clone = map.clone();
+        assert_eq!(clone.len(), 2);
+        assert_eq!(clone.get(&"a"), Some(&1));
+        assert_eq!(clone.get(&"b"), Some(&2));
+
+        // Modify the clone and check that the original is unaffected
+        clone.insert("c", 3);
+        clone.remove(&"a");
+        assert_eq!(map.len(), 2);
+        assert_eq!(map.get(&"a"), Some(&1));
+        assert_eq!(map.get(&"c"), None);
+
+        // Modify the original and check that the clone is unaffected
+        map.insert("d", 4);
+        assert_eq!(clone.len(), 2);
+        assert_eq!(clone.get(&"d"), None);
+    }
+
+    #[test]
+    fn test_zero_sized_types() {
+        // Test with ZST value
+        let mut map_zst_val = PoMap::new();
+        map_zst_val.insert(1, ());
+        map_zst_val.insert(2, ());
+        assert_eq!(map_zst_val.len(), 2);
+        assert_eq!(map_zst_val.get(&1), Some(&()));
+        assert_eq!(map_zst_val.remove(&1), Some(()));
+        assert_eq!(map_zst_val.len(), 1);
+        assert_eq!(map_zst_val.get(&2), Some(&()));
+
+        // Test with ZST key
+        // Since all keys are equal, it can only hold one item.
+        let mut map_zst_key: PoMap<(), i32> = PoMap::new();
+        assert_eq!(map_zst_key.insert((), 100), None);
+        assert_eq!(map_zst_key.len(), 1);
+        assert_eq!(map_zst_key.insert((), 200), Some(100));
+        assert_eq!(map_zst_key.len(), 1);
+        assert_eq!(map_zst_key.get(&()), Some(&200));
+    }
+
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+
+    #[derive(Clone, Debug)]
+    struct DropCounter {
+        id: i32,
+        counter: Arc<AtomicUsize>,
+    }
+
+    impl Drop for DropCounter {
+        fn drop(&mut self) {
+            self.counter.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    impl PartialEq for DropCounter {
+        fn eq(&self, other: &Self) -> bool {
+            self.id == other.id
+        }
+    }
+
+    #[test]
+    fn test_drop_behavior() {
+        let counter = Arc::new(AtomicUsize::new(0));
+
+        {
+            let mut map = PoMap::new();
+            let make_droppable = |id| DropCounter {
+                id,
+                counter: Arc::clone(&counter),
+            };
+
+            // 1. Test drop on insert (overwrite)
+            map.insert("a", make_droppable(1));
+            assert_eq!(counter.load(Ordering::SeqCst), 0);
+            map.insert("a", make_droppable(2)); // Overwrites key "a", should drop value 1
+            assert_eq!(counter.load(Ordering::SeqCst), 1);
+
+            // 2. Test drop on remove
+            map.insert("b", make_droppable(3));
+            assert_eq!(counter.load(Ordering::SeqCst), 1);
+            map.remove(&"b"); // Removes key "b", should drop value 3
+            assert_eq!(counter.load(Ordering::SeqCst), 2);
+
+            // 3. Test drop on clear
+            map.insert("c", make_droppable(4));
+            map.insert("d", make_droppable(5));
+            assert_eq!(counter.load(Ordering::SeqCst), 2);
+            map.clear(); // Should drop values 2, 4, 5
+            assert_eq!(counter.load(Ordering::SeqCst), 5);
+            assert_eq!(map.len(), 0);
+
+            // 4. Test drop on PoMap::drop
+            map.insert("e", make_droppable(6));
+            map.insert("f", make_droppable(7));
+        } // map goes out of scope here
+
+        // Should drop values 6, 7
+        assert_eq!(counter.load(Ordering::SeqCst), 7);
     }
 }
