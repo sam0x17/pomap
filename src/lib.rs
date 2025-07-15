@@ -994,8 +994,8 @@ mod tests {
         assert_eq!(map_zst_key.get(&()), Some(&200));
     }
 
-    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     #[derive(Clone, Debug)]
     struct DropCounter {
