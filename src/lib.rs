@@ -1054,4 +1054,67 @@ mod tests {
         // Should drop values 6, 7
         assert_eq!(counter.load(Ordering::SeqCst), 7);
     }
+
+    #[test]
+    fn test_performance_vs_std_hashmap() {
+        use std::collections::HashMap;
+        use std::time::Instant;
+
+        let num_items = 1_000_000;
+        let mut items: Vec<(i32, i32)> = (0..num_items).map(|i| (i, i * 10)).collect();
+
+        // Simple shuffle to make access less predictable
+        for i in 0..items.len() {
+            let j = (i * 13) % items.len();
+            items.swap(i, j);
+        }
+
+        // --- PoMap Benchmark ---
+        println!("\n--- Benchmarking PoMap ---");
+        let mut pomap = PoMap::with_capacity(0);
+        let start = Instant::now();
+        for (k, v) in &items {
+            pomap.insert(*k, *v);
+        }
+        let duration = start.elapsed();
+        println!("PoMap insert {} items: {:?}", num_items, duration);
+
+        let start = Instant::now();
+        for (k, v) in &items {
+            assert_eq!(pomap.get(k), Some(v));
+        }
+        let duration = start.elapsed();
+        println!("PoMap get {} items:    {:?}", num_items, duration);
+
+        let start = Instant::now();
+        for (k, v) in &items {
+            assert_eq!(pomap.remove(k), Some(*v));
+        }
+        let duration = start.elapsed();
+        println!("PoMap remove {} items: {:?}", num_items, duration);
+
+        // --- std::collections::HashMap Benchmark ---
+        println!("\n--- Benchmarking std::collections::HashMap ---");
+        let mut hashmap = HashMap::with_capacity(0);
+        let start = Instant::now();
+        for (k, v) in &items {
+            hashmap.insert(*k, *v);
+        }
+        let duration = start.elapsed();
+        println!("HashMap insert {} items: {:?}", num_items, duration);
+
+        let start = Instant::now();
+        for (k, v) in &items {
+            assert_eq!(hashmap.get(k), Some(v));
+        }
+        let duration = start.elapsed();
+        println!("HashMap get {} items:    {:?}", num_items, duration);
+
+        let start = Instant::now();
+        for (k, v) in &items {
+            assert_eq!(hashmap.remove(k), Some(*v));
+        }
+        let duration = start.elapsed();
+        println!("HashMap remove {} items: {:?}", num_items, duration);
+    }
 }
