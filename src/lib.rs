@@ -1,17 +1,46 @@
 use std::alloc::{self, Layout};
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
-use std::marker::PhantomData;
 use std::ptr;
+use wide::u64x4;
+
+mod simd;
 
 const LOAD_FACTOR: f64 = 0.75;
+const WIDE_LEN: usize = core::mem::size_of::<u64x4>() / core::mem::size_of::<u64>();
 
 /// Internal structure used to hold entries in the [`PoMap`].
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Default)]
 struct Entry<K: Hash + Eq + Clone, V: Clone> {
     key: K,
     value: V,
-    hash: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Default)]
+struct Bucket<K: Hash + Eq + Clone, V: Clone> {
+    hashes: u64x4,
+    entries: [Entry<K, V>; WIDE_LEN],
+}
+
+#[inline(always)]
+fn find_match_index(vec: u64x4, target: u64) -> Option<usize> {
+    // lane = 0xFFFF_FFFF_FFFF_FFFF if equal, else 0
+    let cmp = vec.cmp_eq(u64x4::splat(target));
+
+    // pull the top bit of each lane (now 0 or 1)
+    let hi_bits: u64x4 = cmp >> 63; // shift by *scalar* 63, OK
+
+    // convert to array so we can collapse to one byte
+    let a = hi_bits.to_array(); // [u64; 4], each element 0 or 1
+
+    // pack into a 4‑bit mask: bit i == 1 if lane i matched
+    let mask: u8 = (a[0] as u8) | ((a[1] as u8) << 1) | ((a[2] as u8) << 2) | ((a[3] as u8) << 3);
+
+    if mask == 0 {
+        None
+    } else {
+        Some(mask.trailing_zeros() as usize)
+    }
 }
 
 /// A Prefix-Ordered Hash Map (PoMap).
@@ -25,129 +54,11 @@ struct Entry<K: Hash + Eq + Clone, V: Clone> {
 /// These partitions are called buckets. Each bucket has a capacity of `k`, where
 /// `k` is `log(capacity)`. Within each bucket, entries are kept sorted by their
 /// full hash value, allowing for binary search during lookups and insertions.
-#[derive(Debug)]
+#[derive(Clone, Debug, PartialEq, Eq, Default)]
 pub struct PoMap<K: Hash + Eq + Clone, V: Clone> {
-    capacity: usize,
+    p: u8, // Number of prefix bits
     len: usize,
-    k: usize, // Bucket size: K = log(capacity)
-    p: u32,   // Number of prefix bits
-    num_buckets: usize,
-    data: *mut Entry<K, V>,
-    // Index buckets are length-prefixed. The first u8 is the length,
-    // followed by K u8 relative offsets.
-    indices: *mut u8,
-    _marker: PhantomData<(K, V)>,
-}
-
-impl<K: Hash + Eq + Clone, V: Clone> Clone for PoMap<K, V> {
-    fn clone(&self) -> Self {
-        if self.capacity == 0 {
-            return Self::new();
-        }
-
-        let new_capacity = self.capacity;
-        let (k, p, num_buckets) = Self::calculate_layout(new_capacity);
-
-        let new_data = unsafe {
-            let layout = Layout::array::<Entry<K, V>>(new_capacity).unwrap();
-            alloc::alloc(layout) as *mut Entry<K, V>
-        };
-
-        let indices_byte_size = num_buckets * (k + 1);
-        let new_indices = unsafe {
-            let layout = Layout::array::<u8>(indices_byte_size).unwrap();
-            alloc::alloc(layout)
-        };
-
-        if new_data.is_null() || new_indices.is_null() {
-            panic!("memory allocation failed for clone");
-        }
-
-        // Copy the indices memory directly.
-        unsafe {
-            ptr::copy_nonoverlapping(self.indices, new_indices, indices_byte_size);
-        }
-
-        // Clone each element in the data array.
-        if self.len > 0 {
-            for bucket_idx in 0..self.num_buckets {
-                let index_base = bucket_idx * (self.k + 1);
-                let len = unsafe { *self.indices.add(index_base) } as usize;
-                if len == 0 {
-                    continue;
-                }
-
-                let data_base = bucket_idx * self.k;
-                let index_slice_start = unsafe { self.indices.add(index_base + 1) };
-
-                for i in 0..len {
-                    let rel_idx = unsafe { *index_slice_start.add(i) } as usize;
-                    let abs_idx = data_base + rel_idx;
-                    unsafe {
-                        let original_entry = self.data.add(abs_idx);
-                        let new_entry = new_data.add(abs_idx);
-                        ptr::write(new_entry, (*original_entry).clone());
-                    }
-                }
-            }
-        }
-
-        Self {
-            capacity: new_capacity,
-            len: self.len,
-            k,
-            p,
-            num_buckets,
-            data: new_data,
-            indices: new_indices,
-            _marker: PhantomData,
-        }
-    }
-}
-
-impl<K: Hash + Eq + Clone, V: Clone> Drop for PoMap<K, V> {
-    fn drop(&mut self) {
-        if self.capacity == 0 {
-            return;
-        }
-
-        // Drop all valid entries in place, but only if the type actually needs dropping.
-        if self.len > 0 && std::mem::needs_drop::<Entry<K, V>>() {
-            for bucket_idx in 0..self.num_buckets {
-                let index_base = bucket_idx * (self.k + 1);
-                let len = unsafe { *self.indices.add(index_base) } as usize;
-                if len == 0 {
-                    continue;
-                }
-
-                let data_base = bucket_idx * self.k;
-                let index_slice_start = unsafe { self.indices.add(index_base + 1) };
-
-                for i in 0..len {
-                    let rel_idx = unsafe { *index_slice_start.add(i) } as usize;
-                    let abs_idx = data_base + rel_idx;
-                    unsafe {
-                        ptr::drop_in_place(self.data.add(abs_idx));
-                    }
-                }
-            }
-        }
-
-        // Deallocate the memory.
-        unsafe {
-            let data_layout = Layout::array::<Entry<K, V>>(self.capacity).unwrap();
-            alloc::dealloc(self.data as *mut u8, data_layout);
-
-            let indices_layout = Layout::array::<u8>(self.num_buckets * (self.k + 1)).unwrap();
-            alloc::dealloc(self.indices, indices_layout);
-        }
-    }
-}
-
-impl<K: Hash + Eq + Clone, V: Clone> Default for PoMap<K, V> {
-    fn default() -> Self {
-        Self::new()
-    }
+    buckets: Vec<Bucket<K, V>>,
 }
 
 impl<K: Hash + Eq + Clone, V: Clone> PoMap<K, V> {
@@ -164,13 +75,8 @@ impl<K: Hash + Eq + Clone, V: Clone> PoMap<K, V> {
     pub fn new() -> Self {
         Self {
             p: 0,
-            k: 0,
             len: 0,
-            capacity: 0,
-            num_buckets: 0,
-            data: ptr::null_mut(),
-            indices: ptr::null_mut(),
-            _marker: PhantomData,
+            buckets: Vec::new(),
         }
     }
 
@@ -192,43 +98,8 @@ impl<K: Hash + Eq + Clone, V: Clone> PoMap<K, V> {
     /// assert!(map.is_empty());
     /// ```
     pub fn clear(&mut self) {
-        if self.len == 0 {
-            return;
-        }
-
-        if std::mem::needs_drop::<Entry<K, V>>() {
-            // Drop all valid entries in place.
-            for bucket_idx in 0..self.num_buckets {
-                let index_base = bucket_idx * (self.k + 1);
-                let len = unsafe { *self.indices.add(index_base) } as usize;
-                if len == 0 {
-                    continue;
-                }
-
-                let data_base = bucket_idx * self.k;
-                let index_slice_start = unsafe { self.indices.add(index_base + 1) };
-
-                for i in 0..len {
-                    let rel_idx = unsafe { *index_slice_start.add(i) } as usize;
-                    let abs_idx = data_base + rel_idx;
-                    unsafe {
-                        ptr::drop_in_place(self.data.add(abs_idx));
-                    }
-                }
-                // Reset bucket length.
-                unsafe {
-                    *self.indices.add(index_base) = 0;
-                }
-            }
-        } else {
-            // If no elements need dropping, we can just zero out the indices array.
-            // This is much faster as it avoids iterating through individual elements.
-            let indices_byte_size = self.num_buckets * (self.k + 1);
-            unsafe {
-                ptr::write_bytes(self.indices, 0, indices_byte_size);
-            }
-        }
-
+        self.buckets.clear();
+        self.p = 0;
         self.len = 0;
     }
 
@@ -247,64 +118,27 @@ impl<K: Hash + Eq + Clone, V: Clone> PoMap<K, V> {
     /// assert!(map.capacity() >= 10);
     /// ```
     pub fn with_capacity(capacity: usize) -> Self {
-        if capacity == 0 {
-            return Self::new();
-        }
-        let capacity = capacity.next_power_of_two();
-        let (k, p, num_buckets) = Self::calculate_layout(capacity);
-
-        let data = unsafe {
-            let layout = Layout::array::<Entry<K, V>>(capacity).unwrap();
-            alloc::alloc(layout) as *mut Entry<K, V>
-        };
-
-        let indices = unsafe {
-            let layout = Layout::array::<u8>(num_buckets * (k + 1)).unwrap();
-            alloc::alloc_zeroed(layout)
-        };
-
-        if data.is_null() || indices.is_null() {
-            panic!("memory allocation failed");
-        }
-
         Self {
-            p,
-            k,
+            p: 0,
             len: 0,
-            capacity,
-            num_buckets,
-            data,
-            indices,
-            _marker: PhantomData,
+            buckets: Vec::with_capacity(capacity),
         }
     }
 
-    fn calculate_layout(capacity: usize) -> (usize, u32, usize) {
-        if capacity == 0 {
-            return (0, 0, 0);
-        }
-        // Clamp to 255 so the length prefix `k` can also be stored in a u8.
-        let k = (capacity.ilog2() as usize).clamp(1, 255);
-        let num_buckets = capacity / k;
-        let p = if num_buckets > 0 {
-            num_buckets.ilog2()
-        } else {
-            0
-        };
-        (k, p, num_buckets)
-    }
-
+    #[inline(always)]
     fn hash_key(key: &K) -> u64 {
         let mut hasher = DefaultHasher::new();
         key.hash(&mut hasher);
         hasher.finish()
     }
 
+    #[inline(always)]
     fn get_bucket_idx(&self, hash: u64) -> usize {
-        if self.num_buckets == 0 {
+        let num_buckets = self.buckets.len();
+        if num_buckets == 0 {
             return 0;
         }
-        (hash >> (64 - self.p)) as usize % self.num_buckets
+        (hash >> (64 - self.p)) as usize % num_buckets
     }
 
     /// Returns the number of elements in the map.
@@ -347,57 +181,23 @@ impl<K: Hash + Eq + Clone, V: Clone> PoMap<K, V> {
     /// assert!(map.capacity() >= 10);
     /// ```
     pub fn capacity(&self) -> usize {
-        self.capacity
+        self.buckets.capacity() * WIDE_LEN
     }
 
-    fn find_key_in_bucket(&self, bucket_idx: usize, key: &K, hash: u64) -> Option<(usize, usize)> {
-        let data_base = bucket_idx * self.k;
-        let index_base = bucket_idx * (self.k + 1);
-        let len = unsafe { *self.indices.add(index_base) } as usize;
+    #[inline(always)]
+    fn find_index_in_u64x4(vec: u64x4, target: u64) -> Option<usize> {
+        let mask: Mask64x4 = vec.lanes_eq(u64x4::splat(target));
 
-        let index_slice_start = unsafe { self.indices.add(index_base + 1) };
+        let bitmask = ((mask.test(0) as u8) << 0)
+            | ((mask.test(1) as u8) << 1)
+            | ((mask.test(2) as u8) << 2)
+            | ((mask.test(3) as u8) << 3);
 
-        // Since the index is sorted by hash, we can use binary search.
-        let search_result = unsafe {
-            let slice = std::slice::from_raw_parts(index_slice_start, len);
-            slice.binary_search_by_key(&hash, |rel_idx| {
-                (*self.data.add(data_base + *rel_idx as usize)).hash
-            })
-        };
-
-        if let Ok(i) = search_result {
-            // We found an entry with the same hash. Now we need to check for key equality.
-            // There could be multiple entries with the same hash (hash collisions),
-            // so we need to scan linearly in both directions from the found index.
-
-            // Scan backwards
-            for j in (0..=i).rev() {
-                let rel_idx = unsafe { *index_slice_start.add(j) };
-                let abs_idx = data_base + rel_idx as usize;
-                let entry = unsafe { &*self.data.add(abs_idx) };
-                if entry.hash != hash {
-                    break; // Moved past all entries with this hash
-                }
-                if entry.key == *key {
-                    return Some((abs_idx, j));
-                }
-            }
-
-            // Scan forwards from i + 1
-            for j in (i + 1)..len {
-                let rel_idx = unsafe { *index_slice_start.add(j) };
-                let abs_idx = data_base + rel_idx as usize;
-                let entry = unsafe { &*self.data.add(abs_idx) };
-                if entry.hash != hash {
-                    break; // Moved past all entries with this hash
-                }
-                if entry.key == *key {
-                    return Some((abs_idx, j));
-                }
-            }
+        if bitmask == 0 {
+            None
+        } else {
+            Some(bitmask.trailing_zeros() as usize)
         }
-
-        None
     }
 
     /// Inserts a key-value pair into the map.

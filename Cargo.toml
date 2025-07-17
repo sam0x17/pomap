@@ -9,3 +9,7 @@ description = "A Prefix-Ordered Hash Map (PoMap)"
 [workspace.lints.clippy]
 missing_const_for_fn = "warn"
 missing_inline_in_public_items = "warn"
+
+[dependencies]
+safe_arch = "0.7.4"
+wide = "0.7.33"
