@@ -1077,21 +1077,21 @@ mod tests {
             pomap.insert(*k, *v);
         }
         let duration = start.elapsed();
-        println!("PoMap insert {} items: {:?}", num_items, duration);
+        println!("PoMap insert {num_items} items: {duration:?}");
 
         let start = Instant::now();
         for (k, v) in &items {
             assert_eq!(pomap.get(k), Some(v));
         }
         let duration = start.elapsed();
-        println!("PoMap get {} items:    {:?}", num_items, duration);
+        println!("PoMap get {num_items} items:    {duration:?}");
 
         let start = Instant::now();
         for (k, v) in &items {
             assert_eq!(pomap.remove(k), Some(*v));
         }
         let duration = start.elapsed();
-        println!("PoMap remove {} items: {:?}", num_items, duration);
+        println!("PoMap remove {num_items} items: {duration:?}");
 
         // --- std::collections::HashMap Benchmark ---
         println!("\n--- Benchmarking std::collections::HashMap ---");
@@ -1101,20 +1101,20 @@ mod tests {
             hashmap.insert(*k, *v);
         }
         let duration = start.elapsed();
-        println!("HashMap insert {} items: {:?}", num_items, duration);
+        println!("HashMap insert {num_items} items: {duration:?}");
 
         let start = Instant::now();
         for (k, v) in &items {
             assert_eq!(hashmap.get(k), Some(v));
         }
         let duration = start.elapsed();
-        println!("HashMap get {} items:    {:?}", num_items, duration);
+        println!("HashMap get {num_items} items:    {duration:?}");
 
         let start = Instant::now();
         for (k, v) in &items {
             assert_eq!(hashmap.remove(k), Some(*v));
         }
         let duration = start.elapsed();
-        println!("HashMap remove {} items: {:?}", num_items, duration);
+        println!("HashMap remove {num_items} items: {duration:?}");
     }
 }
