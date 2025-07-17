@@ -1,5 +1,6 @@
 use std::alloc::{self, Layout};
 use std::collections::hash_map::DefaultHasher;
+use std::collections::hash_set;
 use std::hash::{Hash, Hasher};
 use std::ptr;
 use wide::u64x4;
@@ -141,6 +142,15 @@ impl<K: Hash + Eq + Clone, V: Clone> PoMap<K, V> {
         (hash >> (64 - self.p)) as usize % num_buckets
     }
 
+    #[inline(always)]
+    fn find_key_in_bucket(&self, bucket: &Bucket<K, V>, key: &K, hash: u64) -> Option<usize> {
+        let Some(index) = simd::find_match_index(bucket.hashes, hash) else {
+            return None;
+        };
+        let entry = &bucket.entries[index];
+        if &entry.key == key { Some(index) } else { None }
+    }
+
     /// Returns the number of elements in the map.
     ///
     /// # Examples
@@ -182,22 +192,6 @@ impl<K: Hash + Eq + Clone, V: Clone> PoMap<K, V> {
     /// ```
     pub fn capacity(&self) -> usize {
         self.buckets.capacity() * WIDE_LEN
-    }
-
-    #[inline(always)]
-    fn find_index_in_u64x4(vec: u64x4, target: u64) -> Option<usize> {
-        let mask: Mask64x4 = vec.lanes_eq(u64x4::splat(target));
-
-        let bitmask = ((mask.test(0) as u8) << 0)
-            | ((mask.test(1) as u8) << 1)
-            | ((mask.test(2) as u8) << 2)
-            | ((mask.test(3) as u8) << 3);
-
-        if bitmask == 0 {
-            None
-        } else {
-            Some(bitmask.trailing_zeros() as usize)
-        }
     }
 
     /// Inserts a key-value pair into the map.
