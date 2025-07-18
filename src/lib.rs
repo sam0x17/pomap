@@ -1,11 +1,11 @@
 // use std::alloc::{self, Layout};
 // use std::collections::hash_map::DefaultHasher;
 // use std::collections::hash_set;
-use std::hash::{Hash, Hasher};
+use std::hash::Hash;
 // use std::ptr;
 // use wide::u64x4;
 
-mod simd;
+pub mod simd;
 
 #[derive(Hash, Clone, Debug, Default)]
 enum Slot<K: Hash + Eq + Clone, V: Clone> {
