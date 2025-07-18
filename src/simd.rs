@@ -34,7 +34,7 @@ pub fn find_match_index(vec: u64x4, target: u64) -> Option<usize> {
     // ---- AArch64 + NEON ---------------------------------------------------
     #[cfg(all(target_arch = "aarch64", target_feature = "neon"))]
     unsafe {
-        return neon::find_match_index(vec, target);
+        neon::find_match_index(vec, target)
     }
 
     // ---- Portable fallback -----------------------------------------------

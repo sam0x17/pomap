@@ -28,6 +28,12 @@ pub struct PoMap<K: Hash + Eq + Clone, V: Clone> {
     entries: Vec<Slot<K, V>>,
 }
 
+impl<K: Hash + Eq + Clone, V: Clone> Default for PoMap<K, V> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl<K: Hash + Eq + Clone, V: Clone> PoMap<K, V> {
     pub fn new() -> Self {
         Self {
