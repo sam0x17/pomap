@@ -69,7 +69,7 @@ impl<K: Hash + Eq + Clone, V: Clone> PoMap<K, V> {
         if capacity == 0 {
             return Self::new();
         }
-        capacity = capacity.next_power_of_two();
+        capacity = (capacity.max(16)).next_power_of_two();
         Self {
             p_bits: capacity.trailing_zeros() as u8,
             len: 0,
@@ -129,10 +129,10 @@ impl<K: Hash + Eq + Clone, V: Clone> PoMap<K, V> {
         loop {
             let base_idx = self.radix_index(hash);
 
-            println!(
+            /*println!(
                 "→ hash = {}, p_bits = {}, base_idx = {}",
                 hash, self.p_bits, base_idx
-            );
+            );*/
 
             let ptr = unsafe { self.hashes.as_ptr().add(base_idx) };
             let chunk = unsafe { core::ptr::read_unaligned(ptr as *const [u64; PROBE_WIDTH]) };
@@ -178,7 +178,7 @@ impl<K: Hash + Eq + Clone, V: Clone> PoMap<K, V> {
         }
     }
 
-    #[inline]
+    #[inline(always)]
     pub fn insert(&mut self, key: K, value: V) -> Option<V> {
         let hash = Self::calculate_hash(&key);
         // println!("current state:\n{:#?}", self.hashes);
@@ -706,7 +706,7 @@ mod tests {
         map.insert("key16".to_string(), 1500);
         assert_eq!(map.len(), 16);
         assert_eq!(map.get(&"key16".to_string()), Some(&1500));
-        println!("state: {:#?}", map.hashes);
+        // println!("state: {:#?}", map.hashes);
     }
 
     #[test]
@@ -954,7 +954,7 @@ mod tests {
 
         map.insert(1, 1);
         assert_eq!(map.len(), 1);
-        assert_eq!(map.capacity(), 4);
+        assert_eq!(map.capacity(), 16);
         assert_eq!(map.get(&1), Some(&1));
     }
 
