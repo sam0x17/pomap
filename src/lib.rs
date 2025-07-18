@@ -1,21 +1,56 @@
 // use std::alloc::{self, Layout};
 // use std::collections::hash_map::DefaultHasher;
 // use std::collections::hash_set;
-// use std::hash::{Hash, Hasher};
+use std::hash::{Hash, Hasher};
 // use std::ptr;
 // use wide::u64x4;
 
 mod simd;
 
-// const LOAD_FACTOR: f64 = 0.75;
-// const WIDE_LEN: usize = core::mem::size_of::<u64x4>() / core::mem::size_of::<u64>();
+#[derive(Hash, Clone, Debug, Default)]
+enum Slot<K: Hash + Eq + Clone, V: Clone> {
+    Bucket {
+        p_bits: u8,
+        len: u8,
+    },
+    Entry {
+        hash: u64,
+        key: K,
+        value: V,
+    },
+    #[default]
+    Empty,
+}
 
-// /// Internal structure used to hold entries in the [`PoMap`].
-// #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Default)]
-// struct Entry<K: Hash + Eq + Clone, V: Clone> {
-//     key: K,
-//     value: V,
-// }
+pub struct PoMap<K: Hash + Eq + Clone, V: Clone> {
+    p_bits: u8, // Number of prefix bits to go from global -> bucket
+    len: usize,
+    entries: Vec<Slot<K, V>>,
+}
+
+impl<K: Hash + Eq + Clone, V: Clone> PoMap<K, V> {
+    pub fn new() -> Self {
+        Self {
+            p_bits: 0,
+            len: 0,
+            entries: Vec::new(),
+        }
+    }
+
+    pub fn clear(&mut self) {
+        self.entries.clear();
+        self.p_bits = 0;
+        self.len = 0;
+    }
+
+    pub fn with_capacity(capacity: usize) -> Self {
+        Self {
+            p_bits: 0,
+            len: 0,
+            entries: Vec::with_capacity(capacity),
+        }
+    }
+}
 
 // #[derive(Clone, Debug, PartialEq, Eq, Default)]
 // struct Bucket<K: Hash + Eq + Clone, V: Clone> {
