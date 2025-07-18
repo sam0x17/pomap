@@ -61,11 +61,14 @@ impl<K: Hash + Eq + Clone, V: Clone> PoMap<K, V> {
 
     #[inline(always)]
     pub fn capacity(&self) -> usize {
-        self.hashes.len() - PROBE_WIDTH
+        self.hashes.len().saturating_sub(PROBE_WIDTH)
     }
 
     #[inline(always)]
     pub fn with_capacity(mut capacity: usize) -> Self {
+        if capacity == 0 {
+            return Self::new();
+        }
         capacity = capacity.next_power_of_two();
         Self {
             p_bits: capacity.trailing_zeros() as u8,
@@ -118,11 +121,11 @@ impl<K: Hash + Eq + Clone, V: Clone> PoMap<K, V> {
 
     #[inline(always)]
     fn insert_with_hash(&mut self, hash: u64, key: K, value: V) -> Option<V> {
-        // println!("insert_with_hash({})", hash);
         if self.p_bits == 0 {
             *self = PoMap::with_capacity(PROBE_WIDTH);
             return self.insert_with_hash(hash, key, value);
         }
+
         loop {
             let base_idx = self.radix_index(hash);
 
@@ -150,7 +153,7 @@ impl<K: Hash + Eq + Clone, V: Clone> PoMap<K, V> {
                         return Some(std::mem::replace(&mut entry.value, value));
                     }
                 } else {
-                    // offset is EMPTY
+                    // Found EMPTY
                     self.hashes[idx] = hash;
                     self.entries[idx] = Some(Entry { key, value });
                     self.len += 1;
@@ -158,8 +161,20 @@ impl<K: Hash + Eq + Clone, V: Clone> PoMap<K, V> {
                 }
             }
 
-            // Resize and try again
-            self.resize();
+            // Resize and reinsert everything, including the current key
+            let mut new_map = PoMap::with_capacity(self.capacity() * 2);
+
+            for i in 0..self.hashes.len() {
+                let h = self.hashes[i];
+                if h != EMPTY {
+                    let e = self.entries[i].take().unwrap();
+                    new_map.insert_with_hash(h, e.key, e.value);
+                }
+            }
+
+            new_map.insert_with_hash(hash, key, value);
+            *self = new_map;
+            return None;
         }
     }
 
@@ -169,34 +184,6 @@ impl<K: Hash + Eq + Clone, V: Clone> PoMap<K, V> {
         // println!("current state:\n{:#?}", self.hashes);
         // println!("[PoMap] Inserting key with hash: {}", hash);
         self.insert_with_hash(hash, key, value)
-    }
-
-    fn resize(&mut self) {
-        let old_capacity = self.capacity();
-        let new_p_bits = self.p_bits + 1;
-        let new_capacity = 1 << new_p_bits;
-
-        println!(
-            ">>> resizing: old_cap={}, new_cap={}, old_p_bits={}, new_p_bits={}",
-            old_capacity, new_capacity, self.p_bits, new_p_bits
-        );
-
-        let mut new_map = PoMap::<K, V> {
-            p_bits: new_p_bits, // ✅ use new_p_bits directly — no swap!
-            len: 0,
-            hashes: vec![EMPTY; new_capacity + PROBE_WIDTH],
-            entries: vec![None; new_capacity + PROBE_WIDTH],
-        };
-
-        for i in 0..old_capacity {
-            let hash = self.hashes[i];
-            if hash != EMPTY {
-                let entry = self.entries[i].take().unwrap();
-                new_map.insert_with_hash(hash, entry.key, entry.value);
-            }
-        }
-
-        *self = new_map;
     }
 }
 
@@ -727,10 +714,9 @@ mod tests {
         let mut map = PoMap::new();
         map.insert("key1".to_string(), 1);
         map.insert("key2".to_string(), 2);
-        let capacity_before = map.capacity();
         map.clear();
         assert_eq!(map.len(), 0);
-        assert_eq!(map.capacity(), capacity_before); // Should not deallocate
+        assert_eq!(map.capacity(), 0);
         assert_eq!(map.get(&"key1".to_string()), None);
         map.insert("key3".to_string(), 3);
         assert_eq!(map.len(), 1);
@@ -968,7 +954,7 @@ mod tests {
 
         map.insert(1, 1);
         assert_eq!(map.len(), 1);
-        assert_eq!(map.capacity(), 16);
+        assert_eq!(map.capacity(), 4);
         assert_eq!(map.get(&1), Some(&1));
     }
 
