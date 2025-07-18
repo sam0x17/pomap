@@ -106,6 +106,14 @@ impl<K: Hash + Eq + Clone, V: Clone, H: Hasher + Default> PoMap<K, V, H> {
 
     #[inline(always)]
     fn insert_with_hash(&mut self, hash: u64, key: K, value: V) -> Option<V> {
+        if self.len == 0 {
+            // If the map is empty, we can directly insert the first element
+            self.hashes = vec![hash, EMPTY, EMPTY, EMPTY];
+            self.entries = vec![Some(Entry { key, value }), None, None, None];
+            self.len += 1;
+            self.p_bits = 2;
+            return None;
+        }
         loop {
             let base_idx = self.radix_index(hash);
 
@@ -1021,7 +1029,7 @@ mod tests {
 
         // --- PoMap Benchmark ---
         println!("\n--- Benchmarking PoMap ---");
-        let mut pomap = PoMap::with_capacity(0);
+        let mut pomap: PoMap<i32, i32> = PoMap::with_capacity(0);
         let start = Instant::now();
         for (k, v) in &items {
             pomap.insert(*k, *v);
