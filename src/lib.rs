@@ -1,59 +1,77 @@
 // use std::alloc::{self, Layout};
 // use std::collections::hash_map::DefaultHasher;
 // use std::collections::hash_set;
-use std::hash::Hash;
+use std::{
+    hash::{DefaultHasher, Hash, Hasher},
+    marker::PhantomData,
+    mem::MaybeUninit,
+};
 // use std::ptr;
 // use wide::u64x4;
 
 pub mod simd;
 
-#[derive(Hash, Clone, Debug, Default)]
-enum Slot<K: Hash + Eq + Clone, V: Clone> {
-    Bucket {
-        p_bits: u8,
-        len: u8,
-    },
-    Entry {
-        hash: u64,
-        key: K,
-        value: V,
-    },
-    #[default]
-    Empty,
+const EMPTY: u64 = u64::MIN;
+const REMOVED: u64 = u64::MAX;
+
+#[derive(Hash, Clone, Debug)]
+struct Entry<K: Hash + Eq + Clone, V: Clone> {
+    key: K,
+    value: V,
 }
 
-pub struct PoMap<K: Hash + Eq + Clone, V: Clone> {
-    p_bits: u8, // Number of prefix bits to go from global -> bucket
+pub struct PoMap<K: Hash + Eq + Clone, V: Clone, H: Hasher + Default = DefaultHasher> {
+    p_bits: u8, // Number of prefix bits to go from global -> slot index
     len: usize,
-    entries: Vec<Slot<K, V>>,
+    hashes: Vec<u64>,
+    entries: Vec<MaybeUninit<Entry<K, V>>>,
+    _phantom: PhantomData<H>,
+}
+
+fn calculate_hash<K: Hash, H: Hasher + Default>(key: &K) -> u64 {
+    let mut hasher = H::default();
+    key.hash(&mut hasher);
+    let hash = hasher.finish();
+    (hash >> 1) + 1 // clamp to [1, u64::MAX - 1] so we can use these as control values
 }
 
 impl<K: Hash + Eq + Clone, V: Clone> Default for PoMap<K, V> {
+    #[inline(always)]
     fn default() -> Self {
         Self::new()
     }
 }
 
 impl<K: Hash + Eq + Clone, V: Clone> PoMap<K, V> {
-    pub fn new() -> Self {
+    #[inline(always)]
+    pub const fn new() -> Self {
         Self {
             p_bits: 0,
             len: 0,
+            hashes: Vec::new(),
             entries: Vec::new(),
+            _phantom: PhantomData,
         }
     }
 
+    #[inline(always)]
     pub fn clear(&mut self) {
-        self.entries.clear();
         self.p_bits = 0;
         self.len = 0;
+        self.hashes.clear();
+        self.entries.clear();
     }
 
+    #[inline(always)]
     pub fn with_capacity(capacity: usize) -> Self {
+        let mut entries: Vec<MaybeUninit<Entry<K, V>>> = Vec::with_capacity(capacity);
+        entries.resize_with(capacity, MaybeUninit::uninit);
         Self {
             p_bits: 0,
             len: 0,
-            entries: Vec::with_capacity(capacity),
+            hashes: vec![EMPTY; capacity],
+            entries,
+            _phantom: PhantomData,
         }
     }
 }
