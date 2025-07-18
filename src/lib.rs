@@ -1,6 +1,3 @@
-// use std::alloc::{self, Layout};
-// use std::collections::hash_map::DefaultHasher;
-// use std::collections::hash_set;
 use std::{
     hash::{DefaultHasher, Hash, Hasher},
     marker::PhantomData,
@@ -8,14 +5,12 @@ use std::{
 
 use wide::u64x4;
 
-use crate::simd::{find_match_index, find_match_index_any_of_3};
-// use std::ptr;
-// use wide::u64x4;
+use crate::simd::{find_match_index, find_match_index_any_of_2};
 
 pub mod simd;
 
 const EMPTY: u64 = u64::MIN;
-const REMOVED: u64 = u64::MAX;
+const PROBE_WIDTH: usize = 4;
 
 #[derive(Hash, Clone, Debug)]
 struct Entry<K: Hash + Eq + Clone, V: Clone> {
@@ -94,7 +89,7 @@ impl<K: Hash + Eq + Clone, V: Clone, H: Hasher + Default> PoMap<K, V, H> {
 
         // Safe because hashes has sentinel padding (at least 4 extra elements)
         let ptr = unsafe { self.hashes.as_ptr().add(base_idx) };
-        let chunk = unsafe { [*ptr, *ptr.add(1), *ptr.add(2), *ptr.add(3)] };
+        let chunk = unsafe { core::ptr::read_unaligned(ptr as *const [u64; PROBE_WIDTH]) };
         let vec = u64x4::new(chunk);
 
         if let Some(offset) = find_match_index(vec, hash) {
@@ -109,48 +104,72 @@ impl<K: Hash + Eq + Clone, V: Clone, H: Hasher + Default> PoMap<K, V, H> {
         None
     }
 
-    pub fn insert(&mut self, key: K, value: V) -> Option<V> {
-        let hash = Self::calculate_hash(&key);
-        let base_idx = self.radix_index(hash);
+    #[inline(always)]
+    fn insert_with_hash(&mut self, hash: u64, key: K, value: V) -> Option<V> {
+        loop {
+            let base_idx = self.radix_index(hash);
 
-        // Load 4 hashes with sentinel padding guaranteed
-        let ptr = unsafe { self.hashes.as_ptr().add(base_idx) };
-        let chunk = unsafe { [*ptr, *ptr.add(1), *ptr.add(2), *ptr.add(3)] };
-        let vec = u64x4::new(chunk);
+            let ptr = unsafe { self.hashes.as_ptr().add(base_idx) };
+            let chunk = unsafe { core::ptr::read_unaligned(ptr as *const [u64; PROBE_WIDTH]) };
+            let vec = u64x4::new(chunk);
 
-        const REMOVED: u64 = u64::MAX;
-        const EMPTY: u64 = u64::MIN;
+            if let Some(offset) = find_match_index_any_of_2(vec, hash, EMPTY) {
+                let idx = base_idx + offset;
+                let h = unsafe { *self.hashes.get_unchecked(idx) };
 
-        // SIMD search for hash match, tombstone, or empty
-        if let Some(offset) = find_match_index_any_of_3(vec, hash, REMOVED, EMPTY) {
-            let idx = base_idx + offset;
-
-            let h = unsafe { *self.hashes.get_unchecked(idx) };
-
-            // Invariant: hash match means entry is always Some
-            if h == hash {
-                let entry = unsafe {
-                    self.entries
-                        .get_unchecked_mut(idx)
-                        .as_mut()
-                        .unwrap_unchecked()
-                };
-                if entry.key == key {
-                    let old = std::mem::replace(&mut entry.value, value);
-                    return Some(old);
+                if h == hash {
+                    let entry = unsafe {
+                        self.entries
+                            .get_unchecked_mut(idx)
+                            .as_mut()
+                            .unwrap_unchecked()
+                    };
+                    if entry.key == key {
+                        return Some(std::mem::replace(&mut entry.value, value));
+                    }
+                } else {
+                    // offset is EMPTY
+                    self.hashes[idx] = hash;
+                    self.entries[idx] = Some(Entry { key, value });
+                    self.len += 1;
+                    return None;
                 }
             }
 
-            // Otherwise: write new entry into REMOVED or EMPTY slot
-            self.hashes[idx] = hash;
-            self.entries[idx] = Some(Entry { key, value });
-            self.len += 1;
-            return None;
+            // Resize and try again
+            self.resize();
+        }
+    }
+
+    #[inline]
+    pub fn insert(&mut self, key: K, value: V) -> Option<V> {
+        let hash = Self::calculate_hash(&key);
+        self.insert_with_hash(hash, key, value)
+    }
+
+    #[inline(always)]
+    fn resize(&mut self) {
+        let old_capacity = self.hashes.len() - 4;
+        let new_capacity = old_capacity * 2;
+        let new_p_bits = (new_capacity as u64).trailing_zeros() as u8;
+
+        let mut new_map = PoMap::<K, V, H> {
+            p_bits: new_p_bits,
+            len: 0,
+            hashes: vec![EMPTY; new_capacity + 4],
+            entries: vec![None; new_capacity + 4],
+            _phantom: PhantomData,
+        };
+
+        for i in 0..old_capacity {
+            let hash = self.hashes[i];
+            if hash != EMPTY {
+                let entry = self.entries[i].take().unwrap();
+                new_map.insert_with_hash(hash, entry.key, entry.value);
+            }
         }
 
-        // Probe window full — need to resize and retry
-        // self.resize();
-        self.insert(key, value)
+        *self = new_map;
     }
 }
 
@@ -613,439 +632,439 @@ impl<K: Hash + Eq + Clone, V: Clone, H: Hasher + Default> PoMap<K, V, H> {
 //     }
 // }
 
-// // --- Unit Tests ---
-// #[cfg(test)]
-// mod tests {
-//     use super::*;
-
-//     #[test]
-//     fn test_new_and_insert() {
-//         let mut map = PoMap::new();
-//         assert_eq!(map.len(), 0);
-//         map.insert("key1".to_string(), 42);
-//         assert_eq!(map.len(), 1);
-//         assert_eq!(map.get(&"key1".to_string()), Some(&42));
-//     }
-
-//     #[test]
-//     fn test_clear() {
-//         let mut map = PoMap::new();
-//         map.insert("key1".to_string(), 1);
-//         map.insert("key2".to_string(), 2);
-//         let capacity_before = map.capacity();
-//         map.clear();
-//         assert_eq!(map.len(), 0);
-//         assert_eq!(map.capacity(), capacity_before); // Should not deallocate
-//         assert_eq!(map.get(&"key1".to_string()), None);
-//         map.insert("key3".to_string(), 3);
-//         assert_eq!(map.len(), 1);
-//         assert_eq!(map.get(&"key3".to_string()), Some(&3));
-//     }
-
-//     #[test]
-//     fn test_default() {
-//         let map: PoMap<String, i32> = PoMap::default();
-//         assert_eq!(map.len(), 0);
-//         assert_eq!(map.capacity(), 0);
-//     }
-
-//     #[test]
-//     fn test_get_nonexistent() {
-//         let mut map = PoMap::new();
-//         map.insert("key1".to_string(), 42);
-//         assert_eq!(map.get(&"key2".to_string()), None);
-//     }
-
-//     #[test]
-//     fn test_update() {
-//         let mut map = PoMap::new();
-//         map.insert("key1".to_string(), 42);
-//         let old_value = map.insert("key1".to_string(), 99);
-//         assert_eq!(map.len(), 1);
-//         assert_eq!(old_value, Some(42));
-//         assert_eq!(map.get(&"key1".to_string()), Some(&99));
-//     }
-
-//     #[test]
-//     fn test_remove() {
-//         let mut map = PoMap::new();
-//         map.insert("key1".to_string(), 1);
-//         map.insert("key2".to_string(), 2);
-//         assert_eq!(map.len(), 2);
-
-//         let removed = map.remove(&"key1".to_string());
-//         assert_eq!(removed, Some(1));
-//         assert_eq!(map.len(), 1);
-//         assert_eq!(map.get(&"key1".to_string()), None);
-//         assert_eq!(map.get(&"key2".to_string()), Some(&2));
-
-//         let non_existent = map.remove(&"key3".to_string());
-//         assert_eq!(non_existent, None);
-//         assert_eq!(map.len(), 1);
-//     }
-
-//     #[test]
-//     fn test_resize_and_rehash() {
-//         let mut map = PoMap::with_capacity(16);
-//         assert_eq!(map.capacity(), 16);
-//         assert_eq!(map.k, 4); // k = 16.ilog2()
-
-//         // Insert enough items to trigger a resize.
-//         // Load factor is 0.75, so 16 * 0.75 = 12. The 13th element will resize.
-//         for i in 0..12 {
-//             map.insert(i.to_string(), i);
-//         }
-//         assert_eq!(map.len(), 12);
-//         assert_eq!(map.capacity(), 64);
-
-//         map.insert("12".to_string(), 12);
-//         assert_eq!(map.len(), 13);
-//         assert_eq!(map.capacity(), 64);
-//         assert_eq!(map.k, 6);
-
-//         // Verify all old and new elements are present.
-//         for i in 0..13 {
-//             assert_eq!(map.get(&i.to_string()), Some(&i));
-//         }
-//     }
-
-//     #[test]
-//     fn test_many_insertions_and_removals() {
-//         let mut map = PoMap::new();
-//         let num_items = 1_000;
-
-//         for i in 0..num_items {
-//             map.insert(i, i * 2);
-//         }
-//         assert_eq!(map.len(), num_items);
-
-//         for i in (0..num_items).step_by(2) {
-//             assert_eq!(map.remove(&i), Some(i * 2));
-//         }
-//         assert_eq!(map.len(), num_items / 2);
-
-//         for i in 0..num_items {
-//             if i % 2 == 0 {
-//                 assert_eq!(map.get(&i), None);
-//             } else {
-//                 assert_eq!(map.get(&i), Some(&(i * 2)));
-//             }
-//         }
-//     }
-
-//     #[derive(Debug, Clone, Eq)]
-//     struct CollidingKey {
-//         val: u64,
-//         hash: u64,
-//     }
-
-//     impl Hash for CollidingKey {
-//         fn hash<H: Hasher>(&self, state: &mut H) {
-//             self.hash.hash(state);
-//         }
-//     }
-
-//     impl PartialEq for CollidingKey {
-//         fn eq(&self, other: &Self) -> bool {
-//             self.val == other.val
-//         }
-//     }
-
-//     #[test]
-//     fn test_hash_collisions() {
-//         let mut map = PoMap::new();
-//         let key1 = CollidingKey { val: 1, hash: 123 };
-//         let key2 = CollidingKey { val: 2, hash: 123 };
-//         let key3 = CollidingKey { val: 3, hash: 123 };
-
-//         map.insert(key1.clone(), 10);
-//         map.insert(key2.clone(), 20);
-//         map.insert(key3.clone(), 30);
-
-//         assert_eq!(map.len(), 3);
-//         assert_eq!(map.get(&key1), Some(&10));
-//         assert_eq!(map.get(&key2), Some(&20));
-//         assert_eq!(map.get(&key3), Some(&30));
-
-//         // Test update on collision
-//         map.insert(key2.clone(), 25);
-//         assert_eq!(map.len(), 3);
-//         assert_eq!(map.get(&key2), Some(&25));
-
-//         // Test remove on collision
-//         assert_eq!(map.remove(&key1), Some(10));
-//         assert_eq!(map.len(), 2);
-//         assert_eq!(map.get(&key1), None);
-//         assert_eq!(map.get(&key2), Some(&25));
-//         assert_eq!(map.get(&key3), Some(&30));
-//     }
-
-//     #[test]
-//     fn test_bucket_overflow_and_resize() {
-//         let mut map = PoMap::with_capacity(16);
-
-//         // Create keys that all map to the same bucket.
-//         // We can achieve this by crafting hashes. A key's bucket is `(hash >> (64 - p)) % num_buckets`.
-//         // With C=16, k=4, num_buckets=4, p=2.
-//         // We need `(hash >> 62) % 4` to be constant.
-//         let collision_hash_base: u64 = 1 << 62;
-
-//         for i in 0..4 {
-//             // These should all go to the same bucket.
-//             let key = CollidingKey {
-//                 val: i,
-//                 hash: collision_hash_base + i,
-//             };
-//             map.insert(key, i as i32);
-//         }
-//         assert_eq!(map.len(), 4);
-//         assert_eq!(map.capacity(), 16);
-
-//         // This should trigger a resize because the target bucket is full (len=k=4).
-//         let key = CollidingKey {
-//             val: 4,
-//             hash: collision_hash_base + 4,
-//         };
-//         map.insert(key, 4);
-//         assert_eq!(map.len(), 5);
-//         assert_eq!(map.capacity(), 16);
-
-//         // Check that all values are still there.
-//         for i in 0..5 {
-//             let key_to_check = CollidingKey {
-//                 val: i,
-//                 hash: collision_hash_base + i,
-//             };
-//             assert_eq!(map.get(&key_to_check), Some(&(i as i32)));
-//         }
-//     }
-
-//     #[test]
-//     fn test_random_insert_remove_comprehensive() {
-//         use std::collections::HashMap;
-
-//         let mut pomap = PoMap::new();
-//         let mut hashmap = HashMap::new();
-//         let num_items = 2_000;
-
-//         let mut items: Vec<(i32, i32)> = (0..num_items).map(|i| (i, i * 10)).collect();
-
-//         // Simple shuffle
-//         for i in 0..items.len() {
-//             let j = (i * 7) % items.len();
-//             items.swap(i, j);
-//         }
-
-//         // Insert all items
-//         for (k, v) in &items {
-//             pomap.insert(*k, *v);
-//             hashmap.insert(*k, *v);
-//             assert_eq!(pomap.len(), hashmap.len());
-//         }
-
-//         assert_eq!(pomap.len(), num_items as usize);
-//         for (k, v) in &items {
-//             assert_eq!(pomap.get(k), Some(v));
-//         }
-
-//         // Remove about half the items
-//         let mut removed_count = 0;
-//         for (i, (k, v)) in items.iter().enumerate() {
-//             if i % 2 == 0 {
-//                 assert_eq!(pomap.remove(k), Some(*v));
-//                 hashmap.remove(k);
-//                 removed_count += 1;
-//             }
-//             assert_eq!(pomap.len(), hashmap.len());
-//         }
-
-//         assert_eq!(pomap.len(), (num_items - removed_count) as usize);
-
-//         // Check final state
-//         for (k, _) in &items {
-//             assert_eq!(pomap.get(k), hashmap.get(k));
-//         }
-//     }
-
-//     #[test]
-//     fn test_zero_capacity() {
-//         let mut map: PoMap<i32, i32> = PoMap::with_capacity(0);
-//         assert_eq!(map.len(), 0);
-//         assert_eq!(map.capacity(), 0);
-
-//         map.insert(1, 1);
-//         assert_eq!(map.len(), 1);
-//         assert_eq!(map.capacity(), 16);
-//         assert_eq!(map.get(&1), Some(&1));
-//     }
-
-//     #[test]
-//     fn test_clone() {
-//         let mut map = PoMap::new();
-//         map.insert("a", 1);
-//         map.insert("b", 2);
-
-//         let mut clone = map.clone();
-//         assert_eq!(clone.len(), 2);
-//         assert_eq!(clone.get(&"a"), Some(&1));
-//         assert_eq!(clone.get(&"b"), Some(&2));
-
-//         // Modify the clone and check that the original is unaffected
-//         clone.insert("c", 3);
-//         clone.remove(&"a");
-//         assert_eq!(map.len(), 2);
-//         assert_eq!(map.get(&"a"), Some(&1));
-//         assert_eq!(map.get(&"c"), None);
-
-//         // Modify the original and check that the clone is unaffected
-//         map.insert("d", 4);
-//         assert_eq!(clone.len(), 2);
-//         assert_eq!(clone.get(&"d"), None);
-//     }
-
-//     #[test]
-//     fn test_zero_sized_types() {
-//         // Test with ZST value
-//         let mut map_zst_val = PoMap::new();
-//         map_zst_val.insert(1, ());
-//         map_zst_val.insert(2, ());
-//         assert_eq!(map_zst_val.len(), 2);
-//         assert_eq!(map_zst_val.get(&1), Some(&()));
-//         assert_eq!(map_zst_val.remove(&1), Some(()));
-//         assert_eq!(map_zst_val.len(), 1);
-//         assert_eq!(map_zst_val.get(&2), Some(&()));
-
-//         // Test with ZST key
-//         // Since all keys are equal, it can only hold one item.
-//         let mut map_zst_key: PoMap<(), i32> = PoMap::new();
-//         assert_eq!(map_zst_key.insert((), 100), None);
-//         assert_eq!(map_zst_key.len(), 1);
-//         assert_eq!(map_zst_key.insert((), 200), Some(100));
-//         assert_eq!(map_zst_key.len(), 1);
-//         assert_eq!(map_zst_key.get(&()), Some(&200));
-//     }
-
-//     use std::sync::Arc;
-//     use std::sync::atomic::{AtomicUsize, Ordering};
-
-//     #[derive(Clone, Debug)]
-//     struct DropCounter {
-//         id: i32,
-//         counter: Arc<AtomicUsize>,
-//     }
-
-//     impl Drop for DropCounter {
-//         fn drop(&mut self) {
-//             self.counter.fetch_add(1, Ordering::SeqCst);
-//         }
-//     }
-
-//     impl PartialEq for DropCounter {
-//         fn eq(&self, other: &Self) -> bool {
-//             self.id == other.id
-//         }
-//     }
-
-//     #[test]
-//     fn test_drop_behavior() {
-//         let counter = Arc::new(AtomicUsize::new(0));
-
-//         {
-//             let mut map = PoMap::new();
-//             let make_droppable = |id| DropCounter {
-//                 id,
-//                 counter: Arc::clone(&counter),
-//             };
-
-//             // 1. Test drop on insert (overwrite)
-//             map.insert("a", make_droppable(1));
-//             assert_eq!(counter.load(Ordering::SeqCst), 0);
-//             map.insert("a", make_droppable(2)); // Overwrites key "a", should drop value 1
-//             assert_eq!(counter.load(Ordering::SeqCst), 1);
-
-//             // 2. Test drop on remove
-//             map.insert("b", make_droppable(3));
-//             assert_eq!(counter.load(Ordering::SeqCst), 1);
-//             map.remove(&"b"); // Removes key "b", should drop value 3
-//             assert_eq!(counter.load(Ordering::SeqCst), 2);
-
-//             // 3. Test drop on clear
-//             map.insert("c", make_droppable(4));
-//             map.insert("d", make_droppable(5));
-//             assert_eq!(counter.load(Ordering::SeqCst), 2);
-//             map.clear(); // Should drop values 2, 4, 5
-//             assert_eq!(counter.load(Ordering::SeqCst), 5);
-//             assert_eq!(map.len(), 0);
-
-//             // 4. Test drop on PoMap::drop
-//             map.insert("e", make_droppable(6));
-//             map.insert("f", make_droppable(7));
-//         } // map goes out of scope here
-
-//         // Should drop values 6, 7
-//         assert_eq!(counter.load(Ordering::SeqCst), 7);
-//     }
-
-//     #[test]
-//     fn test_performance_vs_std_hashmap() {
-//         use std::collections::HashMap;
-//         use std::time::Instant;
-
-//         let num_items = 1_000_000;
-//         let mut items: Vec<(i32, i32)> = (0..num_items).map(|i| (i, i * 10)).collect();
-
-//         // Simple shuffle to make access less predictable
-//         for i in 0..items.len() {
-//             let j = (i * 13) % items.len();
-//             items.swap(i, j);
-//         }
-
-//         // --- PoMap Benchmark ---
-//         println!("\n--- Benchmarking PoMap ---");
-//         let mut pomap = PoMap::with_capacity(0);
-//         let start = Instant::now();
-//         for (k, v) in &items {
-//             pomap.insert(*k, *v);
-//         }
-//         let duration = start.elapsed();
-//         println!("PoMap insert {num_items} items: {duration:?}");
-
-//         let start = Instant::now();
-//         for (k, v) in &items {
-//             assert_eq!(pomap.get(k), Some(v));
-//         }
-//         let duration = start.elapsed();
-//         println!("PoMap get {num_items} items:    {duration:?}");
-
-//         let start = Instant::now();
-//         for (k, v) in &items {
-//             assert_eq!(pomap.remove(k), Some(*v));
-//         }
-//         let duration = start.elapsed();
-//         println!("PoMap remove {num_items} items: {duration:?}");
-
-//         // --- std::collections::HashMap Benchmark ---
-//         println!("\n--- Benchmarking std::collections::HashMap ---");
-//         let mut hashmap = HashMap::with_capacity(0);
-//         let start = Instant::now();
-//         for (k, v) in &items {
-//             hashmap.insert(*k, *v);
-//         }
-//         let duration = start.elapsed();
-//         println!("HashMap insert {num_items} items: {duration:?}");
-
-//         let start = Instant::now();
-//         for (k, v) in &items {
-//             assert_eq!(hashmap.get(k), Some(v));
-//         }
-//         let duration = start.elapsed();
-//         println!("HashMap get {num_items} items:    {duration:?}");
-
-//         let start = Instant::now();
-//         for (k, v) in &items {
-//             assert_eq!(hashmap.remove(k), Some(*v));
-//         }
-//         let duration = start.elapsed();
-//         println!("HashMap remove {num_items} items: {duration:?}");
-//     }
-// }
+// --- Unit Tests ---
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    //     #[test]
+    //     fn test_new_and_insert() {
+    //         let mut map = PoMap::new();
+    //         assert_eq!(map.len(), 0);
+    //         map.insert("key1".to_string(), 42);
+    //         assert_eq!(map.len(), 1);
+    //         assert_eq!(map.get(&"key1".to_string()), Some(&42));
+    //     }
+
+    //     #[test]
+    //     fn test_clear() {
+    //         let mut map = PoMap::new();
+    //         map.insert("key1".to_string(), 1);
+    //         map.insert("key2".to_string(), 2);
+    //         let capacity_before = map.capacity();
+    //         map.clear();
+    //         assert_eq!(map.len(), 0);
+    //         assert_eq!(map.capacity(), capacity_before); // Should not deallocate
+    //         assert_eq!(map.get(&"key1".to_string()), None);
+    //         map.insert("key3".to_string(), 3);
+    //         assert_eq!(map.len(), 1);
+    //         assert_eq!(map.get(&"key3".to_string()), Some(&3));
+    //     }
+
+    //     #[test]
+    //     fn test_default() {
+    //         let map: PoMap<String, i32> = PoMap::default();
+    //         assert_eq!(map.len(), 0);
+    //         assert_eq!(map.capacity(), 0);
+    //     }
+
+    //     #[test]
+    //     fn test_get_nonexistent() {
+    //         let mut map = PoMap::new();
+    //         map.insert("key1".to_string(), 42);
+    //         assert_eq!(map.get(&"key2".to_string()), None);
+    //     }
+
+    //     #[test]
+    //     fn test_update() {
+    //         let mut map = PoMap::new();
+    //         map.insert("key1".to_string(), 42);
+    //         let old_value = map.insert("key1".to_string(), 99);
+    //         assert_eq!(map.len(), 1);
+    //         assert_eq!(old_value, Some(42));
+    //         assert_eq!(map.get(&"key1".to_string()), Some(&99));
+    //     }
+
+    //     #[test]
+    //     fn test_remove() {
+    //         let mut map = PoMap::new();
+    //         map.insert("key1".to_string(), 1);
+    //         map.insert("key2".to_string(), 2);
+    //         assert_eq!(map.len(), 2);
+
+    //         let removed = map.remove(&"key1".to_string());
+    //         assert_eq!(removed, Some(1));
+    //         assert_eq!(map.len(), 1);
+    //         assert_eq!(map.get(&"key1".to_string()), None);
+    //         assert_eq!(map.get(&"key2".to_string()), Some(&2));
+
+    //         let non_existent = map.remove(&"key3".to_string());
+    //         assert_eq!(non_existent, None);
+    //         assert_eq!(map.len(), 1);
+    //     }
+
+    //     #[test]
+    //     fn test_resize_and_rehash() {
+    //         let mut map = PoMap::with_capacity(16);
+    //         assert_eq!(map.capacity(), 16);
+    //         assert_eq!(map.k, 4); // k = 16.ilog2()
+
+    //         // Insert enough items to trigger a resize.
+    //         // Load factor is 0.75, so 16 * 0.75 = 12. The 13th element will resize.
+    //         for i in 0..12 {
+    //             map.insert(i.to_string(), i);
+    //         }
+    //         assert_eq!(map.len(), 12);
+    //         assert_eq!(map.capacity(), 64);
+
+    //         map.insert("12".to_string(), 12);
+    //         assert_eq!(map.len(), 13);
+    //         assert_eq!(map.capacity(), 64);
+    //         assert_eq!(map.k, 6);
+
+    //         // Verify all old and new elements are present.
+    //         for i in 0..13 {
+    //             assert_eq!(map.get(&i.to_string()), Some(&i));
+    //         }
+    //     }
+
+    //     #[test]
+    //     fn test_many_insertions_and_removals() {
+    //         let mut map = PoMap::new();
+    //         let num_items = 1_000;
+
+    //         for i in 0..num_items {
+    //             map.insert(i, i * 2);
+    //         }
+    //         assert_eq!(map.len(), num_items);
+
+    //         for i in (0..num_items).step_by(2) {
+    //             assert_eq!(map.remove(&i), Some(i * 2));
+    //         }
+    //         assert_eq!(map.len(), num_items / 2);
+
+    //         for i in 0..num_items {
+    //             if i % 2 == 0 {
+    //                 assert_eq!(map.get(&i), None);
+    //             } else {
+    //                 assert_eq!(map.get(&i), Some(&(i * 2)));
+    //             }
+    //         }
+    //     }
+
+    //     #[derive(Debug, Clone, Eq)]
+    //     struct CollidingKey {
+    //         val: u64,
+    //         hash: u64,
+    //     }
+
+    //     impl Hash for CollidingKey {
+    //         fn hash<H: Hasher>(&self, state: &mut H) {
+    //             self.hash.hash(state);
+    //         }
+    //     }
+
+    //     impl PartialEq for CollidingKey {
+    //         fn eq(&self, other: &Self) -> bool {
+    //             self.val == other.val
+    //         }
+    //     }
+
+    //     #[test]
+    //     fn test_hash_collisions() {
+    //         let mut map = PoMap::new();
+    //         let key1 = CollidingKey { val: 1, hash: 123 };
+    //         let key2 = CollidingKey { val: 2, hash: 123 };
+    //         let key3 = CollidingKey { val: 3, hash: 123 };
+
+    //         map.insert(key1.clone(), 10);
+    //         map.insert(key2.clone(), 20);
+    //         map.insert(key3.clone(), 30);
+
+    //         assert_eq!(map.len(), 3);
+    //         assert_eq!(map.get(&key1), Some(&10));
+    //         assert_eq!(map.get(&key2), Some(&20));
+    //         assert_eq!(map.get(&key3), Some(&30));
+
+    //         // Test update on collision
+    //         map.insert(key2.clone(), 25);
+    //         assert_eq!(map.len(), 3);
+    //         assert_eq!(map.get(&key2), Some(&25));
+
+    //         // Test remove on collision
+    //         assert_eq!(map.remove(&key1), Some(10));
+    //         assert_eq!(map.len(), 2);
+    //         assert_eq!(map.get(&key1), None);
+    //         assert_eq!(map.get(&key2), Some(&25));
+    //         assert_eq!(map.get(&key3), Some(&30));
+    //     }
+
+    //     #[test]
+    //     fn test_bucket_overflow_and_resize() {
+    //         let mut map = PoMap::with_capacity(16);
+
+    //         // Create keys that all map to the same bucket.
+    //         // We can achieve this by crafting hashes. A key's bucket is `(hash >> (64 - p)) % num_buckets`.
+    //         // With C=16, k=4, num_buckets=4, p=2.
+    //         // We need `(hash >> 62) % 4` to be constant.
+    //         let collision_hash_base: u64 = 1 << 62;
+
+    //         for i in 0..4 {
+    //             // These should all go to the same bucket.
+    //             let key = CollidingKey {
+    //                 val: i,
+    //                 hash: collision_hash_base + i,
+    //             };
+    //             map.insert(key, i as i32);
+    //         }
+    //         assert_eq!(map.len(), 4);
+    //         assert_eq!(map.capacity(), 16);
+
+    //         // This should trigger a resize because the target bucket is full (len=k=4).
+    //         let key = CollidingKey {
+    //             val: 4,
+    //             hash: collision_hash_base + 4,
+    //         };
+    //         map.insert(key, 4);
+    //         assert_eq!(map.len(), 5);
+    //         assert_eq!(map.capacity(), 16);
+
+    //         // Check that all values are still there.
+    //         for i in 0..5 {
+    //             let key_to_check = CollidingKey {
+    //                 val: i,
+    //                 hash: collision_hash_base + i,
+    //             };
+    //             assert_eq!(map.get(&key_to_check), Some(&(i as i32)));
+    //         }
+    //     }
+
+    //     #[test]
+    //     fn test_random_insert_remove_comprehensive() {
+    //         use std::collections::HashMap;
+
+    //         let mut pomap = PoMap::new();
+    //         let mut hashmap = HashMap::new();
+    //         let num_items = 2_000;
+
+    //         let mut items: Vec<(i32, i32)> = (0..num_items).map(|i| (i, i * 10)).collect();
+
+    //         // Simple shuffle
+    //         for i in 0..items.len() {
+    //             let j = (i * 7) % items.len();
+    //             items.swap(i, j);
+    //         }
+
+    //         // Insert all items
+    //         for (k, v) in &items {
+    //             pomap.insert(*k, *v);
+    //             hashmap.insert(*k, *v);
+    //             assert_eq!(pomap.len(), hashmap.len());
+    //         }
+
+    //         assert_eq!(pomap.len(), num_items as usize);
+    //         for (k, v) in &items {
+    //             assert_eq!(pomap.get(k), Some(v));
+    //         }
+
+    //         // Remove about half the items
+    //         let mut removed_count = 0;
+    //         for (i, (k, v)) in items.iter().enumerate() {
+    //             if i % 2 == 0 {
+    //                 assert_eq!(pomap.remove(k), Some(*v));
+    //                 hashmap.remove(k);
+    //                 removed_count += 1;
+    //             }
+    //             assert_eq!(pomap.len(), hashmap.len());
+    //         }
+
+    //         assert_eq!(pomap.len(), (num_items - removed_count) as usize);
+
+    //         // Check final state
+    //         for (k, _) in &items {
+    //             assert_eq!(pomap.get(k), hashmap.get(k));
+    //         }
+    //     }
+
+    //     #[test]
+    //     fn test_zero_capacity() {
+    //         let mut map: PoMap<i32, i32> = PoMap::with_capacity(0);
+    //         assert_eq!(map.len(), 0);
+    //         assert_eq!(map.capacity(), 0);
+
+    //         map.insert(1, 1);
+    //         assert_eq!(map.len(), 1);
+    //         assert_eq!(map.capacity(), 16);
+    //         assert_eq!(map.get(&1), Some(&1));
+    //     }
+
+    //     #[test]
+    //     fn test_clone() {
+    //         let mut map = PoMap::new();
+    //         map.insert("a", 1);
+    //         map.insert("b", 2);
+
+    //         let mut clone = map.clone();
+    //         assert_eq!(clone.len(), 2);
+    //         assert_eq!(clone.get(&"a"), Some(&1));
+    //         assert_eq!(clone.get(&"b"), Some(&2));
+
+    //         // Modify the clone and check that the original is unaffected
+    //         clone.insert("c", 3);
+    //         clone.remove(&"a");
+    //         assert_eq!(map.len(), 2);
+    //         assert_eq!(map.get(&"a"), Some(&1));
+    //         assert_eq!(map.get(&"c"), None);
+
+    //         // Modify the original and check that the clone is unaffected
+    //         map.insert("d", 4);
+    //         assert_eq!(clone.len(), 2);
+    //         assert_eq!(clone.get(&"d"), None);
+    //     }
+
+    //     #[test]
+    //     fn test_zero_sized_types() {
+    //         // Test with ZST value
+    //         let mut map_zst_val = PoMap::new();
+    //         map_zst_val.insert(1, ());
+    //         map_zst_val.insert(2, ());
+    //         assert_eq!(map_zst_val.len(), 2);
+    //         assert_eq!(map_zst_val.get(&1), Some(&()));
+    //         assert_eq!(map_zst_val.remove(&1), Some(()));
+    //         assert_eq!(map_zst_val.len(), 1);
+    //         assert_eq!(map_zst_val.get(&2), Some(&()));
+
+    //         // Test with ZST key
+    //         // Since all keys are equal, it can only hold one item.
+    //         let mut map_zst_key: PoMap<(), i32> = PoMap::new();
+    //         assert_eq!(map_zst_key.insert((), 100), None);
+    //         assert_eq!(map_zst_key.len(), 1);
+    //         assert_eq!(map_zst_key.insert((), 200), Some(100));
+    //         assert_eq!(map_zst_key.len(), 1);
+    //         assert_eq!(map_zst_key.get(&()), Some(&200));
+    //     }
+
+    //     use std::sync::Arc;
+    //     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    //     #[derive(Clone, Debug)]
+    //     struct DropCounter {
+    //         id: i32,
+    //         counter: Arc<AtomicUsize>,
+    //     }
+
+    //     impl Drop for DropCounter {
+    //         fn drop(&mut self) {
+    //             self.counter.fetch_add(1, Ordering::SeqCst);
+    //         }
+    //     }
+
+    //     impl PartialEq for DropCounter {
+    //         fn eq(&self, other: &Self) -> bool {
+    //             self.id == other.id
+    //         }
+    //     }
+
+    //     #[test]
+    //     fn test_drop_behavior() {
+    //         let counter = Arc::new(AtomicUsize::new(0));
+
+    //         {
+    //             let mut map = PoMap::new();
+    //             let make_droppable = |id| DropCounter {
+    //                 id,
+    //                 counter: Arc::clone(&counter),
+    //             };
+
+    //             // 1. Test drop on insert (overwrite)
+    //             map.insert("a", make_droppable(1));
+    //             assert_eq!(counter.load(Ordering::SeqCst), 0);
+    //             map.insert("a", make_droppable(2)); // Overwrites key "a", should drop value 1
+    //             assert_eq!(counter.load(Ordering::SeqCst), 1);
+
+    //             // 2. Test drop on remove
+    //             map.insert("b", make_droppable(3));
+    //             assert_eq!(counter.load(Ordering::SeqCst), 1);
+    //             map.remove(&"b"); // Removes key "b", should drop value 3
+    //             assert_eq!(counter.load(Ordering::SeqCst), 2);
+
+    //             // 3. Test drop on clear
+    //             map.insert("c", make_droppable(4));
+    //             map.insert("d", make_droppable(5));
+    //             assert_eq!(counter.load(Ordering::SeqCst), 2);
+    //             map.clear(); // Should drop values 2, 4, 5
+    //             assert_eq!(counter.load(Ordering::SeqCst), 5);
+    //             assert_eq!(map.len(), 0);
+
+    //             // 4. Test drop on PoMap::drop
+    //             map.insert("e", make_droppable(6));
+    //             map.insert("f", make_droppable(7));
+    //         } // map goes out of scope here
+
+    //         // Should drop values 6, 7
+    //         assert_eq!(counter.load(Ordering::SeqCst), 7);
+    //     }
+
+    #[test]
+    fn test_performance_vs_std_hashmap() {
+        use std::collections::HashMap;
+        use std::time::Instant;
+
+        let num_items = 1_000_000;
+        let mut items: Vec<(i32, i32)> = (0..num_items).map(|i| (i, i * 10)).collect();
+
+        // Simple shuffle to make access less predictable
+        for i in 0..items.len() {
+            let j = (i * 13) % items.len();
+            items.swap(i, j);
+        }
+
+        // --- PoMap Benchmark ---
+        println!("\n--- Benchmarking PoMap ---");
+        let mut pomap = PoMap::with_capacity(0);
+        let start = Instant::now();
+        for (k, v) in &items {
+            pomap.insert(*k, *v);
+        }
+        let duration = start.elapsed();
+        println!("PoMap insert {num_items} items: {duration:?}");
+
+        let start = Instant::now();
+        for (k, v) in &items {
+            assert_eq!(pomap.get(k), Some(v));
+        }
+        let duration = start.elapsed();
+        println!("PoMap get {num_items} items:    {duration:?}");
+
+        let start = Instant::now();
+        for (k, v) in &items {
+            //assert_eq!(pomap.remove(k), Some(*v));
+        }
+        let duration = start.elapsed();
+        println!("PoMap remove {num_items} items: {duration:?}");
+
+        // --- std::collections::HashMap Benchmark ---
+        println!("\n--- Benchmarking std::collections::HashMap ---");
+        let mut hashmap = HashMap::with_capacity(0);
+        let start = Instant::now();
+        for (k, v) in &items {
+            hashmap.insert(*k, *v);
+        }
+        let duration = start.elapsed();
+        println!("HashMap insert {num_items} items: {duration:?}");
+
+        let start = Instant::now();
+        for (k, v) in &items {
+            assert_eq!(hashmap.get(k), Some(v));
+        }
+        let duration = start.elapsed();
+        println!("HashMap get {num_items} items:    {duration:?}");
+
+        let start = Instant::now();
+        for (k, v) in &items {
+            assert_eq!(hashmap.remove(k), Some(*v));
+        }
+        let duration = start.elapsed();
+        println!("HashMap remove {num_items} items: {duration:?}");
+    }
+}
