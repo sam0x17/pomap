@@ -8,7 +8,7 @@ use std::{
 
 use wide::u64x4;
 
-use crate::simd::find_match_index;
+use crate::simd::{find_match_index, find_match_index_any_of_3};
 // use std::ptr;
 // use wide::u64x4;
 
@@ -107,6 +107,50 @@ impl<K: Hash + Eq + Clone, V: Clone, H: Hasher + Default> PoMap<K, V, H> {
         }
 
         None
+    }
+
+    pub fn insert(&mut self, key: K, value: V) -> Option<V> {
+        let hash = Self::calculate_hash(&key);
+        let base_idx = self.radix_index(hash);
+
+        // Load 4 hashes with sentinel padding guaranteed
+        let ptr = unsafe { self.hashes.as_ptr().add(base_idx) };
+        let chunk = unsafe { [*ptr, *ptr.add(1), *ptr.add(2), *ptr.add(3)] };
+        let vec = u64x4::new(chunk);
+
+        const REMOVED: u64 = u64::MAX;
+        const EMPTY: u64 = u64::MIN;
+
+        // SIMD search for hash match, tombstone, or empty
+        if let Some(offset) = find_match_index_any_of_3(vec, hash, REMOVED, EMPTY) {
+            let idx = base_idx + offset;
+
+            let h = unsafe { *self.hashes.get_unchecked(idx) };
+
+            // Invariant: hash match means entry is always Some
+            if h == hash {
+                let entry = unsafe {
+                    self.entries
+                        .get_unchecked_mut(idx)
+                        .as_mut()
+                        .unwrap_unchecked()
+                };
+                if entry.key == key {
+                    let old = std::mem::replace(&mut entry.value, value);
+                    return Some(old);
+                }
+            }
+
+            // Otherwise: write new entry into REMOVED or EMPTY slot
+            self.hashes[idx] = hash;
+            self.entries[idx] = Some(Entry { key, value });
+            self.len += 1;
+            return None;
+        }
+
+        // Probe window full — need to resize and retry
+        // self.resize();
+        self.insert(key, value)
     }
 }
 
