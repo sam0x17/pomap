@@ -4,8 +4,11 @@
 use std::{
     hash::{DefaultHasher, Hash, Hasher},
     marker::PhantomData,
-    mem::MaybeUninit,
 };
+
+use wide::u64x4;
+
+use crate::simd::find_match_index;
 // use std::ptr;
 // use wide::u64x4;
 
@@ -24,25 +27,18 @@ pub struct PoMap<K: Hash + Eq + Clone, V: Clone, H: Hasher + Default = DefaultHa
     p_bits: u8, // Number of prefix bits to go from global -> slot index
     len: usize,
     hashes: Vec<u64>,
-    entries: Vec<MaybeUninit<Entry<K, V>>>,
+    entries: Vec<Option<Entry<K, V>>>,
     _phantom: PhantomData<H>,
 }
 
-fn calculate_hash<K: Hash, H: Hasher + Default>(key: &K) -> u64 {
-    let mut hasher = H::default();
-    key.hash(&mut hasher);
-    let hash = hasher.finish();
-    (hash >> 1) + 1 // clamp to [1, u64::MAX - 1] so we can use these as control values
-}
-
-impl<K: Hash + Eq + Clone, V: Clone> Default for PoMap<K, V> {
+impl<K: Hash + Eq + Clone, V: Clone, H: Hasher + Default> Default for PoMap<K, V, H> {
     #[inline(always)]
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl<K: Hash + Eq + Clone, V: Clone> PoMap<K, V> {
+impl<K: Hash + Eq + Clone, V: Clone, H: Hasher + Default> PoMap<K, V, H> {
     #[inline(always)]
     pub const fn new() -> Self {
         Self {
@@ -63,16 +59,54 @@ impl<K: Hash + Eq + Clone, V: Clone> PoMap<K, V> {
     }
 
     #[inline(always)]
-    pub fn with_capacity(capacity: usize) -> Self {
-        let mut entries: Vec<MaybeUninit<Entry<K, V>>> = Vec::with_capacity(capacity);
-        entries.resize_with(capacity, MaybeUninit::uninit);
+    pub fn with_capacity(mut capacity: usize) -> Self {
+        capacity = capacity.next_power_of_two();
         Self {
-            p_bits: 0,
+            p_bits: capacity.trailing_zeros() as u8,
             len: 0,
-            hashes: vec![EMPTY; capacity],
-            entries,
+            hashes: vec![EMPTY; capacity + 4],
+            entries: vec![None; capacity + 4],
             _phantom: PhantomData,
         }
+    }
+
+    #[inline(always)]
+    fn calculate_hash(key: &K) -> u64 {
+        let mut hasher = H::default();
+        key.hash(&mut hasher);
+        let hash = hasher.finish();
+        (hash >> 1) + 1 // clamp to [1, u64::MAX - 1] so we can use these as control values
+    }
+
+    #[inline(always)]
+    const fn radix_index(&self, hash: u64) -> usize {
+        (hash >> (64 - self.p_bits)) as usize
+    }
+
+    #[inline]
+    pub fn get(&self, key: &K) -> Option<&V> {
+        if self.len == 0 {
+            return None;
+        }
+
+        let hash = Self::calculate_hash(key);
+        let base_idx = self.radix_index(hash);
+
+        // Safe because hashes has sentinel padding (at least 4 extra elements)
+        let ptr = unsafe { self.hashes.as_ptr().add(base_idx) };
+        let chunk = unsafe { [*ptr, *ptr.add(1), *ptr.add(2), *ptr.add(3)] };
+        let vec = u64x4::new(chunk);
+
+        if let Some(offset) = find_match_index(vec, hash) {
+            let idx = base_idx + offset;
+            // SAFETY: hashes[idx] == hash → entry must be Some due to invariant
+            let entry = unsafe { self.entries.get_unchecked(idx).as_ref().unwrap_unchecked() };
+            if &entry.key == key {
+                return Some(&entry.value);
+            }
+        }
+
+        None
     }
 }
 
