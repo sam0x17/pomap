@@ -7,8 +7,8 @@ license = "MIT OR Apache-2.0"
 description = "A Prefix-Ordered Hash Map (PoMap)"
 
 [workspace.lints.clippy]
-missing_const_for_fn = "warn"
-missing_inline_in_public_items = "warn"
+missing_const_for_fn = "deny"
+missing_inline_in_public_items = "deny"
 
 [dependencies]
 safe_arch = "0.7.4"
