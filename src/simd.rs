@@ -78,7 +78,7 @@ mod avx2 {
 
 /*─────────────────────────  NEON PATH  ─────────────────────────*/
 #[cfg(all(target_arch = "aarch64", target_feature = "neon"))]
-mod neon {
+pub mod neon {
     use super::*;
     use core::arch::aarch64::{uint64x2_t, vceqq_u64, vdupq_n_u64, vgetq_lane_u64, vshrq_n_u64};
 
@@ -117,7 +117,7 @@ mod neon {
 }
 
 /*─────────────────────  PORTABLE FALLBACK  ───────────────────*/
-mod portable {
+pub mod portable {
     use super::*;
 
     #[inline(always)]
