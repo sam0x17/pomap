@@ -1,4 +1,7 @@
-use std::hash::{DefaultHasher, Hash, Hasher};
+use std::{
+    cmp::Ordering,
+    hash::{DefaultHasher, Hash, Hasher},
+};
 
 use wide::u64x4;
 
@@ -7,19 +10,19 @@ use crate::simd::{find_match_index, find_match_index_any_of_2};
 pub mod simd;
 
 const EMPTY: u64 = u64::MIN;
-const PROBE_WIDTH: usize = 4;
+const BUCKET_LEN: usize = 4;
 
 #[derive(Hash, Clone, Debug)]
 struct Entry<K: Hash + Eq + Clone, V: Clone> {
+    hash: u64,
     key: K,
     value: V,
 }
 
 #[derive(Clone)]
 pub struct PoMap<K: Hash + Eq + Clone, V: Clone> {
-    p_bits: u8, // Number of prefix bits to go from global -> slot index
+    p_bits: u8, // Number of prefix bits to go from global -> slot index, also bucket size, also log2(capacity)
     len: usize,
-    hashes: Vec<u64>,
     entries: Vec<Option<Entry<K, V>>>,
 }
 
@@ -36,7 +39,6 @@ impl<K: Hash + Eq + Clone, V: Clone> PoMap<K, V> {
         Self {
             p_bits: 0,
             len: 0,
-            hashes: Vec::new(),
             entries: Vec::new(),
         }
     }
@@ -45,7 +47,6 @@ impl<K: Hash + Eq + Clone, V: Clone> PoMap<K, V> {
     pub fn clear(&mut self) {
         self.p_bits = 0;
         self.len = 0;
-        self.hashes.clear();
         self.entries.clear();
     }
 
@@ -61,7 +62,7 @@ impl<K: Hash + Eq + Clone, V: Clone> PoMap<K, V> {
 
     #[inline(always)]
     pub fn capacity(&self) -> usize {
-        self.hashes.len().saturating_sub(PROBE_WIDTH)
+        self.entries.len()
     }
 
     #[inline(always)]
@@ -69,12 +70,11 @@ impl<K: Hash + Eq + Clone, V: Clone> PoMap<K, V> {
         if capacity == 0 {
             return Self::new();
         }
-        capacity = (capacity.max(16)).next_power_of_two();
+        capacity = (capacity.max(2)).next_power_of_two();
         Self {
             p_bits: capacity.trailing_zeros() as u8,
             len: 0,
-            hashes: vec![EMPTY; capacity + 4],
-            entries: vec![None; capacity + 4],
+            entries: vec![None; capacity],
         }
     }
 
@@ -83,39 +83,47 @@ impl<K: Hash + Eq + Clone, V: Clone> PoMap<K, V> {
         let mut hasher = DefaultHasher::new();
         key.hash(&mut hasher);
         let hash = hasher.finish();
-        (hash >> 1) + 1 // clamp to [1, u64::MAX - 1] so we can use these as control values
+        //(hash >> 1) + 1 // clamp to [1, u64::MAX - 1] so we can use these as control values
+        hash
     }
 
     #[inline(always)]
-    fn radix_index(&self, hash: u64) -> usize {
+    fn bucket_index(&self, hash: u64) -> usize {
         // debug_assert!(self.p_bits > 0, "p_bits must be greater than 0");
         // println!("({} >> (64 - {})) as usize", hash, self.p_bits);
         (hash >> (64 - self.p_bits)) as usize
     }
 
-    #[inline]
+    #[inline(always)]
+    fn entry(&self, index: usize) -> Option<&Entry<K, V>> {
+        // Safety: index is guaranteed to be within bounds of self.entries
+        unsafe { self.entries.get_unchecked(index).as_ref() }
+    }
+
+    #[inline(always)]
+    fn entry_mut(&mut self, index: usize) -> &mut Option<Entry<K, V>> {
+        // Safety: index is guaranteed to be within bounds of self.entries
+        unsafe { self.entries.get_unchecked_mut(index) }
+    }
+
+    #[inline(always)]
     pub fn get(&self, key: &K) -> Option<&V> {
         if self.len == 0 {
             return None;
         }
-
         let hash = Self::calculate_hash(key);
-        let base_idx = self.radix_index(hash);
-
-        // Safe because hashes has sentinel padding (at least 4 extra elements)
-        let ptr = unsafe { self.hashes.as_ptr().add(base_idx) };
-        let chunk = unsafe { core::ptr::read_unaligned(ptr as *const [u64; PROBE_WIDTH]) };
-        let vec = u64x4::new(chunk);
-
-        if let Some(offset) = find_match_index(vec, hash) {
-            let idx = base_idx + offset;
-            // SAFETY: hashes[idx] == hash → entry must be Some due to invariant
-            let entry = unsafe { self.entries.get_unchecked(idx).as_ref().unwrap_unchecked() };
-            if &entry.key == key {
-                return Some(&entry.value);
+        let bucket_index = self.bucket_index(hash);
+        for i in bucket_index..(bucket_index + self.p_bits as usize) {
+            let Some(entry) = self.entry(i) else {
+                // no entry here, not found
+                break;
+            };
+            match entry.hash.cmp(&hash) {
+                Ordering::Equal if entry.key == *key => return Some(&entry.value),
+                Ordering::Less => break, // hash exceeded (they are sorted), not found
+                _ => continue,
             }
         }
-
         None
     }
 
@@ -127,7 +135,7 @@ impl<K: Hash + Eq + Clone, V: Clone> PoMap<K, V> {
         }
 
         loop {
-            let base_idx = self.radix_index(hash);
+            let base_idx = self.bucket_index(hash);
 
             /*println!(
                 "→ hash = {}, p_bits = {}, base_idx = {}",
