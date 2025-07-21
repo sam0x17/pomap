@@ -12,28 +12,40 @@ pub mod simd;
 const EMPTY: u64 = u64::MIN;
 const BUCKET_LEN: usize = 4;
 
+#[cfg(feature = "compare-keys")]
+trait Key: Hash + Eq + Clone + Ord {}
+#[cfg(feature = "compare-keys")]
+impl<K: Hash + Eq + Clone + Ord> Key for K {}
+#[cfg(not(feature = "compare-keys"))]
+trait Key: Hash + Eq + Clone {}
+#[cfg(not(feature = "compare-keys"))]
+impl<K: Hash + Eq + Clone> Key for K {}
+
+trait Value: Clone {}
+impl<V: Clone> Value for V {}
+
 #[derive(Hash, Clone, Debug)]
-struct Entry<K: Hash + Eq + Clone, V: Clone> {
+struct Entry<K: Key, V: Value> {
     hash: u64,
     key: K,
     value: V,
 }
 
 #[derive(Clone)]
-pub struct PoMap<K: Hash + Eq + Clone, V: Clone> {
+pub struct PoMap<K: Key, V: Value> {
     p_bits: u8, // Number of prefix bits to go from global -> slot index, also bucket size, also log2(capacity)
     len: usize,
     entries: Vec<Option<Entry<K, V>>>,
 }
 
-impl<K: Hash + Eq + Clone, V: Clone> Default for PoMap<K, V> {
+impl<K: Key, V: Value> Default for PoMap<K, V> {
     #[inline(always)]
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl<K: Hash + Eq + Clone, V: Clone> PoMap<K, V> {
+impl<K: Key, V: Value> PoMap<K, V> {
     #[inline(always)]
     pub const fn new() -> Self {
         Self {
@@ -113,12 +125,32 @@ impl<K: Hash + Eq + Clone, V: Clone> PoMap<K, V> {
         }
         let hash = Self::calculate_hash(key);
         let bucket_index = self.bucket_index(hash);
+        #[cfg(feature = "binary-search")]
+        if let Ok(index) = (&self.entries[bucket_index..(bucket_index + self.p_bits as usize)])
+            .binary_search_by(|e| {
+                match e {
+                    #[cfg(not(feature = "compare-keys"))]
+                    Some(entry) => entry.hash.cmp(&hash),
+                    #[cfg(feature = "compare-keys")]
+                    Some(entry) => entry.hash.cmp(&hash).then_with(|| entry.key.cmp(key)),
+                    None => Ordering::Greater, // treat None as larger than any hash
+                }
+            })
+        {
+            return self.entries[bucket_index + index]
+                .as_ref()
+                .map(|e| &e.value);
+        }
+        #[cfg(not(feature = "binary-search"))]
         for i in bucket_index..(bucket_index + self.p_bits as usize) {
             let Some(entry) = self.entry(i) else {
                 // no entry here, not found
                 break;
             };
             match entry.hash.cmp(&hash) {
+                #[cfg(not(feature = "compare-keys"))]
+                Ordering::Equal => return Some(&entry.value),
+                #[cfg(feature = "compare-keys")]
                 Ordering::Equal if entry.key == *key => return Some(&entry.value),
                 Ordering::Less => break, // hash exceeded (they are sorted), not found
                 _ => continue,

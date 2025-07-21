@@ -13,3 +13,8 @@ missing_inline_in_public_items = "deny"
 [dependencies]
 safe_arch = "0.7.4"
 wide = "0.7.33"
+
+[features]
+default-features = ["binary-search", "compare-keys"]
+binary-search = []
+compare-keys = []
