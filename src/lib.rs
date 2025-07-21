@@ -11,6 +11,7 @@ pub mod simd;
 
 const EMPTY: u64 = u64::MIN;
 const BUCKET_LEN: usize = 4;
+const NUM_SWAPS_ALLOWED: usize = 1;
 
 #[cfg(feature = "compare-keys")]
 trait Key: Hash + Eq + Clone + Ord {}
@@ -161,60 +162,83 @@ impl<K: Key, V: Value> PoMap<K, V> {
 
     #[inline(always)]
     fn insert_with_hash(&mut self, hash: u64, key: K, value: V) -> Option<V> {
-        if self.p_bits == 0 {
-            *self = PoMap::with_capacity(PROBE_WIDTH);
-            return self.insert_with_hash(hash, key, value);
+        if self.entries.is_empty() {
+            debug_assert_eq!(self.len, 0);
+            // map is empty
+            // fill with 4 buckets of 4
+            self.entries.append(&mut vec![None; 16]);
+            self.p_bits = 4;
         }
-
         loop {
-            let base_idx = self.bucket_index(hash);
-
-            /*println!(
-                "→ hash = {}, p_bits = {}, base_idx = {}",
-                hash, self.p_bits, base_idx
-            );*/
-
-            let ptr = unsafe { self.hashes.as_ptr().add(base_idx) };
-            let chunk = unsafe { core::ptr::read_unaligned(ptr as *const [u64; PROBE_WIDTH]) };
-            let vec = u64x4::new(chunk);
-
-            if let Some(offset) = find_match_index_any_of_2(vec, hash, EMPTY) {
-                let idx = base_idx + offset;
-                let h = unsafe { *self.hashes.get_unchecked(idx) };
-
-                if h == hash {
-                    let entry = unsafe {
-                        self.entries
-                            .get_unchecked_mut(idx)
-                            .as_mut()
-                            .unwrap_unchecked()
-                    };
-                    if entry.key == key {
-                        return Some(std::mem::replace(&mut entry.value, value));
+            let bucket_index = self.bucket_index(hash);
+            #[cfg(not(feature = "binary-search"))]
+            let start_index = bucket_index;
+            let end_index = bucket_index + self.p_bits as usize;
+            #[cfg(feature = "binary-search")]
+            let start_index = match (&self.entries[bucket_index..end_index]).binary_search_by(|e| {
+                match e {
+                    #[cfg(not(feature = "compare-keys"))]
+                    Some(entry) => entry.hash.cmp(&hash),
+                    #[cfg(feature = "compare-keys")]
+                    Some(entry) => entry.hash.cmp(&hash).then_with(|| entry.key.cmp(key)),
+                    None => Ordering::Greater, // treat None as larger than any hash
+                }
+            }) {
+                Ok(index) => {
+                    // found an entry with the same hash
+                    let entry_index = bucket_index + index;
+                    let entry = self.entry_mut(entry_index);
+                    #[cfg(not(feature = "compare-keys"))]
+                    if let Some(existing_entry) = entry {
+                        // overwrite existing value
+                        let old_value = std::mem::replace(&mut existing_entry.value, value);
+                        return Some(old_value);
                     }
-                } else {
-                    // Found EMPTY
-                    self.hashes[idx] = hash;
-                    self.entries[idx] = Some(Entry { key, value });
-                    self.len += 1;
-                    return None;
+                    #[cfg(feature = "compare-keys")]
+                    if let Some(existing_entry) = entry {
+                        if existing_entry.key == key {
+                            // overwrite existing value
+                            let old_value = std::mem::replace(&mut existing_entry.value, value);
+                            return Some(old_value);
+                        }
+                    }
+                    // we already know this entry is occupied, so the next possible insertion point
+                    // is the next index
+                    bucket_index + index + 1
+                }
+                Err(index) => bucket_index + index,
+            };
+            for i in start_index..end_index {
+                match self.entry_mut(i) {
+                    Some(entry) => {
+                        if entry.hash > hash {
+                            // this element is larger, so we need to insert here, see if we can
+                            // swap elements out of the
+                            // TODO: limit number of swaps here optionally
+                            for j in i..end_index {
+                                if self.entry(j).is_none() {
+                                    // Found an empty slot at `j`. Shift elements from `i` to `j-1` one position to the right.
+                                    for k in (i..j).rev() {
+                                        self.entries[k + 1] = self.entries[k].clone();
+                                    }
+                                    // The slot at `i` is now free.
+                                    *self.entry_mut(i) = Some(Entry { hash, key, value });
+                                    self.len += 1;
+                                    return None;
+                                }
+                            }
+                        }
+                    }
+                    None => {
+                        // found an empty slot, insert here
+                        *self.entry_mut(i) = Some(Entry { hash, key, value });
+                        self.len += 1;
+                        return None; // no previous value to return
+                    }
                 }
             }
-
-            // Resize and reinsert everything, including the current key
-            let mut new_map = PoMap::with_capacity(self.capacity() * 2);
-
-            for i in 0..self.hashes.len() {
-                let h = self.hashes[i];
-                if h != EMPTY {
-                    let e = self.entries[i].take().unwrap();
-                    new_map.insert_with_hash(h, e.key, e.value);
-                }
-            }
-
-            new_map.insert_with_hash(hash, key, value);
-            *self = new_map;
-            return None;
+            // must resize
+            self.reserve(self.capacity() * 2);
         }
     }
 
@@ -225,466 +249,29 @@ impl<K: Key, V: Value> PoMap<K, V> {
         // println!("[PoMap] Inserting key with hash: {}", hash);
         self.insert_with_hash(hash, key, value)
     }
+
+    #[inline(always)]
+    pub fn reserve(&mut self, capacity: usize) {
+        if capacity <= self.capacity() {
+            return; // no need to reserve more space
+        }
+        let new_capacity = (capacity.max(2)).next_power_of_two();
+        if new_capacity > self.capacity() {
+            // println!("Reserving new capacity: {}", new_capacity);
+            let old_p_bits = self.p_bits;
+            let old_capacity = self.capacity();
+            self.p_bits = new_capacity.trailing_zeros() as u8;
+            // the buckets themselves and their contents are already ordered by hash, so we can
+            // directly copy into the new array just with different spacing based on the new
+            // bucket boundaries
+            let mut new_entries = vec![None; new_capacity];
+            for bucket_index in 0..old_p_bits {
+                let start_index = bucket_index * old_p_bits as usize;
+                let end_index = start_index + old_p_bits as usize;
+            }
+        }
+    }
 }
-
-// #[derive(Clone, Debug, PartialEq, Eq, Default)]
-// struct Bucket<K: Hash + Eq + Clone, V: Clone> {
-//     hashes: u64x4,
-//     entries: [Entry<K, V>; WIDE_LEN],
-// }
-
-// #[inline(always)]
-// fn find_match_index(vec: u64x4, target: u64) -> Option<usize> {
-//     // lane = 0xFFFF_FFFF_FFFF_FFFF if equal, else 0
-//     let cmp = vec.cmp_eq(u64x4::splat(target));
-
-//     // pull the top bit of each lane (now 0 or 1)
-//     let hi_bits: u64x4 = cmp >> 63; // shift by *scalar* 63, OK
-
-//     // convert to array so we can collapse to one byte
-//     let a = hi_bits.to_array(); // [u64; 4], each element 0 or 1
-
-//     // pack into a 4‑bit mask: bit i == 1 if lane i matched
-//     let mask: u8 = (a[0] as u8) | ((a[1] as u8) << 1) | ((a[2] as u8) << 2) | ((a[3] as u8) << 3);
-
-//     if mask == 0 {
-//         None
-//     } else {
-//         Some(mask.trailing_zeros() as usize)
-//     }
-// }
-
-// /// A Prefix-Ordered Hash Map (PoMap).
-// ///
-// /// This map uses a cache-conscious, array-based layout to provide fast lookups
-// /// and an elegant, single-pass resize operation. It is implemented using manually
-// /// allocated memory, giving it the same performance characteristics as `Vec`
-// /// without requiring `K: Default` or `V: Default` trait bounds.
-// ///
-// /// The core idea is to partition the key space by the top `p` bits of their hash.
-// /// These partitions are called buckets. Each bucket has a capacity of `k`, where
-// /// `k` is `log(capacity)`. Within each bucket, entries are kept sorted by their
-// /// full hash value, allowing for binary search during lookups and insertions.
-// #[derive(Clone, Debug, PartialEq, Eq, Default)]
-// pub struct PoMap<K: Hash + Eq + Clone, V: Clone> {
-//     p: u8, // Number of prefix bits
-//     len: usize,
-//     buckets: Vec<Bucket<K, V>>,
-// }
-
-// impl<K: Hash + Eq + Clone, V: Clone> PoMap<K, V> {
-//     /// Creates an empty `PoMap`.
-//     ///
-//     /// The map will not allocate until the first element is inserted.
-//     ///
-//     /// # Examples
-//     ///
-//     /// ```
-//     /// use pomap::PoMap;
-//     /// let mut map: PoMap<&str, i32> = PoMap::new();
-//     /// ```
-//     pub fn new() -> Self {
-//         Self {
-//             p: 0,
-//             len: 0,
-//             buckets: Vec::new(),
-//         }
-//     }
-
-//     /// Clears the map, removing all key-value pairs while retaining the allocated capacity.
-//     ///
-//     /// # Time Complexity
-//     ///
-//     /// `O(N)` where N is the number of elements, because it must drop each element.
-//     /// If the key and value types do not need to be dropped (e.g., are `Copy`),
-//     /// the complexity is `O(1)` because it can zero out the index memory directly.
-//     ///
-//     /// # Examples
-//     ///
-//     /// ```
-//     /// use pomap::PoMap;
-//     /// let mut map = PoMap::new();
-//     /// map.insert("a", 1);
-//     /// map.clear();
-//     /// assert!(map.is_empty());
-//     /// ```
-//     pub fn clear(&mut self) {
-//         self.buckets.clear();
-//         self.p = 0;
-//         self.len = 0;
-//     }
-
-//     /// Creates an empty `PoMap` with at least the specified capacity.
-//     ///
-//     /// The map will be able to hold at least `capacity` elements without
-//     /// reallocating. If `capacity` is 0, the map will not allocate.
-//     ///
-//     /// The actual capacity will be the next power of two.
-//     ///
-//     /// # Examples
-//     ///
-//     /// ```
-//     /// use pomap::PoMap;
-//     /// let mut map: PoMap<&str, i32> = PoMap::with_capacity(10);
-//     /// assert!(map.capacity() >= 10);
-//     /// ```
-//     pub fn with_capacity(capacity: usize) -> Self {
-//         Self {
-//             p: 0,
-//             len: 0,
-//             buckets: Vec::with_capacity(capacity),
-//         }
-//     }
-
-//     #[inline(always)]
-//     fn hash_key(key: &K) -> u64 {
-//         let mut hasher = DefaultHasher::new();
-//         key.hash(&mut hasher);
-//         hasher.finish()
-//     }
-
-//     #[inline(always)]
-//     fn get_bucket_idx(&self, hash: u64) -> usize {
-//         let num_buckets = self.buckets.len();
-//         if num_buckets == 0 {
-//             return 0;
-//         }
-//         (hash >> (64 - self.p)) as usize % num_buckets
-//     }
-
-//     #[inline(always)]
-//     fn find_key_in_bucket(&self, bucket: &Bucket<K, V>, key: &K, hash: u64) -> Option<usize> {
-//         let Some(index) = simd::find_match_index(bucket.hashes, hash) else {
-//             return None;
-//         };
-//         let entry = &bucket.entries[index];
-//         if &entry.key == key { Some(index) } else { None }
-//     }
-
-//     /// Returns the number of elements in the map.
-//     ///
-//     /// # Examples
-//     ///
-//     /// ```
-//     /// use pomap::PoMap;
-//     /// let mut map = PoMap::new();
-//     /// assert_eq!(map.len(), 0);
-//     /// map.insert("a", 1);
-//     /// assert_eq!(map.len(), 1);
-//     /// ```
-//     pub fn len(&self) -> usize {
-//         self.len
-//     }
-
-//     /// Returns `true` if the map contains no elements.
-//     ///
-//     /// # Examples
-//     ///
-//     /// ```
-//     /// use pomap::PoMap;
-//     /// let mut map = PoMap::new();
-//     /// assert!(map.is_empty());
-//     /// map.insert("a", 1);
-//     /// assert!(!map.is_empty());
-//     /// ```
-//     pub fn is_empty(&self) -> bool {
-//         self.len == 0
-//     }
-
-//     /// Returns the number of elements the map can hold without reallocating.
-//     ///
-//     /// # Examples
-//     ///
-//     /// ```
-//     /// use pomap::PoMap;
-//     /// let map: PoMap<i32, i32> = PoMap::with_capacity(10);
-//     /// assert!(map.capacity() >= 10);
-//     /// ```
-//     pub fn capacity(&self) -> usize {
-//         self.buckets.capacity() * WIDE_LEN
-//     }
-
-//     /// Inserts a key-value pair into the map.
-//     ///
-//     /// If the map did not have this key present, `None` is returned.
-//     ///
-//     /// If the map did have this key present, the value is updated, and the old
-//     /// value is returned. The key is not updated, though; this matters for
-//     /// types that can be `==` without being identical.
-//     ///
-//     /// # Time Complexity
-//     ///
-//     /// The average time complexity is `O(log N)` where N is the number of elements in the map.
-//     /// This is because finding the insertion point involves a binary search within a bucket
-//     /// of size `log(N)`, followed by shifting elements within that bucket.
-//     ///
-//     /// The worst-case complexity is also `O(log N)`, unless there are many hash collisions,
-//     /// in which case the linear scan for the correct key can dominate.
-//     ///
-//     /// When insertion triggers a resize, the complexity is `O(N)`, but this is amortized
-//     /// to `O(log N)` over many insertions.
-//     ///
-//     /// It is worth noting that the resize operation is particularly efficient and runs in a
-//     /// single linear scan.
-//     ///
-//     /// # Examples
-//     ///
-//     /// ```
-//     /// use pomap::PoMap;
-//     /// let mut map = PoMap::new();
-//     /// assert_eq!(map.insert("a", 1), None);
-//     /// assert!(!map.is_empty());
-//     ///
-//     /// map.insert("a", 2);
-//     /// assert_eq!(map.insert("a", 3), Some(2));
-//     /// assert_eq!(map.get(&"a"), Some(&3));
-//     /// ```
-//     pub fn insert(&mut self, key: K, value: V) -> Option<V> {
-//         // --- Resize Logic ---
-//         // Stage 1: Check if we need to resize due to the load factor.
-//         if self.capacity == 0 || self.len + 1 > (self.capacity as f64 * LOAD_FACTOR) as usize {
-//             let new_capacity = if self.capacity == 0 {
-//                 16
-//             } else {
-//                 self.capacity * 2
-//             };
-//             self.resize(new_capacity);
-//         }
-
-//         // Stage 2: Check if the target bucket is full. This requires re-calculating
-//         // the hash and bucket index in case the first resize happened.
-//         let hash = Self::hash_key(&key);
-//         let mut bucket_idx = self.get_bucket_idx(hash);
-
-//         let mut index_base = bucket_idx * (self.k + 1);
-//         let mut len = unsafe { *self.indices.add(index_base) } as usize;
-
-//         if len >= self.k {
-//             self.resize(self.capacity * 2);
-//             // After this resize, we MUST re-calculate all layout-dependent variables.
-//             bucket_idx = self.get_bucket_idx(hash);
-//             index_base = bucket_idx * (self.k + 1);
-//         }
-//         // --- End Resize Logic ---
-
-//         // Now that we've resized (if necessary), we can safely proceed.
-//         if let Some((abs_idx, _)) = self.find_key_in_bucket(bucket_idx, &key, hash) {
-//             unsafe {
-//                 let entry_ptr = self.data.add(abs_idx);
-//                 // Safety: entry_ptr is valid and points to an existing element.
-//                 // ptr::replace swaps the value and returns the old one, which is what we want.
-//                 let old_value = ptr::replace(&mut (*entry_ptr).value, value);
-//                 return Some(old_value);
-//             }
-//         }
-
-//         // Re-fetch len as it might have changed if we resized due to bucket overflow.
-//         len = unsafe { *self.indices.add(index_base) } as usize;
-//         let data_base = bucket_idx * self.k;
-//         let rel_data_idx = len as u8;
-//         unsafe {
-//             self.data
-//                 .add(data_base + rel_data_idx as usize)
-//                 .write(Entry { key, value, hash });
-//         }
-
-//         let index_slice_start = unsafe { self.indices.add(index_base + 1) };
-//         let insert_pos = unsafe {
-//             let slice = std::slice::from_raw_parts(index_slice_start, len);
-//             match slice.binary_search_by_key(&hash, |rel_idx| {
-//                 (*self.data.add(data_base + *rel_idx as usize)).hash
-//             }) {
-//                 Ok(pos) => pos,
-//                 Err(pos) => pos,
-//             }
-//         };
-
-//         let insert_offset = index_base + 1 + insert_pos;
-//         unsafe {
-//             let slice_ptr = self.indices.add(insert_offset);
-//             ptr::copy(slice_ptr, slice_ptr.add(1), len - insert_pos);
-//             *slice_ptr = rel_data_idx;
-//         }
-//         unsafe {
-//             *self.indices.add(index_base) += 1; // Increment length
-//         }
-//         self.len += 1;
-//         None
-//     }
-
-//     /// Returns a reference to the value corresponding to the key.
-//     ///
-//     /// # Time Complexity
-//     ///
-//     /// The average time complexity is `O(log(log N))` where N is the number of elements.
-//     /// This is because lookup is a binary search within a bucket of size `log(N)`.
-//     ///
-//     /// The worst-case complexity due to hash collisions is `O(log N)`, as it may require
-//     /// scanning the entire bucket.
-//     ///
-//     /// # Examples
-//     ///
-//     /// ```
-//     /// use pomap::PoMap;
-//     /// let mut map = PoMap::new();
-//     /// map.insert("a", 1);
-//     /// assert_eq!(map.get(&"a"), Some(&1));
-//     /// assert_eq!(map.get(&"b"), None);
-//     /// ```
-//     pub fn get(&self, key: &K) -> Option<&V> {
-//         if self.is_empty() {
-//             return None;
-//         }
-//         let hash = Self::hash_key(key);
-//         let bucket_idx = self.get_bucket_idx(hash);
-
-//         self.find_key_in_bucket(bucket_idx, key, hash)
-//             .map(|(abs_idx, _)| unsafe { &(*self.data.add(abs_idx)).value })
-//     }
-
-//     /// Removes a key from the map, returning the value at the key if the key
-//     /// was previously in the map.
-//     ///
-//     /// # Time Complexity
-//     ///
-//     /// The average and worst-case time complexity is `O(log N)` where N is the number of elements.
-//     /// This is because `remove` must find the element (a `O(log(log N))` binary search) and then
-//     /// compact the data and index arrays by shifting elements, which takes `O(log N)` time.
-//     ///
-//     /// # Examples
-//     ///
-//     /// ```
-//     /// use pomap::PoMap;
-//     /// let mut map = PoMap::new();
-//     /// map.insert("a", 1);
-//     /// assert_eq!(map.remove(&"a"), Some(1));
-//     /// assert_eq!(map.remove(&"a"), None);
-//     /// ```
-//     pub fn remove(&mut self, key: &K) -> Option<V> {
-//         if self.is_empty() {
-//             return None;
-//         }
-//         let hash = Self::hash_key(key);
-//         let bucket_idx = self.get_bucket_idx(hash);
-
-//         let (abs_idx_to_remove, index_pos_to_remove) =
-//             self.find_key_in_bucket(bucket_idx, key, hash)?;
-
-//         // Read the entire entry out. This leaves the slot logically uninitialized.
-//         // The key will be dropped at the end of this function, and we return the value.
-//         let entry_to_remove = unsafe { ptr::read(self.data.add(abs_idx_to_remove)) };
-//         let value = entry_to_remove.value;
-
-//         let data_base = bucket_idx * self.k;
-//         let index_base = bucket_idx * (self.k + 1);
-//         let len = unsafe { *self.indices.add(index_base) } as usize;
-//         let rel_idx_to_remove = (abs_idx_to_remove - data_base) as u8;
-
-//         // Shift data elements to the left to fill the gap.
-//         for i in abs_idx_to_remove..(data_base + len - 1) {
-//             unsafe {
-//                 let src = self.data.add(i + 1);
-//                 let dst = self.data.add(i);
-//                 ptr::copy_nonoverlapping(src, dst, 1);
-//             }
-//         }
-
-//         // Update indices that pointed to shifted elements.
-//         // Any index greater than the one we removed needs to be decremented.
-//         let index_slice_start = unsafe { self.indices.add(index_base + 1) };
-//         for i in 0..len {
-//             let rel_idx_ptr = unsafe { index_slice_start.add(i) };
-//             let rel_idx = unsafe { *rel_idx_ptr };
-//             if rel_idx > rel_idx_to_remove {
-//                 unsafe {
-//                     *rel_idx_ptr -= 1;
-//                 }
-//             }
-//         }
-
-//         // Now, remove the index from the sorted index list
-//         let index_slice_start_for_remove = unsafe { index_slice_start.add(index_pos_to_remove) };
-//         unsafe {
-//             ptr::copy(
-//                 index_slice_start_for_remove.add(1),
-//                 index_slice_start_for_remove,
-//                 len - index_pos_to_remove - 1,
-//             );
-//         }
-
-//         unsafe {
-//             *self.indices.add(index_base) -= 1; // Decrement length
-//         }
-//         self.len -= 1;
-//         Some(value)
-//     }
-
-//     fn resize(&mut self, new_capacity: usize) {
-//         let (new_k, new_p, new_num_buckets) = Self::calculate_layout(new_capacity);
-
-//         let new_data_layout = Layout::array::<Entry<K, V>>(new_capacity).unwrap();
-//         let new_data = unsafe { alloc::alloc(new_data_layout) as *mut Entry<K, V> };
-
-//         let new_indices_layout = Layout::array::<u8>(new_num_buckets * (new_k + 1)).unwrap();
-//         let new_indices = unsafe { alloc::alloc_zeroed(new_indices_layout) };
-
-//         if new_data.is_null() || new_indices.is_null() {
-//             panic!("Failed to allocate memory for PoMap resize");
-//         }
-
-//         let old_num_buckets = self.num_buckets;
-//         let old_data = self.data;
-//         let old_indices = self.indices;
-//         let old_capacity = self.capacity;
-//         let old_k = self.k;
-
-//         self.capacity = new_capacity;
-//         self.k = new_k;
-//         self.p = new_p;
-//         self.num_buckets = new_num_buckets;
-//         self.data = new_data;
-//         self.indices = new_indices;
-
-//         if old_capacity > 0 {
-//             for old_bucket_idx in 0..old_num_buckets {
-//                 let old_data_base = old_bucket_idx * old_k;
-//                 let old_index_base = old_bucket_idx * (old_k + 1);
-//                 let old_len = unsafe { *old_indices.add(old_index_base) } as usize;
-
-//                 let old_index_slice_start = unsafe { old_indices.add(old_index_base + 1) };
-
-//                 for i in 0..old_len {
-//                     let rel_old_idx = unsafe { *old_index_slice_start.add(i) } as usize;
-//                     let abs_old_idx = old_data_base + rel_old_idx;
-//                     let element = unsafe { ptr::read(old_data.add(abs_old_idx)) };
-//                     let new_bucket_idx = self.get_bucket_idx(element.hash);
-
-//                     let new_data_base = new_bucket_idx * self.k;
-//                     let new_index_base = new_bucket_idx * (self.k + 1);
-//                     let len = unsafe { *self.indices.add(new_index_base) } as usize;
-
-//                     // Relative index is just current length (defragment buckets)
-//                     let rel_data_idx = len as u8;
-//                     unsafe {
-//                         self.data
-//                             .add(new_data_base + rel_data_idx as usize)
-//                             .write(element);
-//                         // append index directly since we are processing in hash order
-//                         *self.indices.add(new_index_base + 1 + len) = rel_data_idx;
-//                         *self.indices.add(new_index_base) += 1;
-//                     }
-//                 }
-//             }
-
-//             // Deallocate old memory
-//             let old_data_layout = Layout::array::<Entry<K, V>>(old_capacity).unwrap();
-//             unsafe { alloc::dealloc(old_data as *mut u8, old_data_layout) };
-
-//             let old_indices_layout = Layout::array::<u8>(old_num_buckets * (old_k + 1)).unwrap();
-//             unsafe { alloc::dealloc(old_indices, old_indices_layout) };
-//         }
-//     }
-// }
 
 // --- Unit Tests ---
 #[cfg(test)]
