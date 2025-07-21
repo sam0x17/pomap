@@ -101,10 +101,10 @@ impl<K: Key, V: Value> PoMap<K, V> {
     }
 
     #[inline(always)]
-    fn bucket_index(&self, hash: u64) -> usize {
+    fn bucket_index(&self, p_bits: u8, hash: u64) -> usize {
         // debug_assert!(self.p_bits > 0, "p_bits must be greater than 0");
         // println!("({} >> (64 - {})) as usize", hash, self.p_bits);
-        (hash >> (64 - self.p_bits)) as usize
+        (hash >> (64 - p_bits)) as usize
     }
 
     #[inline(always)]
@@ -125,7 +125,7 @@ impl<K: Key, V: Value> PoMap<K, V> {
             return None;
         }
         let hash = Self::calculate_hash(key);
-        let bucket_index = self.bucket_index(hash);
+        let bucket_index = self.bucket_index(self.p_bits, hash);
         #[cfg(feature = "binary-search")]
         if let Ok(index) = (&self.entries[bucket_index..(bucket_index + self.p_bits as usize)])
             .binary_search_by(|e| {
@@ -170,7 +170,7 @@ impl<K: Key, V: Value> PoMap<K, V> {
             self.p_bits = 4;
         }
         loop {
-            let bucket_index = self.bucket_index(hash);
+            let bucket_index = self.bucket_index(self.p_bits, hash);
             #[cfg(not(feature = "binary-search"))]
             let start_index = bucket_index;
             let end_index = bucket_index + self.p_bits as usize;
@@ -258,17 +258,31 @@ impl<K: Key, V: Value> PoMap<K, V> {
         let new_capacity = (capacity.max(2)).next_power_of_two();
         if new_capacity > self.capacity() {
             // println!("Reserving new capacity: {}", new_capacity);
-            let old_p_bits = self.p_bits;
-            let old_capacity = self.capacity();
-            self.p_bits = new_capacity.trailing_zeros() as u8;
+            let new_p_bits = new_capacity.trailing_zeros() as u8;
             // the buckets themselves and their contents are already ordered by hash, so we can
             // directly copy into the new array just with different spacing based on the new
             // bucket boundaries
             let mut new_entries = vec![None; new_capacity];
-            for bucket_index in 0..old_p_bits {
-                let start_index = bucket_index * old_p_bits as usize;
-                let end_index = start_index + old_p_bits as usize;
+            let mut bucket_filled_lengths = vec![0usize; new_capacity / new_p_bits as usize];
+            for entry in self.entries.iter().cloned().filter_map(|e| e) {
+                let bucket_index = self.bucket_index(new_p_bits, entry.hash);
+                let bucket_start = bucket_index * new_p_bits as usize;
+                let bucket_filled_length = bucket_filled_lengths[bucket_index];
+                debug_assert!(
+                    bucket_filled_length < new_p_bits as usize,
+                    "Bucket overflow detected during resize",
+                );
+                bucket_filled_lengths[bucket_index] += 1;
+                debug_assert!(
+                    new_entries
+                        .get(bucket_start + bucket_filled_length)
+                        .is_none()
+                );
+                new_entries[bucket_start + bucket_filled_length] = Some(entry);
             }
+            self.p_bits = new_p_bits;
+            self.entries = new_entries;
+            // len stays the same
         }
     }
 }
