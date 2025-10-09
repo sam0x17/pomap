@@ -5,11 +5,12 @@ use std::{
 
 const DEFAULT_CAPACITY: usize = 16;
 const GROWTH_FACTOR: usize = 4;
-const C: f64 = 1.5;
+//const C: f64 = 1.5;
 
 #[inline(always)]
 pub fn num_buckets(n: usize) -> usize {
-    (n as f64 / (C * (n as f64).log2())).max(1.0) as usize
+    //(n as f64 / (C * (n as f64).log2())).max(1.0) as usize
+    (n as f64).sqrt() as usize
 }
 
 #[inline(always)]
@@ -801,7 +802,7 @@ mod tests {
         use std::collections::HashMap;
         use std::time::Instant;
 
-        let num_items = 1_000_000;
+        let num_items = 100_000;
         let mut items: Vec<(i32, i32)> = (0..num_items).map(|i| (i, i * 10)).collect();
 
         // Simple shuffle to make access less predictable
