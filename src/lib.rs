@@ -4,7 +4,7 @@ use std::{
 };
 
 const DEFAULT_CAPACITY: usize = 16;
-const GROWTH_FACTOR: usize = 2;
+const GROWTH_FACTOR: usize = 8;
 //const C: f64 = 1.5;
 
 #[inline(always)]
