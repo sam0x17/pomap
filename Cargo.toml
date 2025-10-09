@@ -22,3 +22,12 @@ rand = "0.8"
 [[bench]]
 name = "operations"
 harness = false
+
+[profile.release]
+lto = true
+codegen-units = 1
+opt-level = 3
+
+[profile.release.package."*"]
+opt-level = 3
+codegen-units = 1
