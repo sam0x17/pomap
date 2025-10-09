@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use criterion::{BatchSize, Criterion, Throughput, black_box, criterion_group, criterion_main};
 use pomap::PoMap;
 
-const INPUT_SIZE: usize = 10_000;
+const INPUT_SIZE: usize = 25000;
 
 fn bench_insert_allocate(c: &mut Criterion) {
     let keys: Vec<i32> = (0..INPUT_SIZE as i32).collect();
