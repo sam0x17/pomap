@@ -14,3 +14,10 @@ missing_inline_in_public_items = "deny"
 default = ["compare-keys"]
 binary-search = []
 compare-keys = []
+
+[dev-dependencies]
+criterion = { version = "0.5", features = ["html_reports"] }
+
+[[bench]]
+name = "operations"
+harness = false
