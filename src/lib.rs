@@ -3,26 +3,48 @@ use std::{
     hash::{DefaultHasher, Hash, Hasher},
 };
 
-use wide::u64x4;
+const DEFAULT_CAPACITY: usize = 16;
+const GROWTH_FACTOR: usize = 4;
 
-use crate::simd::{find_match_index, find_match_index_any_of_2};
+const fn floor_log2(mut n: usize) -> usize {
+    let mut log = 0usize;
+    while n > 1 {
+        n >>= 1;
+        log += 1;
+    }
+    log
+}
 
-pub mod simd;
+pub const fn num_buckets(n: usize) -> usize {
+    if n <= 1 {
+        1
+    } else {
+        let log = floor_log2(n);
+        if log <= 1 { n } else { n / log }
+    }
+}
 
-const EMPTY: u64 = u64::MIN;
-const BUCKET_LEN: usize = 4;
-const NUM_SWAPS_ALLOWED: usize = 1;
+#[inline(always)]
+fn bucket_id_from_bits(hash: u64, bucket_bits: u8) -> usize {
+    if bucket_bits == 0 {
+        0
+    } else {
+        let shift = 64 - bucket_bits as u32;
+        let mask = (1usize << bucket_bits) - 1;
+        ((hash >> shift) as usize) & mask
+    }
+}
 
 #[cfg(feature = "compare-keys")]
-trait Key: Hash + Eq + Clone + Ord {}
+pub trait Key: Hash + Eq + Clone + Ord {}
 #[cfg(feature = "compare-keys")]
 impl<K: Hash + Eq + Clone + Ord> Key for K {}
 #[cfg(not(feature = "compare-keys"))]
-trait Key: Hash + Eq + Clone {}
+pub trait Key: Hash + Eq + Clone {}
 #[cfg(not(feature = "compare-keys"))]
 impl<K: Hash + Eq + Clone> Key for K {}
 
-trait Value: Clone {}
+pub trait Value: Clone {}
 impl<V: Clone> Value for V {}
 
 #[derive(Hash, Clone, Debug)]
@@ -34,7 +56,8 @@ struct Entry<K: Key, V: Value> {
 
 #[derive(Clone)]
 pub struct PoMap<K: Key, V: Value> {
-    p_bits: u8, // Number of prefix bits to go from global -> slot index, also bucket size, also log2(capacity)
+    bucket_bits: u8,
+    bucket_len: usize,
     len: usize,
     entries: Vec<Option<Entry<K, V>>>,
 }
@@ -50,7 +73,8 @@ impl<K: Key, V: Value> PoMap<K, V> {
     #[inline(always)]
     pub const fn new() -> Self {
         Self {
-            p_bits: 0,
+            bucket_bits: 0,
+            bucket_len: 0,
             len: 0,
             entries: Vec::new(),
         }
@@ -58,7 +82,8 @@ impl<K: Key, V: Value> PoMap<K, V> {
 
     #[inline(always)]
     pub fn clear(&mut self) {
-        self.p_bits = 0;
+        self.bucket_bits = 0;
+        self.bucket_len = 0;
         self.len = 0;
         self.entries.clear();
     }
@@ -79,16 +104,13 @@ impl<K: Key, V: Value> PoMap<K, V> {
     }
 
     #[inline(always)]
-    pub fn with_capacity(mut capacity: usize) -> Self {
+    pub fn with_capacity(capacity: usize) -> Self {
         if capacity == 0 {
             return Self::new();
         }
-        capacity = (capacity.max(2)).next_power_of_two();
-        Self {
-            p_bits: capacity.trailing_zeros() as u8,
-            len: 0,
-            entries: vec![None; capacity],
-        }
+        let mut map = Self::new();
+        map.rebuild(capacity);
+        map
     }
 
     #[inline(always)]
@@ -101,60 +123,104 @@ impl<K: Key, V: Value> PoMap<K, V> {
     }
 
     #[inline(always)]
-    fn bucket_index(&self, p_bits: u8, hash: u64) -> usize {
-        // debug_assert!(self.p_bits > 0, "p_bits must be greater than 0");
-        // println!("({} >> (64 - {})) as usize", hash, self.p_bits);
-        (hash >> (64 - p_bits)) as usize
+    fn bucket_id_for(&self, hash: u64) -> usize {
+        if self.entries.is_empty() {
+            0
+        } else {
+            bucket_id_from_bits(hash, self.bucket_bits)
+        }
     }
 
     #[inline(always)]
-    fn entry(&self, index: usize) -> Option<&Entry<K, V>> {
-        // Safety: index is guaranteed to be within bounds of self.entries
-        unsafe { self.entries.get_unchecked(index).as_ref() }
+    fn bucket_bounds(&self, bucket_id: usize) -> (usize, usize) {
+        let start = bucket_id * self.bucket_len;
+        let end = start + self.bucket_len;
+        (start, end)
     }
 
     #[inline(always)]
-    fn entry_mut(&mut self, index: usize) -> &mut Option<Entry<K, V>> {
-        // Safety: index is guaranteed to be within bounds of self.entries
-        unsafe { self.entries.get_unchecked_mut(index) }
+    fn compare_entry(entry: &Entry<K, V>, hash: u64, key: &K) -> Ordering {
+        #[cfg(feature = "compare-keys")]
+        {
+            entry.hash.cmp(&hash).then_with(|| entry.key.cmp(key))
+        }
+        #[cfg(not(feature = "compare-keys"))]
+        {
+            let _ = key;
+            entry.hash.cmp(&hash)
+        }
+    }
+
+    #[inline(always)]
+    fn rebuild(&mut self, min_capacity: usize) {
+        let required = min_capacity.max(self.len.max(1));
+        let mut total_slots = required.next_power_of_two();
+        if total_slots < DEFAULT_CAPACITY {
+            total_slots = DEFAULT_CAPACITY;
+        }
+        let mut bucket_count = num_buckets(total_slots).max(1);
+        bucket_count = bucket_count.next_power_of_two();
+        if bucket_count > total_slots {
+            bucket_count = total_slots;
+        }
+        let bucket_bits = bucket_count.trailing_zeros() as u8;
+        let bucket_len = total_slots / bucket_count;
+
+        let mut new_entries = vec![None; total_slots];
+        let mut bucket_filled = vec![0usize; bucket_count];
+        for entry in std::mem::take(&mut self.entries).into_iter().flatten() {
+            let bucket_id = bucket_id_from_bits(entry.hash, bucket_bits);
+            let fill = &mut bucket_filled[bucket_id];
+            debug_assert!(*fill < bucket_len, "bucket overflow during rebuild");
+            let offset = bucket_id * bucket_len + *fill;
+            new_entries[offset] = Some(entry);
+            *fill += 1;
+        }
+        self.entries = new_entries;
+        self.bucket_bits = bucket_bits;
+        self.bucket_len = bucket_len;
+    }
+
+    #[inline(always)]
+    fn growth_target(&self) -> usize {
+        self.capacity()
+            .max(DEFAULT_CAPACITY)
+            .saturating_mul(GROWTH_FACTOR)
     }
 
     #[inline(always)]
     pub fn get(&self, key: &K) -> Option<&V> {
-        if self.len == 0 {
+        if self.len == 0 || self.bucket_len == 0 {
             return None;
         }
         let hash = Self::calculate_hash(key);
-        let bucket_index = self.bucket_index(self.p_bits, hash);
+        let bucket_id = self.bucket_id_for(hash);
+        let (start, end) = self.bucket_bounds(bucket_id);
+        if end > self.entries.len() {
+            return None;
+        }
         #[cfg(feature = "binary-search")]
-        if let Ok(index) = (&self.entries[bucket_index..(bucket_index + self.p_bits as usize)])
-            .binary_search_by(|e| {
-                match e {
-                    #[cfg(not(feature = "compare-keys"))]
-                    Some(entry) => entry.hash.cmp(&hash),
-                    #[cfg(feature = "compare-keys")]
-                    Some(entry) => entry.hash.cmp(&hash).then_with(|| entry.key.cmp(key)),
-                    None => Ordering::Greater, // treat None as larger than any hash
-                }
-            })
         {
-            return self.entries[bucket_index + index]
-                .as_ref()
-                .map(|e| &e.value);
+            if let Ok(index) = self.entries[start..end].binary_search_by(|slot| match slot {
+                Some(entry) => Self::compare_entry(entry, hash, key),
+                None => Ordering::Greater,
+            }) {
+                return self.entries[start + index]
+                    .as_ref()
+                    .map(|entry| &entry.value);
+            }
         }
         #[cfg(not(feature = "binary-search"))]
-        for i in bucket_index..(bucket_index + self.p_bits as usize) {
-            let Some(entry) = self.entry(i) else {
-                // no entry here, not found
-                break;
-            };
-            match entry.hash.cmp(&hash) {
-                #[cfg(not(feature = "compare-keys"))]
-                Ordering::Equal => return Some(&entry.value),
-                #[cfg(feature = "compare-keys")]
-                Ordering::Equal if entry.key == *key => return Some(&entry.value),
-                Ordering::Less => break, // hash exceeded (they are sorted), not found
-                _ => continue,
+        {
+            for i in start..end {
+                let Some(entry) = self.entries[i].as_ref() else {
+                    break;
+                };
+                match Self::compare_entry(entry, hash, key) {
+                    Ordering::Less => continue,
+                    Ordering::Equal => return Some(&entry.value),
+                    Ordering::Greater => break,
+                }
             }
         }
         None
@@ -162,83 +228,93 @@ impl<K: Key, V: Value> PoMap<K, V> {
 
     #[inline(always)]
     fn insert_with_hash(&mut self, hash: u64, key: K, value: V) -> Option<V> {
-        if self.entries.is_empty() {
+        if self.entries.is_empty() || self.bucket_len == 0 {
             debug_assert_eq!(self.len, 0);
-            // map is empty
-            // fill with 4 buckets of 4
-            self.entries.append(&mut vec![None; 16]);
-            self.p_bits = 4;
+            self.rebuild(DEFAULT_CAPACITY);
         }
-        loop {
-            let bucket_index = self.bucket_index(self.p_bits, hash);
-            #[cfg(not(feature = "binary-search"))]
-            let start_index = bucket_index;
-            let end_index = bucket_index + self.p_bits as usize;
+        'outer: loop {
+            if self.bucket_len == 0 || self.entries.is_empty() {
+                self.rebuild(self.growth_target());
+                continue 'outer;
+            }
+            if self.len >= self.capacity() {
+                self.rebuild(self.growth_target());
+                continue 'outer;
+            }
+            let bucket_id = self.bucket_id_for(hash);
+            let (start, end) = self.bucket_bounds(bucket_id);
+            debug_assert!(end <= self.entries.len(), "bucket bounds out of range");
+            if self.entries[start..end].iter().all(|slot| slot.is_some()) {
+                self.rebuild(self.growth_target());
+                continue 'outer;
+            }
             #[cfg(feature = "binary-search")]
-            let start_index = match (&self.entries[bucket_index..end_index]).binary_search_by(|e| {
-                match e {
-                    #[cfg(not(feature = "compare-keys"))]
-                    Some(entry) => entry.hash.cmp(&hash),
-                    #[cfg(feature = "compare-keys")]
-                    Some(entry) => entry.hash.cmp(&hash).then_with(|| entry.key.cmp(key)),
-                    None => Ordering::Greater, // treat None as larger than any hash
-                }
-            }) {
-                Ok(index) => {
-                    // found an entry with the same hash
-                    let entry_index = bucket_index + index;
-                    let entry = self.entry_mut(entry_index);
-                    #[cfg(not(feature = "compare-keys"))]
-                    if let Some(existing_entry) = entry {
-                        // overwrite existing value
-                        let old_value = std::mem::replace(&mut existing_entry.value, value);
-                        return Some(old_value);
-                    }
-                    #[cfg(feature = "compare-keys")]
-                    if let Some(existing_entry) = entry {
-                        if existing_entry.key == key {
-                            // overwrite existing value
-                            let old_value = std::mem::replace(&mut existing_entry.value, value);
+            let mut scan_start = start;
+            #[cfg(not(feature = "binary-search"))]
+            let scan_start = start;
+            #[cfg(feature = "binary-search")]
+            {
+                match self.entries[start..end].binary_search_by(|slot| match slot {
+                    Some(entry) => Self::compare_entry(entry, hash, &key),
+                    None => Ordering::Greater,
+                }) {
+                    Ok(index) => {
+                        let absolute = start + index;
+                        if let Some(existing) = self.entries[absolute].as_mut() {
+                            let old_value = std::mem::replace(&mut existing.value, value);
                             return Some(old_value);
+                        } else {
+                            // slot is None (should not happen), treat as available
+                            self.entries[absolute] = Some(Entry { hash, key, value });
+                            self.len += 1;
+                            return None;
                         }
                     }
-                    // we already know this entry is occupied, so the next possible insertion point
-                    // is the next index
-                    bucket_index + index + 1
-                }
-                Err(index) => bucket_index + index,
-            };
-            for i in start_index..end_index {
-                match self.entry_mut(i) {
-                    Some(entry) => {
-                        if entry.hash > hash {
-                            // this element is larger, so we need to insert here, see if we can
-                            // swap elements out of the
-                            // TODO: limit number of swaps here optionally
-                            for j in i..end_index {
-                                if self.entry(j).is_none() {
-                                    // Found an empty slot at `j`. Shift elements from `i` to `j-1` one position to the right.
-                                    for k in (i..j).rev() {
-                                        self.entries[k + 1] = self.entries[k].clone();
-                                    }
-                                    // The slot at `i` is now free.
-                                    *self.entry_mut(i) = Some(Entry { hash, key, value });
-                                    self.len += 1;
-                                    return None;
-                                }
-                            }
-                        }
-                    }
-                    None => {
-                        // found an empty slot, insert here
-                        *self.entry_mut(i) = Some(Entry { hash, key, value });
-                        self.len += 1;
-                        return None; // no previous value to return
+                    Err(index) => {
+                        scan_start = start + index;
                     }
                 }
             }
-            // must resize
-            self.reserve(self.capacity() * 2);
+            let mut first_free = None;
+            for i in scan_start..end {
+                match self.entries[i].as_ref() {
+                    Some(existing) => match Self::compare_entry(existing, hash, &key) {
+                        Ordering::Less => continue,
+                        Ordering::Equal => {
+                            let entry = self.entries[i].as_mut().expect("entry must exist");
+                            let old_value = std::mem::replace(&mut entry.value, value);
+                            return Some(old_value);
+                        }
+                        Ordering::Greater => {
+                            let mut j = i;
+                            while j < end && self.entries[j].is_some() {
+                                j += 1;
+                            }
+                            if j == end {
+                                self.rebuild(self.growth_target());
+                                continue 'outer;
+                            }
+                            for k in (i..j).rev() {
+                                let moved = self.entries[k].take();
+                                self.entries[k + 1] = moved;
+                            }
+                            self.entries[i] = Some(Entry { hash, key, value });
+                            self.len += 1;
+                            return None;
+                        }
+                    },
+                    None => {
+                        first_free = Some(i);
+                        break;
+                    }
+                }
+            }
+            if let Some(index) = first_free {
+                self.entries[index] = Some(Entry { hash, key, value });
+                self.len += 1;
+                return None;
+            }
+            self.rebuild(self.growth_target());
         }
     }
 
@@ -252,37 +328,8 @@ impl<K: Key, V: Value> PoMap<K, V> {
 
     #[inline(always)]
     pub fn reserve(&mut self, capacity: usize) {
-        if capacity <= self.capacity() {
-            return; // no need to reserve more space
-        }
-        let new_capacity = (capacity.max(2)).next_power_of_two();
-        if new_capacity > self.capacity() {
-            // println!("Reserving new capacity: {}", new_capacity);
-            let new_p_bits = new_capacity.trailing_zeros() as u8;
-            // the buckets themselves and their contents are already ordered by hash, so we can
-            // directly copy into the new array just with different spacing based on the new
-            // bucket boundaries
-            let mut new_entries = vec![None; new_capacity];
-            let mut bucket_filled_lengths = vec![0usize; new_capacity / new_p_bits as usize];
-            for entry in self.entries.iter().cloned().filter_map(|e| e) {
-                let bucket_index = self.bucket_index(new_p_bits, entry.hash);
-                let bucket_start = bucket_index * new_p_bits as usize;
-                let bucket_filled_length = bucket_filled_lengths[bucket_index];
-                debug_assert!(
-                    bucket_filled_length < new_p_bits as usize,
-                    "Bucket overflow detected during resize",
-                );
-                bucket_filled_lengths[bucket_index] += 1;
-                debug_assert!(
-                    new_entries
-                        .get(bucket_start + bucket_filled_length)
-                        .is_none()
-                );
-                new_entries[bucket_start + bucket_filled_length] = Some(entry);
-            }
-            self.p_bits = new_p_bits;
-            self.entries = new_entries;
-            // len stays the same
+        if capacity > self.capacity() {
+            self.rebuild(capacity);
         }
     }
 }
