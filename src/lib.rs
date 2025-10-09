@@ -5,23 +5,11 @@ use std::{
 
 const DEFAULT_CAPACITY: usize = 16;
 const GROWTH_FACTOR: usize = 4;
+const C: f64 = 0.5;
 
-const fn floor_log2(mut n: usize) -> usize {
-    let mut log = 0usize;
-    while n > 1 {
-        n >>= 1;
-        log += 1;
-    }
-    log
-}
-
-pub const fn num_buckets(n: usize) -> usize {
-    if n <= 1 {
-        1
-    } else {
-        let log = floor_log2(n);
-        if log <= 1 { n } else { n / log }
-    }
+#[inline(always)]
+pub fn num_buckets(n: usize) -> usize {
+    (n as f64 / (C * (n as f64).log2())).max(1.0) as usize
 }
 
 #[inline(always)]
