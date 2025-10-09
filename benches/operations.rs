@@ -49,7 +49,7 @@ fn bench_insert_no_allocate(c: &mut Criterion) {
 
     group.bench_function("pomap", |b| {
         b.iter(|| {
-            let mut map = PoMap::with_capacity(INPUT_SIZE * 2);
+            let mut map = PoMap::with_capacity(INPUT_SIZE);
             for key in &keys {
                 black_box(map.insert(*key, *key));
             }
@@ -59,7 +59,7 @@ fn bench_insert_no_allocate(c: &mut Criterion) {
 
     group.bench_function("std_hashmap", |b| {
         b.iter(|| {
-            let mut map = HashMap::with_capacity(INPUT_SIZE * 2);
+            let mut map = HashMap::with_capacity(INPUT_SIZE);
             for key in &keys {
                 black_box(map.insert(*key, *key));
             }
