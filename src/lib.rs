@@ -25,7 +25,7 @@ pub const fn num_buckets(n: usize) -> usize {
 }
 
 #[inline(always)]
-fn bucket_id_from_bits(hash: u64, bucket_bits: u8) -> usize {
+const fn bucket_id_from_bits(hash: u64, bucket_bits: u8) -> usize {
     if bucket_bits == 0 {
         0
     } else {
