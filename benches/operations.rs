@@ -4,7 +4,7 @@ use criterion::{BatchSize, Criterion, Throughput, black_box, criterion_group, cr
 use pomap::PoMap;
 use rand::{SeedableRng, rngs::StdRng};
 
-const INPUT_SIZE: usize = 25_000;
+const INPUT_SIZE: usize = 10_000;
 const RNG_SEED: u64 = 0x5EED_F00D;
 
 fn random_keys() -> Vec<i32> {
