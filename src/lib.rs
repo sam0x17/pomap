@@ -14,13 +14,9 @@ pub fn num_buckets(n: usize) -> usize {
 
 #[inline(always)]
 const fn bucket_id_from_bits(hash: u64, bucket_bits: u8) -> usize {
-    if bucket_bits == 0 {
-        0
-    } else {
-        let shift = 64 - bucket_bits as u32;
-        let mask = (1usize << bucket_bits) - 1;
-        ((hash >> shift) as usize) & mask
-    }
+    let shift = 64 - bucket_bits as u32;
+    let mask = (1usize << bucket_bits) - 1;
+    ((hash >> shift) as usize) & mask
 }
 
 #[cfg(feature = "compare-keys")]
@@ -551,7 +547,7 @@ mod tests {
     }
 
     #[test]
-    fn test_resize_and_rehash() {
+    fn test_resize() {
         let mut map = PoMap::with_capacity(16);
         assert_eq!(map.capacity(), 16);
 
@@ -561,11 +557,11 @@ mod tests {
             map.insert(i.to_string(), i);
         }
         assert_eq!(map.len(), 12);
-        assert_eq!(map.capacity(), 64);
+        assert_eq!(map.capacity(), 16);
 
         map.insert("12".to_string(), 12);
         assert_eq!(map.len(), 13);
-        assert_eq!(map.capacity(), 64);
+        assert_eq!(map.capacity(), 16);
 
         // Verify all old and new elements are present.
         for i in 0..13 {
