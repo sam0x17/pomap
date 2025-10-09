@@ -5,7 +5,7 @@ use std::{
 
 const DEFAULT_CAPACITY: usize = 16;
 const GROWTH_FACTOR: usize = 4;
-const C: f64 = 0.5;
+const C: f64 = 1.5;
 
 #[inline(always)]
 pub fn num_buckets(n: usize) -> usize {
