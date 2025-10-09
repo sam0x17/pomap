@@ -4,7 +4,7 @@ use std::{
 };
 
 const DEFAULT_CAPACITY: usize = 16;
-const GROWTH_FACTOR: usize = 4;
+const GROWTH_FACTOR: usize = 2;
 const C: f64 = 1.5;
 
 #[inline(always)]
@@ -548,23 +548,22 @@ mod tests {
 
     #[test]
     fn test_resize() {
-        let mut map = PoMap::with_capacity(16);
-        assert_eq!(map.capacity(), 16);
+        let mut map = PoMap::with_capacity(DEFAULT_CAPACITY);
+        assert_eq!(map.capacity(), DEFAULT_CAPACITY);
 
         // Insert enough items to trigger a resize.
-        // Load factor is 0.75, so 16 * 0.75 = 12. The 13th element will resize.
-        for i in 0..12 {
+        const NUM: usize = 15;
+        for i in 0..NUM {
             map.insert(i.to_string(), i);
         }
-        assert_eq!(map.len(), 12);
-        assert_eq!(map.capacity(), 16);
+        assert_eq!(map.len(), NUM);
 
-        map.insert("12".to_string(), 12);
-        assert_eq!(map.len(), 13);
-        assert_eq!(map.capacity(), 16);
+        map.insert(NUM.to_string(), NUM);
+        assert_eq!(map.len(), NUM + 1);
+        assert_eq!(map.capacity(), DEFAULT_CAPACITY * GROWTH_FACTOR);
 
         // Verify all old and new elements are present.
-        for i in 0..13 {
+        for i in 0..(NUM + 1) {
             assert_eq!(map.get(&i.to_string()), Some(&i));
         }
     }
