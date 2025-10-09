@@ -4,7 +4,7 @@ use criterion::{BatchSize, Criterion, Throughput, black_box, criterion_group, cr
 use pomap::PoMap;
 use rand::{SeedableRng, rngs::StdRng};
 
-const INPUT_SIZE: usize = 10_000;
+const INPUT_SIZE: usize = 16384;
 const RNG_SEED: u64 = 0x5EED_F00D;
 
 fn random_keys() -> Vec<i32> {
@@ -49,7 +49,7 @@ fn bench_insert_no_allocate(c: &mut Criterion) {
 
     group.bench_function("pomap", |b| {
         b.iter(|| {
-            let mut map = PoMap::with_capacity(INPUT_SIZE);
+            let mut map = PoMap::with_capacity(INPUT_SIZE * 2);
             for key in &keys {
                 black_box(map.insert(*key, *key));
             }
@@ -59,7 +59,7 @@ fn bench_insert_no_allocate(c: &mut Criterion) {
 
     group.bench_function("std_hashmap", |b| {
         b.iter(|| {
-            let mut map = HashMap::with_capacity(INPUT_SIZE);
+            let mut map = HashMap::with_capacity(INPUT_SIZE * 2);
             for key in &keys {
                 black_box(map.insert(*key, *key));
             }
