@@ -249,32 +249,25 @@ impl<K: Key, V: Value> PoMap<K, V> {
                 continue 'outer;
             }
             #[cfg(feature = "binary-search")]
-            let mut scan_start = start;
-            #[cfg(not(feature = "binary-search"))]
-            let scan_start = start;
-            #[cfg(feature = "binary-search")]
-            {
-                match self.entries[start..end].binary_search_by(|slot| match slot {
-                    Some(entry) => Self::compare_entry(entry, hash, &key),
-                    None => Ordering::Greater,
-                }) {
-                    Ok(index) => {
-                        let absolute = start + index;
-                        if let Some(existing) = self.entries[absolute].as_mut() {
-                            let old_value = std::mem::replace(&mut existing.value, value);
-                            return Some(old_value);
-                        } else {
-                            // slot is None (should not happen), treat as available
-                            self.entries[absolute] = Some(Entry { hash, key, value });
-                            self.len += 1;
-                            return None;
-                        }
-                    }
-                    Err(index) => {
-                        scan_start = start + index;
+            let scan_start = match self.entries[start..end].binary_search_by(|slot| match slot {
+                Some(entry) => Self::compare_entry(entry, hash, &key),
+                None => Ordering::Greater,
+            }) {
+                Ok(index) => {
+                    let absolute = start + index;
+                    if let Some(existing) = self.entries[absolute].as_mut() {
+                        let old_value = std::mem::replace(&mut existing.value, value);
+                        return Some(old_value);
+                    } else {
+                        self.entries[absolute] = Some(Entry { hash, key, value });
+                        self.len += 1;
+                        return None;
                     }
                 }
-            }
+                Err(index) => start + index,
+            };
+            #[cfg(not(feature = "binary-search"))]
+            let scan_start = start;
             let mut first_free = None;
             for i in scan_start..end {
                 match self.entries[i].as_ref() {
@@ -515,6 +508,18 @@ mod tests {
     impl PartialEq for CollidingKey {
         fn eq(&self, other: &Self) -> bool {
             self.val == other.val
+        }
+    }
+
+    impl PartialOrd for CollidingKey {
+        fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+            Some(self.cmp(other))
+        }
+    }
+
+    impl Ord for CollidingKey {
+        fn cmp(&self, other: &Self) -> Ordering {
+            self.val.cmp(&other.val)
         }
     }
 
