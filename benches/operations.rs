@@ -110,7 +110,7 @@ fn bench_update(c: &mut Criterion) {
     group.throughput(Throughput::Elements(INPUT_SIZE as u64));
 
     group.bench_function("pomap", |b| {
-        let mut map = PoMap::with_capacity(INPUT_SIZE * 2);
+        let mut map = PoMap::with_capacity(INPUT_SIZE * 4);
         for key in &keys {
             map.insert(*key, *key);
         }
@@ -123,7 +123,7 @@ fn bench_update(c: &mut Criterion) {
     });
 
     group.bench_function("std_hashmap", |b| {
-        let mut map = HashMap::with_capacity(INPUT_SIZE * 2);
+        let mut map = HashMap::with_capacity(INPUT_SIZE * 4);
         for key in &keys {
             map.insert(*key, *key);
         }
@@ -146,7 +146,7 @@ fn bench_remove(c: &mut Criterion) {
     group.bench_function("pomap", |b| {
         b.iter_batched(
             || {
-                let mut map = PoMap::with_capacity(INPUT_SIZE);
+                let mut map = PoMap::with_capacity(INPUT_SIZE * 4);
                 for key in &keys {
                     map.insert(*key, *key);
                 }
@@ -165,7 +165,7 @@ fn bench_remove(c: &mut Criterion) {
     group.bench_function("std_hashmap", |b| {
         b.iter_batched(
             || {
-                let mut map = HashMap::with_capacity(INPUT_SIZE);
+                let mut map = HashMap::with_capacity(INPUT_SIZE * 4);
                 for key in &keys {
                     map.insert(*key, *key);
                 }
