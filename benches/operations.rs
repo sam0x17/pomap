@@ -7,7 +7,7 @@ const INPUT_SIZE: usize = 10_000;
 
 fn bench_insert_allocate(c: &mut Criterion) {
     let keys: Vec<i32> = (0..INPUT_SIZE as i32).collect();
-    let mut group = c.benchmark_group("insert");
+    let mut group = c.benchmark_group("insert_allocate");
     group.throughput(Throughput::Elements(INPUT_SIZE as u64));
 
     group.bench_function("pomap", |b| {
@@ -35,12 +35,12 @@ fn bench_insert_allocate(c: &mut Criterion) {
 
 fn bench_insert_no_allocate(c: &mut Criterion) {
     let keys: Vec<i32> = (0..INPUT_SIZE as i32).collect();
-    let mut group = c.benchmark_group("insert");
+    let mut group = c.benchmark_group("insert_no_allocate");
     group.throughput(Throughput::Elements(INPUT_SIZE as u64));
 
     group.bench_function("pomap", |b| {
         b.iter(|| {
-            let mut map = PoMap::with_capacity(INPUT_SIZE * 2);
+            let mut map = PoMap::with_capacity(INPUT_SIZE);
             for key in &keys {
                 black_box(map.insert(*key, *key));
             }
@@ -50,7 +50,7 @@ fn bench_insert_no_allocate(c: &mut Criterion) {
 
     group.bench_function("std_hashmap", |b| {
         b.iter(|| {
-            let mut map = HashMap::with_capacity(INPUT_SIZE * 2);
+            let mut map = HashMap::with_capacity(INPUT_SIZE);
             for key in &keys {
                 black_box(map.insert(*key, *key));
             }
