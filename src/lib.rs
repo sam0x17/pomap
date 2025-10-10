@@ -4,13 +4,19 @@ use std::{
 };
 
 const DEFAULT_CAPACITY: usize = 16;
-const GROWTH_FACTOR: usize = 4;
-const C: f64 = 1.5;
+const GROWTH_FACTOR: f64 = 4.0;
+const C: f64 = 1.0;
 
 #[inline(always)]
 pub fn num_buckets(n: usize) -> usize {
-    (n as f64 / (C * (n as f64).log2())).max(1.0) as usize
-    //(n as f64).sqrt() as usize
+    (n / (n).ilog2() as usize).max(1)
+    // (n as f64).sqrt() as usize
+}
+
+#[inline(always)]
+const fn grow_capacity(current: usize) -> usize {
+    let res = (current as f64 * GROWTH_FACTOR).ceil() as usize;
+    if res < 1 { 1 } else { res }
 }
 
 #[inline(always)]
@@ -144,10 +150,7 @@ impl<K: Key, V: Value> PoMap<K, V> {
     #[inline(always)]
     fn rebuild(&mut self, min_capacity: usize) {
         let required = min_capacity.max(self.len.max(1));
-        let mut total_slots = required.next_power_of_two();
-        if total_slots < DEFAULT_CAPACITY {
-            total_slots = DEFAULT_CAPACITY;
-        }
+        let total_slots = required.next_power_of_two();
         let mut bucket_count = num_buckets(total_slots).max(1);
         bucket_count = bucket_count.next_power_of_two();
         if bucket_count > total_slots {
@@ -155,6 +158,11 @@ impl<K: Key, V: Value> PoMap<K, V> {
         }
         let bucket_bits = bucket_count.trailing_zeros() as u8;
         let bucket_len = total_slots / bucket_count;
+
+        println!(
+            "[PoMap] Rebuilding: capacity={}, buckets={}, bucket_len={}, bucket_bits={}",
+            total_slots, bucket_count, bucket_len, bucket_bits
+        );
 
         let mut new_entries = vec![None; total_slots];
         let mut bucket_filled = vec![0usize; bucket_count];
@@ -169,13 +177,6 @@ impl<K: Key, V: Value> PoMap<K, V> {
         self.entries = new_entries;
         self.bucket_bits = bucket_bits;
         self.bucket_len = bucket_len;
-    }
-
-    #[inline(always)]
-    fn growth_target(&self) -> usize {
-        self.capacity()
-            .max(DEFAULT_CAPACITY)
-            .saturating_mul(GROWTH_FACTOR)
     }
 
     #[inline(always)]
@@ -224,18 +225,18 @@ impl<K: Key, V: Value> PoMap<K, V> {
         }
         'outer: loop {
             if self.bucket_len == 0 || self.entries.is_empty() {
-                self.rebuild(self.growth_target());
+                self.rebuild(grow_capacity(self.capacity()));
                 continue 'outer;
             }
             if self.len >= self.capacity() {
-                self.rebuild(self.growth_target());
+                self.rebuild(grow_capacity(self.capacity()));
                 continue 'outer;
             }
             let bucket_id = self.bucket_id_for(hash);
             let (start, end) = self.bucket_bounds(bucket_id);
             debug_assert!(end <= self.entries.len(), "bucket bounds out of range");
             if self.entries[start..end].iter().all(|slot| slot.is_some()) {
-                self.rebuild(self.growth_target());
+                self.rebuild(grow_capacity(self.capacity()));
                 continue 'outer;
             }
             #[cfg(feature = "binary-search")]
@@ -274,7 +275,7 @@ impl<K: Key, V: Value> PoMap<K, V> {
                                 j += 1;
                             }
                             if j == end {
-                                self.rebuild(self.growth_target());
+                                self.rebuild(grow_capacity(self.capacity()));
                                 continue 'outer;
                             }
                             for k in (i..j).rev() {
@@ -297,7 +298,7 @@ impl<K: Key, V: Value> PoMap<K, V> {
                 self.len += 1;
                 return None;
             }
-            self.rebuild(self.growth_target());
+            self.rebuild(grow_capacity(self.capacity()));
         }
     }
 
@@ -561,7 +562,7 @@ mod tests {
 
         map.insert(NUM.to_string(), NUM);
         assert_eq!(map.len(), NUM + 1);
-        assert_eq!(map.capacity(), DEFAULT_CAPACITY * GROWTH_FACTOR);
+        assert_eq!(map.capacity(), grow_capacity(DEFAULT_CAPACITY));
 
         // Verify all old and new elements are present.
         for i in 0..(NUM + 1) {
