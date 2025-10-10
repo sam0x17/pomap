@@ -171,28 +171,14 @@ impl<K: Key, V: Value> PoMap<K, V> {
         if end > self.entries.len() {
             return None;
         }
-        #[cfg(feature = "binary-search")]
-        {
-            if let Ok(index) = self.entries[start..end].binary_search_by(|slot| match slot {
-                Some(entry) => Self::compare_entry(entry, hash, key),
-                None => Ordering::Greater,
-            }) {
-                return self.entries[start + index]
-                    .as_ref()
-                    .map(|entry| &entry.value);
-            }
-        }
-        #[cfg(not(feature = "binary-search"))]
-        {
-            for i in start..end {
-                let Some(entry) = self.entries[i].as_ref() else {
-                    break;
-                };
-                match Self::compare_entry(entry, hash, key) {
-                    Ordering::Less => continue,
-                    Ordering::Equal => return Some(&entry.value),
-                    Ordering::Greater => break,
-                }
+        for i in start..end {
+            let Some(entry) = self.entries[i].as_ref() else {
+                break;
+            };
+            match Self::compare_entry(entry, hash, key) {
+                Ordering::Less => continue,
+                Ordering::Equal => return Some(&entry.value),
+                Ordering::Greater => break,
             }
         }
         None
@@ -220,28 +206,8 @@ impl<K: Key, V: Value> PoMap<K, V> {
                 self.rebuild(grow_capacity(self.capacity()));
                 continue 'outer;
             }
-            #[cfg(feature = "binary-search")]
-            let scan_start = match self.entries[start..end].binary_search_by(|slot| match slot {
-                Some(entry) => Self::compare_entry(entry, hash, &key),
-                None => Ordering::Greater,
-            }) {
-                Ok(index) => {
-                    let absolute = start + index;
-                    if let Some(existing) = self.entries[absolute].as_mut() {
-                        let old_value = std::mem::replace(&mut existing.value, value);
-                        return Some(old_value);
-                    } else {
-                        self.entries[absolute] = Some(Entry { hash, key, value });
-                        self.len += 1;
-                        return None;
-                    }
-                }
-                Err(index) => start + index,
-            };
-            #[cfg(not(feature = "binary-search"))]
-            let scan_start = start;
             let mut first_free = None;
-            for i in scan_start..end {
+            for i in start..end {
                 match self.entries[i].as_ref() {
                     Some(existing) => match Self::compare_entry(existing, hash, &key) {
                         Ordering::Less => continue,
@@ -303,16 +269,6 @@ impl<K: Key, V: Value> PoMap<K, V> {
             return None;
         }
 
-        #[cfg(feature = "binary-search")]
-        let mut candidate = match self.entries[start..end].binary_search_by(|slot| match slot {
-            Some(entry) => Self::compare_entry(entry, hash, key),
-            None => Ordering::Greater,
-        }) {
-            Ok(index) => start + index,
-            Err(_) => return None,
-        };
-
-        #[cfg(not(feature = "binary-search"))]
         let candidate = {
             let mut found = None;
             for i in start..end {
@@ -336,53 +292,6 @@ impl<K: Key, V: Value> PoMap<K, V> {
                 None => return None,
             }
         };
-
-        #[cfg(feature = "binary-search")]
-        {
-            // If the located entry does not match the key, search neighboring entries with identical hash values.
-            if !self.entries[candidate]
-                .as_ref()
-                .is_some_and(|entry| Self::entry_matches(entry, hash, key))
-            {
-                let mut search_index = candidate;
-                while search_index > start {
-                    search_index -= 1;
-                    match self.entries[search_index].as_ref() {
-                        Some(entry) if entry.hash == hash => {
-                            if Self::entry_matches(entry, hash, key) {
-                                candidate = search_index;
-                                break;
-                            }
-                        }
-                        Some(_) | None => break,
-                    }
-                }
-                if !self.entries[candidate]
-                    .as_ref()
-                    .is_some_and(|entry| Self::entry_matches(entry, hash, key))
-                {
-                    search_index = candidate;
-                    while search_index + 1 < end {
-                        search_index += 1;
-                        match self.entries[search_index].as_ref() {
-                            Some(entry) if entry.hash == hash => {
-                                if Self::entry_matches(entry, hash, key) {
-                                    candidate = search_index;
-                                    break;
-                                }
-                            }
-                            Some(_) | None => break,
-                        }
-                    }
-                }
-                if !self.entries[candidate]
-                    .as_ref()
-                    .is_some_and(|entry| Self::entry_matches(entry, hash, key))
-                {
-                    return None;
-                }
-            }
-        }
 
         let removed_entry = match self.entries[candidate].take() {
             Some(entry) => entry,
