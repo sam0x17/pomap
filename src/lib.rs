@@ -4,13 +4,13 @@ use std::{
 };
 
 const DEFAULT_CAPACITY: usize = 16;
-const GROWTH_FACTOR: usize = 8;
-//const C: f64 = 1.5;
+const GROWTH_FACTOR: usize = 4;
+const C: f64 = 1.5;
 
 #[inline(always)]
 pub fn num_buckets(n: usize) -> usize {
-    //(n as f64 / (C * (n as f64).log2())).max(1.0) as usize
-    (n as f64).sqrt() as usize
+    (n as f64 / (C * (n as f64).log2())).max(1.0) as usize
+    //(n as f64).sqrt() as usize
 }
 
 #[inline(always)]
