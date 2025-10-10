@@ -25,14 +25,8 @@ const fn bucket_id_from_bits(hash: u64, bucket_bits: u8) -> usize {
     ((hash >> shift) as usize) & mask
 }
 
-#[cfg(feature = "compare-keys")]
 pub trait Key: Hash + Eq + Clone + Ord {}
-#[cfg(feature = "compare-keys")]
 impl<K: Hash + Eq + Clone + Ord> Key for K {}
-#[cfg(not(feature = "compare-keys"))]
-pub trait Key: Hash + Eq + Clone {}
-#[cfg(not(feature = "compare-keys"))]
-impl<K: Hash + Eq + Clone> Key for K {}
 
 pub trait Value: Clone {}
 impl<V: Clone> Value for V {}
@@ -130,15 +124,7 @@ impl<K: Key, V: Value> PoMap<K, V> {
 
     #[inline(always)]
     fn compare_entry(entry: &Entry<K, V>, hash: u64, key: &K) -> Ordering {
-        #[cfg(feature = "compare-keys")]
-        {
-            entry.hash.cmp(&hash).then_with(|| entry.key.cmp(key))
-        }
-        #[cfg(not(feature = "compare-keys"))]
-        {
-            let _ = key;
-            entry.hash.cmp(&hash)
-        }
+        entry.hash.cmp(&hash).then_with(|| entry.key.cmp(key))
     }
 
     #[inline(always)]
@@ -353,8 +339,7 @@ impl<K: Key, V: Value> PoMap<K, V> {
 
         #[cfg(feature = "binary-search")]
         {
-            // If the located entry does not match the key (possible when compare-keys is off),
-            // search neighboring entries with identical hash values.
+            // If the located entry does not match the key, search neighboring entries with identical hash values.
             if !self.entries[candidate]
                 .as_ref()
                 .is_some_and(|entry| Self::entry_matches(entry, hash, key))

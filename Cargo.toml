@@ -11,9 +11,8 @@ missing_const_for_fn = "deny"
 missing_inline_in_public_items = "deny"
 
 [features]
-default = ["compare-keys"]
+default = []
 binary-search = []
-compare-keys = []
 
 [dev-dependencies]
 criterion = { version = "0.5", features = ["html_reports"] }
