@@ -5,7 +5,6 @@ use std::{
 
 const DEFAULT_CAPACITY: usize = 16;
 const GROWTH_FACTOR: f64 = 4.0;
-const C: f64 = 1.0;
 
 #[inline(always)]
 pub fn num_buckets(n: usize) -> usize {
@@ -151,11 +150,7 @@ impl<K: Key, V: Value> PoMap<K, V> {
     fn rebuild(&mut self, min_capacity: usize) {
         let required = min_capacity.max(self.len.max(1));
         let total_slots = required.next_power_of_two();
-        let mut bucket_count = num_buckets(total_slots).max(1);
-        bucket_count = bucket_count.next_power_of_two();
-        if bucket_count > total_slots {
-            bucket_count = total_slots;
-        }
+        let bucket_count = num_buckets(total_slots).next_power_of_two();
         let bucket_bits = bucket_count.trailing_zeros() as u8;
         let bucket_len = total_slots / bucket_count;
 
