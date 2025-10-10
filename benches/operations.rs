@@ -5,10 +5,9 @@ use pomap::PoMap;
 use rand::{SeedableRng, rngs::StdRng};
 
 const INPUT_SIZE: usize = 16384;
-const RNG_SEED: u64 = 0x5EED_F00D;
 
 fn random_keys() -> Vec<i32> {
-    let mut rng = StdRng::seed_from_u64(RNG_SEED);
+    let mut rng = StdRng::from_entropy();
     (0..INPUT_SIZE)
         .map(|_| rand::Rng::r#gen::<i32>(&mut rng))
         .collect()
