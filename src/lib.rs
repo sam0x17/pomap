@@ -159,10 +159,10 @@ impl<K: Key, V: Value> PoMap<K, V> {
         let bucket_bits = bucket_count.trailing_zeros() as u8;
         let bucket_len = total_slots / bucket_count;
 
-        println!(
+        /*println!(
             "[PoMap] Rebuilding: capacity={}, buckets={}, bucket_len={}, bucket_bits={}",
             total_slots, bucket_count, bucket_len, bucket_bits
-        );
+        );*/
 
         let mut new_entries = vec![None; total_slots];
         let mut bucket_filled = vec![0usize; bucket_count];
