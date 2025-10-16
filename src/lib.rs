@@ -127,17 +127,19 @@ impl<K: Key, V: Value> PoMap<K, V> {
 
     #[inline(always)]
     fn bucket_fill(&self, bucket_id: usize) -> usize {
-        self.bucket_fills.get(bucket_id).copied().unwrap_or(0)
+        debug_assert!(
+            bucket_id < self.bucket_fills.len(),
+            "bucket id {} exceeds bucket_fills len {}",
+            bucket_id,
+            self.bucket_fills.len()
+        );
+        // Bounds guaranteed by rebuild invariants; unchecked avoids extra branch.
+        unsafe { *self.bucket_fills.get_unchecked(bucket_id) }
     }
 
     #[inline(always)]
     fn compare_entry(entry: &Entry<K, V>, hash: u64, key: &K) -> Ordering {
         entry.hash.cmp(&hash).then_with(|| entry.key.cmp(key))
-    }
-
-    #[inline(always)]
-    fn entry_matches(entry: &Entry<K, V>, hash: u64, key: &K) -> bool {
-        entry.hash == hash && entry.key == *key
     }
 
     #[inline(always)]
@@ -183,9 +185,13 @@ impl<K: Key, V: Value> PoMap<K, V> {
             filled_end <= self.entries.len(),
             "bucket fill exceeds entry bounds"
         );
-        for i in start..filled_end {
-            let Some(entry) = self.entries[i].as_ref() else {
-                break;
+        for offset in 0..bucket_fill {
+            let idx = start + offset;
+            let entry = unsafe {
+                self.entries
+                    .get_unchecked(idx)
+                    .as_ref()
+                    .unwrap_unchecked()
             };
             match Self::compare_entry(entry, hash, key) {
                 Ordering::Less => continue,
@@ -212,10 +218,6 @@ impl<K: Key, V: Value> PoMap<K, V> {
                 continue 'outer;
             }
             let bucket_id = self.bucket_id_for(hash);
-            if self.bucket_fills.len() <= bucket_id {
-                self.rebuild(grow_capacity(self.capacity()));
-                continue 'outer;
-            }
             let (start, end) = self.bucket_bounds(bucket_id);
             debug_assert!(end <= self.entries.len(), "bucket bounds out of range");
             let bucket_fill = self.bucket_fill(bucket_id);
@@ -224,28 +226,27 @@ impl<K: Key, V: Value> PoMap<K, V> {
                 continue 'outer;
             }
             let filled_end = start + bucket_fill;
-            for i in start..filled_end {
-                match self.entries[i].as_ref() {
-                    Some(existing) => match Self::compare_entry(existing, hash, &key) {
-                        Ordering::Less => continue,
-                        Ordering::Equal => {
-                            let entry = self.entries[i].as_mut().expect("entry must exist");
-                            let old_value = std::mem::replace(&mut entry.value, value);
-                            return Some(old_value);
+            for offset in 0..bucket_fill {
+                let idx = start + offset;
+                let existing = unsafe {
+                    self.entries
+                        .get_unchecked(idx)
+                        .as_ref()
+                        .unwrap_unchecked()
+                };
+                match Self::compare_entry(existing, hash, &key) {
+                    Ordering::Less => continue,
+                    Ordering::Equal => {
+                        let entry = self.entries[idx].as_mut().expect("entry must exist");
+                        let old_value = std::mem::replace(&mut entry.value, value);
+                        return Some(old_value);
+                    }
+                    Ordering::Greater => {
+                        for k in (idx..filled_end).rev() {
+                            let moved = self.entries[k].take();
+                            self.entries[k + 1] = moved;
                         }
-                        Ordering::Greater => {
-                            for k in (i..filled_end).rev() {
-                                let moved = self.entries[k].take();
-                                self.entries[k + 1] = moved;
-                            }
-                            self.entries[i] = Some(Entry { hash, key, value });
-                            self.bucket_fills[bucket_id] = bucket_fill + 1;
-                            self.len += 1;
-                            return None;
-                        }
-                    },
-                    None => {
-                        self.entries[i] = Some(Entry { hash, key, value });
+                        self.entries[idx] = Some(Entry { hash, key, value });
                         self.bucket_fills[bucket_id] = bucket_fill + 1;
                         self.len += 1;
                         return None;
@@ -253,10 +254,7 @@ impl<K: Key, V: Value> PoMap<K, V> {
                 }
             }
             let insert_index = start + bucket_fill;
-            if insert_index >= end {
-                self.rebuild(grow_capacity(self.capacity()));
-                continue 'outer;
-            }
+            debug_assert!(insert_index < end, "insert index out of bounds");
             self.entries[insert_index] = Some(Entry { hash, key, value });
             self.bucket_fills[bucket_id] = bucket_fill + 1;
             self.len += 1;
@@ -294,11 +292,8 @@ impl<K: Key, V: Value> PoMap<K, V> {
                     Some(entry) => match Self::compare_entry(entry, hash, key) {
                         Ordering::Less => continue,
                         Ordering::Equal => {
-                            if Self::entry_matches(entry, hash, key) {
-                                found = Some(i);
-                                break;
-                            }
-                            continue;
+                            found = Some(i);
+                            break;
                         }
                         Ordering::Greater => break,
                     },
@@ -324,9 +319,12 @@ impl<K: Key, V: Value> PoMap<K, V> {
             }
         }
 
-        if let Some(fill) = self.bucket_fills.get_mut(bucket_id) {
-            *fill -= 1;
-        }
+        debug_assert!(
+            self.bucket_fills[bucket_id] > 0,
+            "bucket {} underflow on remove",
+            bucket_id
+        );
+        self.bucket_fills[bucket_id] -= 1;
         self.len -= 1;
         Some(removed_entry.value)
     }
