@@ -168,9 +168,7 @@ impl<K: Key, V: Value> PoMap<K, V> {
         let hash = Self::calculate_hash(key);
         let bucket_id = self.bucket_id_for(hash);
         let (start, end) = self.bucket_bounds(bucket_id);
-        if end > self.entries.len() {
-            return None;
-        }
+        debug_assert!(end <= self.entries.len(), "bucket bounds out of range");
         for i in start..end {
             let Some(entry) = self.entries[i].as_ref() else {
                 break;
@@ -265,9 +263,7 @@ impl<K: Key, V: Value> PoMap<K, V> {
         let hash = Self::calculate_hash(key);
         let bucket_id = self.bucket_id_for(hash);
         let (start, end) = self.bucket_bounds(bucket_id);
-        if end > self.entries.len() {
-            return None;
-        }
+        debug_assert!(end <= self.entries.len(), "bucket bounds out of range");
 
         let candidate = {
             let mut found = None;
