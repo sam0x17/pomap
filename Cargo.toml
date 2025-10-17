@@ -21,6 +21,9 @@ rand = "0.8"
 name = "operations"
 harness = false
 
+[lib]
+bench = false
+
 [profile.release]
 lto = true
 codegen-units = 1
