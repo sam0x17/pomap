@@ -1,18 +1,22 @@
 use std::hash::{DefaultHasher, Hash, Hasher};
 
 const DEFAULT_CAPACITY: usize = 16;
-const GROWTH_FACTOR: f64 = 2.0;
+const GROWTH_FACTOR: usize = 2;
 
 #[inline(always)]
 pub fn num_buckets(n: usize) -> usize {
-    (n / (n).ilog2() as usize).max(1)
+    n / (n).ilog2() as usize
     // (n as f64).sqrt() as usize
 }
 
 #[inline(always)]
 const fn grow_capacity(current: usize) -> usize {
-    let res = (current as f64 * GROWTH_FACTOR).ceil() as usize;
-    if res < 1 { 1 } else { res }
+    let res = current * GROWTH_FACTOR;
+    if res < DEFAULT_CAPACITY {
+        DEFAULT_CAPACITY
+    } else {
+        res
+    }
 }
 
 #[inline(always)]
