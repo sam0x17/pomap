@@ -1,7 +1,7 @@
 use std::hash::{DefaultHasher, Hash, Hasher};
 
 const DEFAULT_CAPACITY: usize = 16;
-const GROWTH_FACTOR: usize = 2;
+const GROWTH_FACTOR: usize = 4;
 
 #[inline(always)]
 pub fn num_buckets(n: usize) -> usize {
