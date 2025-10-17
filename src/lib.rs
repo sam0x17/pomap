@@ -1,7 +1,4 @@
-use std::{
-    cmp::Ordering,
-    hash::{DefaultHasher, Hash, Hasher},
-};
+use std::hash::{DefaultHasher, Hash, Hasher};
 
 const DEFAULT_CAPACITY: usize = 16;
 const GROWTH_FACTOR: f64 = 4.0;
@@ -25,6 +22,17 @@ const fn bucket_id_from_bits(hash: u64, bucket_bits: u8) -> usize {
     ((hash >> shift) as usize) & mask
 }
 
+#[inline(always)]
+const fn bucket_slot_from_bits(hash: u64, bucket_bits: u8, bucket_len_bits: u8) -> usize {
+    if bucket_len_bits == 0 {
+        0
+    } else {
+        let shift = 64 - bucket_bits as u32 - bucket_len_bits as u32;
+        let mask = (1usize << bucket_len_bits) - 1;
+        ((hash >> shift) as usize) & mask
+    }
+}
+
 pub trait Key: Hash + Eq + Clone + Ord {}
 impl<K: Hash + Eq + Clone + Ord> Key for K {}
 
@@ -41,6 +49,7 @@ struct Entry<K: Key, V: Value> {
 #[derive(Clone)]
 pub struct PoMap<K: Key, V: Value> {
     bucket_bits: u8,
+    bucket_len_bits: u8,
     bucket_len: usize,
     len: usize,
     entries: Vec<Option<Entry<K, V>>>,
@@ -58,6 +67,7 @@ impl<K: Key, V: Value> PoMap<K, V> {
     pub const fn new() -> Self {
         Self {
             bucket_bits: 0,
+            bucket_len_bits: 0,
             bucket_len: 0,
             len: 0,
             entries: Vec::new(),
@@ -67,6 +77,7 @@ impl<K: Key, V: Value> PoMap<K, V> {
     #[inline(always)]
     pub fn clear(&mut self) {
         self.bucket_bits = 0;
+        self.bucket_len_bits = 0;
         self.bucket_len = 0;
         self.len = 0;
         self.entries.clear();
@@ -123,8 +134,47 @@ impl<K: Key, V: Value> PoMap<K, V> {
     }
 
     #[inline(always)]
-    fn compare_entry(entry: &Entry<K, V>, hash: u64, key: &K) -> Ordering {
-        entry.hash.cmp(&hash).then_with(|| entry.key.cmp(key))
+    fn bucket_slot_offset(&self, hash: u64) -> usize {
+        bucket_slot_from_bits(hash, self.bucket_bits, self.bucket_len_bits)
+    }
+
+    #[inline(always)]
+    fn place_entry_in_slice(
+        entries: &mut [Option<Entry<K, V>>],
+        bucket_len: usize,
+        bucket_bits: u8,
+        bucket_len_bits: u8,
+        bucket_id: usize,
+        entry: Entry<K, V>,
+    ) -> Result<(), Entry<K, V>> {
+        if bucket_len == 0 {
+            return Err(entry);
+        }
+        let start = bucket_id * bucket_len;
+        let mask = bucket_len - 1;
+        let mut slot = bucket_slot_from_bits(entry.hash, bucket_bits, bucket_len_bits);
+        for _ in 0..bucket_len {
+            let idx = start + slot;
+            if entries[idx].is_none() {
+                entries[idx] = Some(entry);
+                return Ok(());
+            }
+            slot = (slot + 1) & mask;
+        }
+        Err(entry)
+    }
+
+    #[inline(always)]
+    fn place_entry_in_bucket(&mut self, bucket_id: usize, entry: Entry<K, V>) -> bool {
+        Self::place_entry_in_slice(
+            &mut self.entries,
+            self.bucket_len,
+            self.bucket_bits,
+            self.bucket_len_bits,
+            bucket_id,
+            entry,
+        )
+        .is_ok()
     }
 
     #[inline(always)]
@@ -134,30 +184,60 @@ impl<K: Key, V: Value> PoMap<K, V> {
 
     #[inline(always)]
     fn rebuild(&mut self, min_capacity: usize) {
-        let required = min_capacity.max(self.len.max(1));
-        let total_slots = required.next_power_of_two();
-        let bucket_count = num_buckets(total_slots).next_power_of_two();
-        let bucket_bits = bucket_count.trailing_zeros() as u8;
-        let bucket_len = total_slots / bucket_count;
+        let mut old_entries: Vec<_> = std::mem::take(&mut self.entries)
+            .into_iter()
+            .flatten()
+            .collect();
 
-        /*println!(
-            "[PoMap] Rebuilding: capacity={}, buckets={}, bucket_len={}, bucket_bits={}",
-            total_slots, bucket_count, bucket_len, bucket_bits
-        );*/
+        let mut required = min_capacity.max(self.len.max(1));
 
-        let mut new_entries = vec![None; total_slots];
-        let mut bucket_filled = vec![0usize; bucket_count];
-        for entry in std::mem::take(&mut self.entries).into_iter().flatten() {
-            let bucket_id = bucket_id_from_bits(entry.hash, bucket_bits);
-            let fill = &mut bucket_filled[bucket_id];
-            debug_assert!(*fill < bucket_len, "bucket overflow during rebuild");
-            let offset = bucket_id * bucket_len + *fill;
-            new_entries[offset] = Some(entry);
-            *fill += 1;
+        loop {
+            let total_slots = required.next_power_of_two();
+            let bucket_count = num_buckets(total_slots).next_power_of_two();
+            let bucket_bits = bucket_count.trailing_zeros() as u8;
+            let bucket_len = total_slots / bucket_count;
+            let bucket_len_bits = bucket_len.trailing_zeros() as u8;
+            debug_assert!(
+                (bucket_bits as u32 + bucket_len_bits as u32) <= 64,
+                "bucket and slot bits exceed hash width"
+            );
+            let mut new_entries = vec![None; total_slots];
+            let mut success = true;
+
+            while let Some(entry) = old_entries.pop() {
+                let bucket_id = bucket_id_from_bits(entry.hash, bucket_bits);
+                debug_assert!(
+                    bucket_id < bucket_count,
+                    "bucket_id out of range during rebuild"
+                );
+                match Self::place_entry_in_slice(
+                    &mut new_entries,
+                    bucket_len,
+                    bucket_bits,
+                    bucket_len_bits,
+                    bucket_id,
+                    entry,
+                ) {
+                    Ok(()) => {}
+                    Err(entry) => {
+                        success = false;
+                        old_entries.push(entry);
+                        break;
+                    }
+                }
+            }
+
+            if success && old_entries.is_empty() {
+                self.entries = new_entries;
+                self.bucket_bits = bucket_bits;
+                self.bucket_len = bucket_len;
+                self.bucket_len_bits = bucket_len_bits;
+                return;
+            }
+
+            old_entries.extend(new_entries.into_iter().flatten());
+            required = grow_capacity(total_slots);
         }
-        self.entries = new_entries;
-        self.bucket_bits = bucket_bits;
-        self.bucket_len = bucket_len;
     }
 
     #[inline(always)]
@@ -169,15 +249,19 @@ impl<K: Key, V: Value> PoMap<K, V> {
         let bucket_id = self.bucket_id_for(hash);
         let (start, end) = self.bucket_bounds(bucket_id);
         debug_assert!(end <= self.entries.len(), "bucket bounds out of range");
-        for i in start..end {
-            let Some(entry) = self.entries[i].as_ref() else {
-                break;
-            };
-            match Self::compare_entry(entry, hash, key) {
-                Ordering::Less => continue,
-                Ordering::Equal => return Some(&entry.value),
-                Ordering::Greater => break,
+        let mask = self.bucket_len - 1;
+        let mut slot = self.bucket_slot_offset(hash);
+        for _ in 0..self.bucket_len {
+            let idx = start + slot;
+            match self.entries[idx].as_ref() {
+                Some(entry) => {
+                    if Self::entry_matches(entry, hash, key) {
+                        return Some(&entry.value);
+                    }
+                }
+                None => return None,
             }
+            slot = (slot + 1) & mask;
         }
         None
     }
@@ -188,60 +272,33 @@ impl<K: Key, V: Value> PoMap<K, V> {
             debug_assert_eq!(self.len, 0);
             self.rebuild(DEFAULT_CAPACITY);
         }
-        'outer: loop {
+        loop {
             if self.bucket_len == 0 || self.entries.is_empty() {
                 self.rebuild(grow_capacity(self.capacity()));
-                continue 'outer;
+                continue;
             }
             if self.len >= self.capacity() {
                 self.rebuild(grow_capacity(self.capacity()));
-                continue 'outer;
+                continue;
             }
             let bucket_id = self.bucket_id_for(hash);
             let (start, end) = self.bucket_bounds(bucket_id);
             debug_assert!(end <= self.entries.len(), "bucket bounds out of range");
-            if self.entries[start..end].iter().all(|slot| slot.is_some()) {
-                self.rebuild(grow_capacity(self.capacity()));
-                continue 'outer;
-            }
-            let mut first_free = None;
-            for i in start..end {
-                match self.entries[i].as_ref() {
-                    Some(existing) => match Self::compare_entry(existing, hash, &key) {
-                        Ordering::Less => continue,
-                        Ordering::Equal => {
-                            let entry = self.entries[i].as_mut().expect("entry must exist");
-                            let old_value = std::mem::replace(&mut entry.value, value);
-                            return Some(old_value);
-                        }
-                        Ordering::Greater => {
-                            let mut j = i;
-                            while j < end && self.entries[j].is_some() {
-                                j += 1;
-                            }
-                            if j == end {
-                                self.rebuild(grow_capacity(self.capacity()));
-                                continue 'outer;
-                            }
-                            for k in (i..j).rev() {
-                                let moved = self.entries[k].take();
-                                self.entries[k + 1] = moved;
-                            }
-                            self.entries[i] = Some(Entry { hash, key, value });
-                            self.len += 1;
-                            return None;
-                        }
-                    },
-                    None => {
-                        first_free = Some(i);
-                        break;
+            let mut slot = self.bucket_slot_offset(hash);
+            let mask = self.bucket_len - 1;
+            for _ in 0..self.bucket_len {
+                let idx = start + slot;
+                if let Some(entry) = self.entries[idx].as_mut() {
+                    if Self::entry_matches(entry, hash, &key) {
+                        let old_value = std::mem::replace(&mut entry.value, value);
+                        return Some(old_value);
                     }
+                } else {
+                    self.entries[idx] = Some(Entry { hash, key, value });
+                    self.len += 1;
+                    return None;
                 }
-            }
-            if let Some(index) = first_free {
-                self.entries[index] = Some(Entry { hash, key, value });
-                self.len += 1;
-                return None;
+                slot = (slot + 1) & mask;
             }
             self.rebuild(grow_capacity(self.capacity()));
         }
@@ -264,42 +321,55 @@ impl<K: Key, V: Value> PoMap<K, V> {
         let bucket_id = self.bucket_id_for(hash);
         let (start, end) = self.bucket_bounds(bucket_id);
         debug_assert!(end <= self.entries.len(), "bucket bounds out of range");
+        let mask = self.bucket_len - 1;
+        let mut slot = self.bucket_slot_offset(hash);
+        let mut found_index = None;
 
-        let candidate = {
-            let mut found = None;
-            for i in start..end {
-                match self.entries[i].as_ref() {
-                    Some(entry) => match Self::compare_entry(entry, hash, key) {
-                        Ordering::Less => continue,
-                        Ordering::Equal => {
-                            if Self::entry_matches(entry, hash, key) {
-                                found = Some(i);
-                                break;
-                            }
-                            continue;
-                        }
-                        Ordering::Greater => break,
-                    },
-                    None => break,
+        for _ in 0..self.bucket_len {
+            let idx = start + slot;
+            match self.entries[idx].as_ref() {
+                Some(entry) => {
+                    if Self::entry_matches(entry, hash, key) {
+                        found_index = Some(idx);
+                        break;
+                    }
                 }
-            }
-            match found {
-                Some(index) => index,
                 None => return None,
             }
+            slot = (slot + 1) & mask;
+        }
+
+        let index = match found_index {
+            Some(idx) => idx,
+            None => return None,
         };
 
-        let removed_entry = match self.entries[candidate].take() {
+        let removed_entry = match self.entries[index].take() {
             Some(entry) => entry,
             None => return None,
         };
 
-        for idx in (candidate + 1)..end {
-            if let Some(moved) = self.entries[idx].take() {
-                self.entries[idx - 1] = Some(moved);
-            } else {
-                break;
+        let mut probe_slot = ((index - start) + 1) & mask;
+        let mut to_reinsert = Vec::with_capacity(self.bucket_len.saturating_sub(1));
+        for _ in 0..self.bucket_len - 1 {
+            let idx = start + probe_slot;
+            match self.entries[idx].take() {
+                Some(entry) => {
+                    to_reinsert.push(entry);
+                }
+                None => break,
             }
+            probe_slot = (probe_slot + 1) & mask;
+        }
+
+        for entry in to_reinsert {
+            debug_assert_eq!(
+                bucket_id_from_bits(entry.hash, self.bucket_bits),
+                bucket_id,
+                "entry must stay within its bucket"
+            );
+            let placed = self.place_entry_in_bucket(bucket_id, entry);
+            debug_assert!(placed, "reinsertion within bucket must succeed");
         }
 
         self.len -= 1;
@@ -318,6 +388,7 @@ impl<K: Key, V: Value> PoMap<K, V> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::cmp::Ordering;
 
     #[test]
     fn test_new_and_insert() {
