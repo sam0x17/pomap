@@ -28,13 +28,9 @@ const fn bucket_id_from_bits(hash: u64, bucket_bits: u8) -> usize {
 
 #[inline(always)]
 const fn bucket_slot_from_bits(hash: u64, bucket_bits: u8, bucket_len_bits: u8) -> usize {
-    if bucket_len_bits == 0 {
-        0
-    } else {
-        let shift = 64 - bucket_bits as u32 - bucket_len_bits as u32;
-        let mask = (1usize << bucket_len_bits) - 1;
-        ((hash >> shift) as usize) & mask
-    }
+    let shift = (64u32 - (bucket_bits as u32 + bucket_len_bits as u32)) & 63;
+    let mask = (1usize << (bucket_len_bits as usize)) - 1;
+    ((hash >> shift) as usize) & mask
 }
 
 pub trait Key: Hash + Eq + Clone + Ord {}
@@ -55,6 +51,7 @@ pub struct PoMap<K: Key, V: Value> {
     bucket_bits: u8,
     bucket_len_bits: u8,
     bucket_len: usize,
+    bucket_mask: usize,
     len: usize,
     entries: Vec<Option<Entry<K, V>>>,
 }
@@ -73,6 +70,7 @@ impl<K: Key, V: Value> PoMap<K, V> {
             bucket_bits: 0,
             bucket_len_bits: 0,
             bucket_len: 0,
+            bucket_mask: 0,
             len: 0,
             entries: Vec::new(),
         }
@@ -83,6 +81,7 @@ impl<K: Key, V: Value> PoMap<K, V> {
         self.bucket_bits = 0;
         self.bucket_len_bits = 0;
         self.bucket_len = 0;
+        self.bucket_mask = 0;
         self.len = 0;
         self.entries.clear();
     }
@@ -146,6 +145,7 @@ impl<K: Key, V: Value> PoMap<K, V> {
     fn place_entry_in_slice(
         entries: &mut [Option<Entry<K, V>>],
         bucket_len: usize,
+        bucket_mask: usize,
         bucket_bits: u8,
         bucket_len_bits: u8,
         bucket_id: usize,
@@ -155,7 +155,6 @@ impl<K: Key, V: Value> PoMap<K, V> {
             return Err(entry);
         }
         let start = bucket_id * bucket_len;
-        let mask = bucket_len - 1;
         let mut slot = bucket_slot_from_bits(entry.hash, bucket_bits, bucket_len_bits);
         for _ in 0..bucket_len {
             let idx = start + slot;
@@ -163,7 +162,7 @@ impl<K: Key, V: Value> PoMap<K, V> {
                 entries[idx] = Some(entry);
                 return Ok(());
             }
-            slot = (slot + 1) & mask;
+            slot = (slot + 1) & bucket_mask;
         }
         Err(entry)
     }
@@ -173,6 +172,7 @@ impl<K: Key, V: Value> PoMap<K, V> {
         Self::place_entry_in_slice(
             &mut self.entries,
             self.bucket_len,
+            self.bucket_mask,
             self.bucket_bits,
             self.bucket_len_bits,
             bucket_id,
@@ -201,6 +201,7 @@ impl<K: Key, V: Value> PoMap<K, V> {
             let bucket_bits = bucket_count.trailing_zeros() as u8;
             let bucket_len = total_slots / bucket_count;
             let bucket_len_bits = bucket_len.trailing_zeros() as u8;
+            let bucket_mask = if bucket_len > 0 { bucket_len - 1 } else { 0 };
             debug_assert!(
                 (bucket_bits as u32 + bucket_len_bits as u32) <= 64,
                 "bucket and slot bits exceed hash width"
@@ -217,6 +218,7 @@ impl<K: Key, V: Value> PoMap<K, V> {
                 match Self::place_entry_in_slice(
                     &mut new_entries,
                     bucket_len,
+                    bucket_mask,
                     bucket_bits,
                     bucket_len_bits,
                     bucket_id,
@@ -236,6 +238,7 @@ impl<K: Key, V: Value> PoMap<K, V> {
                 self.bucket_bits = bucket_bits;
                 self.bucket_len = bucket_len;
                 self.bucket_len_bits = bucket_len_bits;
+                self.bucket_mask = bucket_mask;
                 return;
             }
 
@@ -253,7 +256,7 @@ impl<K: Key, V: Value> PoMap<K, V> {
         let bucket_id = self.bucket_id_for(hash);
         let (start, end) = self.bucket_bounds(bucket_id);
         debug_assert!(end <= self.entries.len(), "bucket bounds out of range");
-        let mask = self.bucket_len - 1;
+        let mask = self.bucket_mask;
         let mut slot = self.bucket_slot_offset(hash);
         for _ in 0..self.bucket_len {
             let idx = start + slot;
@@ -289,7 +292,7 @@ impl<K: Key, V: Value> PoMap<K, V> {
             let (start, end) = self.bucket_bounds(bucket_id);
             debug_assert!(end <= self.entries.len(), "bucket bounds out of range");
             let mut slot = self.bucket_slot_offset(hash);
-            let mask = self.bucket_len - 1;
+            let mask = self.bucket_mask;
             for _ in 0..self.bucket_len {
                 let idx = start + slot;
                 if let Some(entry) = self.entries[idx].as_mut() {
@@ -325,59 +328,38 @@ impl<K: Key, V: Value> PoMap<K, V> {
         let bucket_id = self.bucket_id_for(hash);
         let (start, end) = self.bucket_bounds(bucket_id);
         debug_assert!(end <= self.entries.len(), "bucket bounds out of range");
-        let mask = self.bucket_len - 1;
+        let mask = self.bucket_mask;
         let mut slot = self.bucket_slot_offset(hash);
-        let mut found_index = None;
 
         for _ in 0..self.bucket_len {
             let idx = start + slot;
-            match self.entries[idx].as_ref() {
-                Some(entry) => {
-                    if Self::entry_matches(entry, hash, key) {
-                        found_index = Some(idx);
-                        break;
-                    }
-                }
+            let entry = match self.entries[idx].as_ref() {
+                Some(entry) => entry,
                 None => return None,
+            };
+            if Self::entry_matches(entry, hash, key) {
+                let removed_entry = self.entries[idx].take().expect("entry must exist");
+                let mut probe_slot = (slot + 1) & mask;
+                for _ in 0..self.bucket_len.saturating_sub(1) {
+                    let idx = start + probe_slot;
+                    let Some(entry) = self.entries[idx].take() else {
+                        break;
+                    };
+                    debug_assert_eq!(
+                        bucket_id_from_bits(entry.hash, self.bucket_bits),
+                        bucket_id,
+                        "entry must stay within its bucket"
+                    );
+                    let placed = self.place_entry_in_bucket(bucket_id, entry);
+                    debug_assert!(placed, "reinsertion within bucket must succeed");
+                    probe_slot = (probe_slot + 1) & mask;
+                }
+                self.len -= 1;
+                return Some(removed_entry.value);
             }
             slot = (slot + 1) & mask;
         }
-
-        let index = match found_index {
-            Some(idx) => idx,
-            None => return None,
-        };
-
-        let removed_entry = match self.entries[index].take() {
-            Some(entry) => entry,
-            None => return None,
-        };
-
-        let mut probe_slot = ((index - start) + 1) & mask;
-        let mut to_reinsert = Vec::with_capacity(self.bucket_len.saturating_sub(1));
-        for _ in 0..self.bucket_len - 1 {
-            let idx = start + probe_slot;
-            match self.entries[idx].take() {
-                Some(entry) => {
-                    to_reinsert.push(entry);
-                }
-                None => break,
-            }
-            probe_slot = (probe_slot + 1) & mask;
-        }
-
-        for entry in to_reinsert {
-            debug_assert_eq!(
-                bucket_id_from_bits(entry.hash, self.bucket_bits),
-                bucket_id,
-                "entry must stay within its bucket"
-            );
-            let placed = self.place_entry_in_bucket(bucket_id, entry);
-            debug_assert!(placed, "reinsertion within bucket must succeed");
-        }
-
-        self.len -= 1;
-        Some(removed_entry.value)
+        None
     }
 
     #[inline(always)]
