@@ -120,13 +120,14 @@ impl<K: Key, V: Value> PoMap<K, V> {
         hash
     }
 
-    #[inline(always)]
-    fn bucket_id_for(&self, hash: u64) -> usize {
-        if self.entries.is_empty() {
-            return 0;
-        }
-        bucket_id_from_bits(hash, self.bucket_bits)
-    }
+#[inline(always)]
+fn bucket_id_for(&self, hash: u64) -> usize {
+    debug_assert!(
+        !self.entries.is_empty(),
+        "bucket_id_for called without storage"
+    );
+    bucket_id_from_bits(hash, self.bucket_bits)
+}
 
     #[inline(always)]
     fn bucket_bounds(&self, bucket_id: usize) -> (usize, usize) {
@@ -136,10 +137,14 @@ impl<K: Key, V: Value> PoMap<K, V> {
     }
 
     #[inline(always)]
-    fn bucket_slot_offset(&self, hash: u64) -> usize {
-        let shift = self.slot_shift as u32;
-        ((hash >> shift) as usize) & self.bucket_mask
-    }
+fn bucket_slot_offset(&self, hash: u64) -> usize {
+    debug_assert!(
+        !self.entries.is_empty(),
+        "bucket_slot_offset called without storage"
+    );
+    let shift = self.slot_shift as u32;
+    ((hash >> shift) as usize) & self.bucket_mask
+}
 
     #[inline(always)]
     fn place_entry_in_slice(
@@ -150,9 +155,7 @@ impl<K: Key, V: Value> PoMap<K, V> {
         bucket_id: usize,
         entry: Entry<K, V>,
     ) -> Result<(), Entry<K, V>> {
-        if bucket_len == 0 {
-            return Err(entry);
-        }
+        debug_assert!(bucket_len > 0, "bucket_len must be non-zero");
         let start = bucket_id * bucket_len;
         let mut slot = {
             let shift = slot_shift as u32;
@@ -187,7 +190,7 @@ impl<K: Key, V: Value> PoMap<K, V> {
         entry.hash == hash && entry.key == *key
     }
 
-    #[inline(always)]
+    #[cold]
     fn rebuild(&mut self, min_capacity: usize) {
         let mut old_entries: Vec<_> = std::mem::take(&mut self.entries)
             .into_iter()
@@ -258,9 +261,13 @@ impl<K: Key, V: Value> PoMap<K, V> {
 
     #[inline(always)]
     pub fn get(&self, key: &K) -> Option<&V> {
-        if self.len == 0 || self.bucket_len == 0 {
+        if self.len == 0 {
             return None;
         }
+        debug_assert!(
+            self.bucket_len > 0,
+            "bucket_len must be positive when map contains elements"
+        );
         let hash = Self::calculate_hash(key);
         let bucket_id = self.bucket_id_for(hash);
         let (start, end) = self.bucket_bounds(bucket_id);
@@ -284,25 +291,28 @@ impl<K: Key, V: Value> PoMap<K, V> {
 
     #[inline(always)]
     fn insert_with_hash(&mut self, hash: u64, key: K, value: V) -> Option<V> {
-        if self.entries.is_empty() || self.bucket_len == 0 {
+        if self.entries.is_empty() {
             debug_assert_eq!(self.len, 0);
             self.rebuild(DEFAULT_CAPACITY);
         }
         loop {
-            if self.bucket_len == 0 || self.entries.is_empty() {
+            if self.entries.is_empty() {
                 self.rebuild(grow_capacity(self.capacity()));
                 continue;
             }
-            if self.len >= self.capacity() {
-                self.rebuild(grow_capacity(self.capacity()));
+            let capacity = self.entries.len();
+            if self.len >= capacity {
+                self.rebuild(grow_capacity(capacity));
                 continue;
             }
             let bucket_id = self.bucket_id_for(hash);
+            let bucket_len = self.bucket_len;
+            debug_assert!(bucket_len > 0, "bucket_len must be positive when inserting");
             let (start, end) = self.bucket_bounds(bucket_id);
-            debug_assert!(end <= self.entries.len(), "bucket bounds out of range");
-            let mut slot = self.bucket_slot_offset(hash);
+            debug_assert!(end <= capacity, "bucket bounds out of range");
             let mask = self.bucket_mask;
-            for _ in 0..self.bucket_len {
+            let mut slot = self.bucket_slot_offset(hash);
+            for _ in 0..bucket_len {
                 let idx = start + slot;
                 if let Some(entry) = self.entries[idx].as_mut() {
                     if Self::entry_matches(entry, hash, &key) {
@@ -316,7 +326,7 @@ impl<K: Key, V: Value> PoMap<K, V> {
                 }
                 slot = (slot + 1) & mask;
             }
-            self.rebuild(grow_capacity(self.capacity()));
+            self.rebuild(grow_capacity(capacity));
         }
     }
 
@@ -330,9 +340,13 @@ impl<K: Key, V: Value> PoMap<K, V> {
 
     #[inline(always)]
     pub fn remove(&mut self, key: &K) -> Option<V> {
-        if self.len == 0 || self.bucket_len == 0 {
+        if self.len == 0 {
             return None;
         }
+        debug_assert!(
+            self.bucket_len > 0,
+            "bucket_len must be positive when map contains elements"
+        );
         let hash = Self::calculate_hash(key);
         let bucket_id = self.bucket_id_for(hash);
         let (start, end) = self.bucket_bounds(bucket_id);
@@ -349,7 +363,8 @@ impl<K: Key, V: Value> PoMap<K, V> {
             if Self::entry_matches(entry, hash, key) {
                 let removed_entry = self.entries[idx].take().expect("entry must exist");
                 let mut probe_slot = (slot + 1) & mask;
-                for _ in 0..self.bucket_len.saturating_sub(1) {
+                let mut remaining = self.bucket_len - 1;
+                while remaining != 0 {
                     let idx = start + probe_slot;
                     let Some(entry) = self.entries[idx].take() else {
                         break;
@@ -362,6 +377,7 @@ impl<K: Key, V: Value> PoMap<K, V> {
                     let placed = self.place_entry_in_bucket(bucket_id, entry);
                     debug_assert!(placed, "reinsertion within bucket must succeed");
                     probe_slot = (probe_slot + 1) & mask;
+                    remaining -= 1;
                 }
                 self.len -= 1;
                 return Some(removed_entry.value);
