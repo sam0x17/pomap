@@ -4,7 +4,7 @@ use criterion::{Criterion, Throughput, black_box, criterion_group, criterion_mai
 use pomap::PoMap;
 use rand::{SeedableRng, rngs::StdRng};
 
-const INPUT_SIZE: usize = 100_0000;
+const INPUT_SIZE: usize = 1_000_000;
 
 fn random_keys() -> Vec<i32> {
     let mut rng = StdRng::from_entropy();
