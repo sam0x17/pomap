@@ -1,4 +1,8 @@
-use std::hash::{DefaultHasher, Hash, Hasher};
+use bitvec::prelude::{BitSlice, BitVec};
+use std::{
+    hash::{DefaultHasher, Hash, Hasher},
+    mem::MaybeUninit,
+};
 
 const DEFAULT_CAPACITY: usize = 16;
 const GROWTH_FACTOR: usize = 4;
@@ -43,7 +47,6 @@ struct Entry<K: Key, V: Value> {
     value: V,
 }
 
-#[derive(Clone)]
 pub struct PoMap<K: Key, V: Value> {
     bucket_bits: u8,
     bucket_len_bits: u8,
@@ -51,7 +54,8 @@ pub struct PoMap<K: Key, V: Value> {
     bucket_len: usize,
     bucket_mask: usize,
     len: usize,
-    entries: Vec<Option<Entry<K, V>>>,
+    entries: Vec<MaybeUninit<Entry<K, V>>>,
+    occupied: BitVec,
 }
 
 impl<K: Key, V: Value> Default for PoMap<K, V> {
@@ -63,7 +67,7 @@ impl<K: Key, V: Value> Default for PoMap<K, V> {
 
 impl<K: Key, V: Value> PoMap<K, V> {
     #[inline(always)]
-    pub const fn new() -> Self {
+    pub fn new() -> Self {
         Self {
             bucket_bits: 0,
             bucket_len_bits: 0,
@@ -72,11 +76,13 @@ impl<K: Key, V: Value> PoMap<K, V> {
             bucket_mask: 0,
             len: 0,
             entries: Vec::new(),
+            occupied: BitVec::new(),
         }
     }
 
     #[inline(always)]
     pub fn clear(&mut self) {
+        self.drop_all_entries();
         self.bucket_bits = 0;
         self.bucket_len_bits = 0;
         self.slot_shift = 0;
@@ -84,6 +90,7 @@ impl<K: Key, V: Value> PoMap<K, V> {
         self.bucket_mask = 0;
         self.len = 0;
         self.entries.clear();
+        self.occupied.clear();
     }
 
     #[inline(always)]
@@ -120,14 +127,14 @@ impl<K: Key, V: Value> PoMap<K, V> {
         hash
     }
 
-#[inline(always)]
-fn bucket_id_for(&self, hash: u64) -> usize {
-    debug_assert!(
-        !self.entries.is_empty(),
-        "bucket_id_for called without storage"
-    );
-    bucket_id_from_bits(hash, self.bucket_bits)
-}
+    #[inline(always)]
+    fn bucket_id_for(&self, hash: u64) -> usize {
+        debug_assert!(
+            !self.entries.is_empty(),
+            "bucket_id_for called without storage"
+        );
+        bucket_id_from_bits(hash, self.bucket_bits)
+    }
 
     #[inline(always)]
     fn bucket_bounds(&self, bucket_id: usize) -> (usize, usize) {
@@ -137,18 +144,19 @@ fn bucket_id_for(&self, hash: u64) -> usize {
     }
 
     #[inline(always)]
-fn bucket_slot_offset(&self, hash: u64) -> usize {
-    debug_assert!(
-        !self.entries.is_empty(),
-        "bucket_slot_offset called without storage"
-    );
-    let shift = self.slot_shift as u32;
-    ((hash >> shift) as usize) & self.bucket_mask
-}
+    fn bucket_slot_offset(&self, hash: u64) -> usize {
+        debug_assert!(
+            !self.entries.is_empty(),
+            "bucket_slot_offset called without storage"
+        );
+        let shift = self.slot_shift as u32;
+        ((hash >> shift) as usize) & self.bucket_mask
+    }
 
     #[inline(always)]
     fn place_entry_in_slice(
-        entries: &mut [Option<Entry<K, V>>],
+        entries: &mut [MaybeUninit<Entry<K, V>>],
+        control: &mut BitSlice,
         bucket_len: usize,
         bucket_mask: usize,
         slot_shift: u8,
@@ -163,8 +171,13 @@ fn bucket_slot_offset(&self, hash: u64) -> usize {
         };
         for _ in 0..bucket_len {
             let idx = start + slot;
-            if entries[idx].is_none() {
-                entries[idx] = Some(entry);
+            if !control[idx] {
+                unsafe {
+                    entries
+                        .get_unchecked_mut(idx)
+                        .write(entry);
+                }
+                control.set(idx, true);
                 return Ok(());
             }
             slot = (slot + 1) & bucket_mask;
@@ -175,7 +188,8 @@ fn bucket_slot_offset(&self, hash: u64) -> usize {
     #[inline(always)]
     fn place_entry_in_bucket(&mut self, bucket_id: usize, entry: Entry<K, V>) -> bool {
         Self::place_entry_in_slice(
-            &mut self.entries,
+            self.entries.as_mut_slice(),
+            self.occupied.as_mut_bitslice(),
             self.bucket_len,
             self.bucket_mask,
             self.slot_shift,
@@ -190,14 +204,77 @@ fn bucket_slot_offset(&self, hash: u64) -> usize {
         entry.hash == hash && entry.key == *key
     }
 
+    #[inline(always)]
+    fn slot_occupied(&self, idx: usize) -> bool {
+        self.occupied
+            .get(idx)
+            .map(|bit| *bit)
+            .unwrap_or(false)
+    }
+
+    #[inline(always)]
+    unsafe fn entry_ref_unchecked(&self, idx: usize) -> &Entry<K, V> {
+        debug_assert!(self.slot_occupied(idx));
+        unsafe {
+            self.entries
+                .get_unchecked(idx)
+                .assume_init_ref()
+        }
+    }
+
+    #[inline(always)]
+    unsafe fn entry_mut_unchecked(&mut self, idx: usize) -> &mut Entry<K, V> {
+        debug_assert!(self.slot_occupied(idx));
+        unsafe {
+            self.entries
+                .get_unchecked_mut(idx)
+                .assume_init_mut()
+        }
+    }
+
+    #[inline(always)]
+    unsafe fn read_entry_unchecked(&mut self, idx: usize) -> Entry<K, V> {
+        debug_assert!(self.slot_occupied(idx));
+        self.occupied.set(idx, false);
+        unsafe {
+            self.entries
+                .get_unchecked_mut(idx)
+                .assume_init_read()
+        }
+    }
+
+    #[inline(always)]
+    fn drop_all_entries(&mut self) {
+        for idx in 0..self.entries.len() {
+            if self.slot_occupied(idx) {
+                unsafe {
+                    self.entries
+                        .get_unchecked_mut(idx)
+                        .assume_init_drop();
+                }
+                self.occupied.set(idx, false);
+            }
+        }
+    }
+
+    #[inline(always)]
+    fn drain_entries(&mut self) -> Vec<Entry<K, V>> {
+        let mut drained = Vec::with_capacity(self.len);
+        for idx in 0..self.entries.len() {
+            if self.slot_occupied(idx) {
+                drained.push(unsafe { self.read_entry_unchecked(idx) });
+            }
+        }
+        self.entries.clear();
+        self.occupied.clear();
+        drained
+    }
+
     #[cold]
     fn rebuild(&mut self, min_capacity: usize) {
-        let mut old_entries: Vec<_> = std::mem::take(&mut self.entries)
-            .into_iter()
-            .flatten()
-            .collect();
-
-        let mut required = min_capacity.max(self.len.max(1));
+        let total_len = self.len;
+        let mut old_entries = self.drain_entries();
+        let mut required = min_capacity.max(total_len.max(1));
 
         loop {
             let total_slots = required.next_power_of_two();
@@ -216,19 +293,21 @@ fn bucket_slot_offset(&self, hash: u64) -> usize {
                 (bucket_bits as u32 + bucket_len_bits as u32) <= 64,
                 "bucket and slot bits exceed hash width"
             );
-            let mut new_entries = vec![None; total_slots];
+            let mut new_entries = Vec::with_capacity(total_slots);
+            new_entries.resize_with(total_slots, MaybeUninit::uninit);
+            let mut new_control = BitVec::with_capacity(total_slots);
+            new_control.resize(total_slots, false);
             let mut success = true;
 
             while let Some(entry) = old_entries.pop() {
-                let bucket_id = {
-                    bucket_id_from_bits(entry.hash, bucket_bits)
-                };
+                let bucket_id = bucket_id_from_bits(entry.hash, bucket_bits);
                 debug_assert!(
                     bucket_id < bucket_count,
                     "bucket_id out of range during rebuild"
                 );
                 match Self::place_entry_in_slice(
-                    &mut new_entries,
+                    new_entries.as_mut_slice(),
+                    new_control.as_mut_bitslice(),
                     bucket_len,
                     bucket_mask,
                     slot_shift,
@@ -245,16 +324,29 @@ fn bucket_slot_offset(&self, hash: u64) -> usize {
             }
 
             if success && old_entries.is_empty() {
+                let inserted = new_control.count_ones();
+                debug_assert_eq!(inserted, total_len);
                 self.entries = new_entries;
+                self.occupied = new_control;
                 self.bucket_bits = bucket_bits;
                 self.bucket_len = bucket_len;
                 self.bucket_len_bits = bucket_len_bits;
                 self.bucket_mask = bucket_mask;
                 self.slot_shift = slot_shift;
+                self.len = total_len;
                 return;
             }
 
-            old_entries.extend(new_entries.into_iter().flatten());
+            for idx in 0..new_entries.len() {
+                if new_control[idx] {
+                    let entry = unsafe {
+                        new_entries
+                            .get_unchecked_mut(idx)
+                            .assume_init_read()
+                    };
+                    old_entries.push(entry);
+                }
+            }
             required = grow_capacity(total_slots);
         }
     }
@@ -276,13 +368,12 @@ fn bucket_slot_offset(&self, hash: u64) -> usize {
         let mut slot = self.bucket_slot_offset(hash);
         for _ in 0..self.bucket_len {
             let idx = start + slot;
-            match self.entries[idx].as_ref() {
-                Some(entry) => {
-                    if Self::entry_matches(entry, hash, key) {
-                        return Some(&entry.value);
-                    }
-                }
-                None => return None,
+            if !self.slot_occupied(idx) {
+                return None;
+            }
+            let entry = unsafe { self.entry_ref_unchecked(idx) };
+            if Self::entry_matches(entry, hash, key) {
+                return Some(&entry.value);
             }
             slot = (slot + 1) & mask;
         }
@@ -314,13 +405,19 @@ fn bucket_slot_offset(&self, hash: u64) -> usize {
             let mut slot = self.bucket_slot_offset(hash);
             for _ in 0..bucket_len {
                 let idx = start + slot;
-                if let Some(entry) = self.entries[idx].as_mut() {
+                if self.slot_occupied(idx) {
+                    let entry = unsafe { self.entry_mut_unchecked(idx) };
                     if Self::entry_matches(entry, hash, &key) {
                         let old_value = std::mem::replace(&mut entry.value, value);
                         return Some(old_value);
                     }
                 } else {
-                    self.entries[idx] = Some(Entry { hash, key, value });
+                    unsafe {
+                        self.entries
+                            .get_unchecked_mut(idx)
+                            .write(Entry { hash, key, value });
+                    }
+                    self.occupied.set(idx, true);
                     self.len += 1;
                     return None;
                 }
@@ -356,19 +453,20 @@ fn bucket_slot_offset(&self, hash: u64) -> usize {
 
         for _ in 0..self.bucket_len {
             let idx = start + slot;
-            let entry = match self.entries[idx].as_ref() {
-                Some(entry) => entry,
-                None => return None,
-            };
+            if !self.slot_occupied(idx) {
+                return None;
+            }
+            let entry = unsafe { self.entry_ref_unchecked(idx) };
             if Self::entry_matches(entry, hash, key) {
-                let removed_entry = self.entries[idx].take().expect("entry must exist");
+                let removed_entry = unsafe { self.read_entry_unchecked(idx) };
                 let mut probe_slot = (slot + 1) & mask;
                 let mut remaining = self.bucket_len - 1;
                 while remaining != 0 {
                     let idx = start + probe_slot;
-                    let Some(entry) = self.entries[idx].take() else {
+                    if !self.slot_occupied(idx) {
                         break;
-                    };
+                    }
+                    let entry = unsafe { self.read_entry_unchecked(idx) };
                     debug_assert_eq!(
                         bucket_id_from_bits(entry.hash, self.bucket_bits),
                         bucket_id,
@@ -392,6 +490,35 @@ fn bucket_slot_offset(&self, hash: u64) -> usize {
         if capacity > self.capacity() {
             self.rebuild(capacity);
         }
+    }
+}
+
+impl<K: Key, V: Value> Clone for PoMap<K, V> {
+    fn clone(&self) -> Self {
+        let mut entries = Vec::with_capacity(self.entries.len());
+        entries.resize_with(self.entries.len(), MaybeUninit::uninit);
+        for idx in 0..self.entries.len() {
+            if self.slot_occupied(idx) {
+                let entry = unsafe { self.entry_ref_unchecked(idx) };
+                entries[idx].write(entry.clone());
+            }
+        }
+        Self {
+            bucket_bits: self.bucket_bits,
+            bucket_len_bits: self.bucket_len_bits,
+            slot_shift: self.slot_shift,
+            bucket_len: self.bucket_len,
+            bucket_mask: self.bucket_mask,
+            len: self.len,
+            entries,
+            occupied: self.occupied.clone(),
+        }
+    }
+}
+
+impl<K: Key, V: Value> Drop for PoMap<K, V> {
+    fn drop(&mut self) {
+        self.drop_all_entries();
     }
 }
 
