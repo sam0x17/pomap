@@ -19,20 +19,6 @@ const fn grow_capacity(current: usize) -> usize {
     }
 }
 
-#[inline(always)]
-const fn bucket_id_from_bits(hash: u64, bucket_bits: u8) -> usize {
-    let shift = 64 - bucket_bits as u32;
-    let mask = (1usize << bucket_bits) - 1;
-    ((hash >> shift) as usize) & mask
-}
-
-#[inline(always)]
-const fn bucket_slot_from_bits(hash: u64, bucket_bits: u8, bucket_len_bits: u8) -> usize {
-    let shift = (64u32 - (bucket_bits as u32 + bucket_len_bits as u32)) & 63;
-    let mask = (1usize << (bucket_len_bits as usize)) - 1;
-    ((hash >> shift) as usize) & mask
-}
-
 pub trait Key: Hash + Eq + Clone + Ord {}
 impl<K: Hash + Eq + Clone + Ord> Key for K {}
 
@@ -50,8 +36,11 @@ struct Entry<K: Key, V: Value> {
 pub struct PoMap<K: Key, V: Value> {
     bucket_bits: u8,
     bucket_len_bits: u8,
+    bucket_shift: u8,
+    slot_shift: u8,
     bucket_len: usize,
     bucket_mask: usize,
+    bucket_id_mask: usize,
     len: usize,
     entries: Vec<Option<Entry<K, V>>>,
 }
@@ -69,8 +58,11 @@ impl<K: Key, V: Value> PoMap<K, V> {
         Self {
             bucket_bits: 0,
             bucket_len_bits: 0,
+            bucket_shift: 0,
+            slot_shift: 0,
             bucket_len: 0,
             bucket_mask: 0,
+            bucket_id_mask: 0,
             len: 0,
             entries: Vec::new(),
         }
@@ -80,8 +72,11 @@ impl<K: Key, V: Value> PoMap<K, V> {
     pub fn clear(&mut self) {
         self.bucket_bits = 0;
         self.bucket_len_bits = 0;
+        self.bucket_shift = 0;
+        self.slot_shift = 0;
         self.bucket_len = 0;
         self.bucket_mask = 0;
+        self.bucket_id_mask = 0;
         self.len = 0;
         self.entries.clear();
     }
@@ -123,10 +118,10 @@ impl<K: Key, V: Value> PoMap<K, V> {
     #[inline(always)]
     fn bucket_id_for(&self, hash: u64) -> usize {
         if self.entries.is_empty() {
-            0
-        } else {
-            bucket_id_from_bits(hash, self.bucket_bits)
+            return 0;
         }
+        let shift = self.bucket_shift as u32;
+        ((hash >> shift) as usize) & self.bucket_id_mask
     }
 
     #[inline(always)]
@@ -138,7 +133,8 @@ impl<K: Key, V: Value> PoMap<K, V> {
 
     #[inline(always)]
     fn bucket_slot_offset(&self, hash: u64) -> usize {
-        bucket_slot_from_bits(hash, self.bucket_bits, self.bucket_len_bits)
+        let shift = self.slot_shift as u32;
+        ((hash >> shift) as usize) & self.bucket_mask
     }
 
     #[inline(always)]
@@ -146,8 +142,7 @@ impl<K: Key, V: Value> PoMap<K, V> {
         entries: &mut [Option<Entry<K, V>>],
         bucket_len: usize,
         bucket_mask: usize,
-        bucket_bits: u8,
-        bucket_len_bits: u8,
+        slot_shift: u8,
         bucket_id: usize,
         entry: Entry<K, V>,
     ) -> Result<(), Entry<K, V>> {
@@ -155,7 +150,10 @@ impl<K: Key, V: Value> PoMap<K, V> {
             return Err(entry);
         }
         let start = bucket_id * bucket_len;
-        let mut slot = bucket_slot_from_bits(entry.hash, bucket_bits, bucket_len_bits);
+        let mut slot = {
+            let shift = slot_shift as u32;
+            ((entry.hash >> shift) as usize) & bucket_mask
+        };
         for _ in 0..bucket_len {
             let idx = start + slot;
             if entries[idx].is_none() {
@@ -173,8 +171,7 @@ impl<K: Key, V: Value> PoMap<K, V> {
             &mut self.entries,
             self.bucket_len,
             self.bucket_mask,
-            self.bucket_bits,
-            self.bucket_len_bits,
+            self.slot_shift,
             bucket_id,
             entry,
         )
@@ -200,8 +197,20 @@ impl<K: Key, V: Value> PoMap<K, V> {
             let bucket_count = num_buckets(total_slots).next_power_of_two();
             let bucket_bits = bucket_count.trailing_zeros() as u8;
             let bucket_len = total_slots / bucket_count;
-            let bucket_len_bits = bucket_len.trailing_zeros() as u8;
+            let bucket_len_bits = if bucket_len > 0 {
+                bucket_len.trailing_zeros() as u8
+            } else {
+                0
+            };
             let bucket_mask = if bucket_len > 0 { bucket_len - 1 } else { 0 };
+            let bucket_id_mask = if bucket_bits > 0 {
+                (1usize << bucket_bits) - 1
+            } else {
+                0
+            };
+            let bucket_shift = ((64u32 - bucket_bits as u32) & 63) as u8;
+            let slot_shift =
+                ((64u32 - (bucket_bits as u32 + bucket_len_bits as u32)) & 63) as u8;
             debug_assert!(
                 (bucket_bits as u32 + bucket_len_bits as u32) <= 64,
                 "bucket and slot bits exceed hash width"
@@ -210,7 +219,10 @@ impl<K: Key, V: Value> PoMap<K, V> {
             let mut success = true;
 
             while let Some(entry) = old_entries.pop() {
-                let bucket_id = bucket_id_from_bits(entry.hash, bucket_bits);
+                let bucket_id = {
+                    let shift = bucket_shift as u32;
+                    ((entry.hash >> shift) as usize) & bucket_id_mask
+                };
                 debug_assert!(
                     bucket_id < bucket_count,
                     "bucket_id out of range during rebuild"
@@ -219,8 +231,7 @@ impl<K: Key, V: Value> PoMap<K, V> {
                     &mut new_entries,
                     bucket_len,
                     bucket_mask,
-                    bucket_bits,
-                    bucket_len_bits,
+                    slot_shift,
                     bucket_id,
                     entry,
                 ) {
@@ -239,6 +250,9 @@ impl<K: Key, V: Value> PoMap<K, V> {
                 self.bucket_len = bucket_len;
                 self.bucket_len_bits = bucket_len_bits;
                 self.bucket_mask = bucket_mask;
+                self.bucket_shift = bucket_shift;
+                self.slot_shift = slot_shift;
+                self.bucket_id_mask = bucket_id_mask;
                 return;
             }
 
@@ -346,7 +360,7 @@ impl<K: Key, V: Value> PoMap<K, V> {
                         break;
                     };
                     debug_assert_eq!(
-                        bucket_id_from_bits(entry.hash, self.bucket_bits),
+                        ((entry.hash >> (self.bucket_shift as u32)) as usize) & self.bucket_id_mask,
                         bucket_id,
                         "entry must stay within its bucket"
                     );
