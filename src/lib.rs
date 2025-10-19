@@ -10,6 +10,17 @@ pub fn num_buckets(n: usize) -> usize {
 }
 
 #[inline(always)]
+const fn bucket_id_from_bits(hash: u64, bucket_bits: u8) -> usize {
+    if bucket_bits == 0 {
+        0
+    } else {
+        let shift = 64 - bucket_bits as u32;
+        let mask = (1usize << bucket_bits) - 1;
+        ((hash >> shift) as usize) & mask
+    }
+}
+
+#[inline(always)]
 const fn grow_capacity(current: usize) -> usize {
     let res = current * GROWTH_FACTOR;
     if res < DEFAULT_CAPACITY {
@@ -36,11 +47,9 @@ struct Entry<K: Key, V: Value> {
 pub struct PoMap<K: Key, V: Value> {
     bucket_bits: u8,
     bucket_len_bits: u8,
-    bucket_shift: u8,
     slot_shift: u8,
     bucket_len: usize,
     bucket_mask: usize,
-    bucket_id_mask: usize,
     len: usize,
     entries: Vec<Option<Entry<K, V>>>,
 }
@@ -58,11 +67,9 @@ impl<K: Key, V: Value> PoMap<K, V> {
         Self {
             bucket_bits: 0,
             bucket_len_bits: 0,
-            bucket_shift: 0,
             slot_shift: 0,
             bucket_len: 0,
             bucket_mask: 0,
-            bucket_id_mask: 0,
             len: 0,
             entries: Vec::new(),
         }
@@ -72,11 +79,9 @@ impl<K: Key, V: Value> PoMap<K, V> {
     pub fn clear(&mut self) {
         self.bucket_bits = 0;
         self.bucket_len_bits = 0;
-        self.bucket_shift = 0;
         self.slot_shift = 0;
         self.bucket_len = 0;
         self.bucket_mask = 0;
-        self.bucket_id_mask = 0;
         self.len = 0;
         self.entries.clear();
     }
@@ -120,8 +125,7 @@ impl<K: Key, V: Value> PoMap<K, V> {
         if self.entries.is_empty() {
             return 0;
         }
-        let shift = self.bucket_shift as u32;
-        ((hash >> shift) as usize) & self.bucket_id_mask
+        bucket_id_from_bits(hash, self.bucket_bits)
     }
 
     #[inline(always)]
@@ -203,12 +207,6 @@ impl<K: Key, V: Value> PoMap<K, V> {
                 0
             };
             let bucket_mask = if bucket_len > 0 { bucket_len - 1 } else { 0 };
-            let bucket_id_mask = if bucket_bits > 0 {
-                (1usize << bucket_bits) - 1
-            } else {
-                0
-            };
-            let bucket_shift = ((64u32 - bucket_bits as u32) & 63) as u8;
             let slot_shift =
                 ((64u32 - (bucket_bits as u32 + bucket_len_bits as u32)) & 63) as u8;
             debug_assert!(
@@ -220,8 +218,7 @@ impl<K: Key, V: Value> PoMap<K, V> {
 
             while let Some(entry) = old_entries.pop() {
                 let bucket_id = {
-                    let shift = bucket_shift as u32;
-                    ((entry.hash >> shift) as usize) & bucket_id_mask
+                    bucket_id_from_bits(entry.hash, bucket_bits)
                 };
                 debug_assert!(
                     bucket_id < bucket_count,
@@ -250,9 +247,7 @@ impl<K: Key, V: Value> PoMap<K, V> {
                 self.bucket_len = bucket_len;
                 self.bucket_len_bits = bucket_len_bits;
                 self.bucket_mask = bucket_mask;
-                self.bucket_shift = bucket_shift;
                 self.slot_shift = slot_shift;
-                self.bucket_id_mask = bucket_id_mask;
                 return;
             }
 
@@ -360,7 +355,7 @@ impl<K: Key, V: Value> PoMap<K, V> {
                         break;
                     };
                     debug_assert_eq!(
-                        ((entry.hash >> (self.bucket_shift as u32)) as usize) & self.bucket_id_mask,
+                        bucket_id_from_bits(entry.hash, self.bucket_bits),
                         bucket_id,
                         "entry must stay within its bucket"
                     );
