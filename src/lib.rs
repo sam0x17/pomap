@@ -1,4 +1,6 @@
-use bitvec::prelude::{BitSlice, BitVec};
+mod simd_bitset;
+
+use simd_bitset::SimdBitSet;
 use std::{
     hash::{DefaultHasher, Hash, Hasher},
     mem::MaybeUninit,
@@ -55,7 +57,7 @@ pub struct PoMap<K: Key, V: Value> {
     bucket_mask: usize,
     len: usize,
     entries: Vec<MaybeUninit<Entry<K, V>>>,
-    occupied: BitVec,
+    occupied: SimdBitSet,
 }
 
 impl<K: Key, V: Value> Default for PoMap<K, V> {
@@ -76,7 +78,7 @@ impl<K: Key, V: Value> PoMap<K, V> {
             bucket_mask: 0,
             len: 0,
             entries: Vec::new(),
-            occupied: BitVec::new(),
+            occupied: SimdBitSet::new(),
         }
     }
 
@@ -156,7 +158,7 @@ impl<K: Key, V: Value> PoMap<K, V> {
     #[inline(always)]
     fn place_entry_in_slice(
         entries: &mut [MaybeUninit<Entry<K, V>>],
-        control: &mut BitSlice,
+        control: &mut SimdBitSet,
         bucket_len: usize,
         bucket_mask: usize,
         slot_shift: u8,
@@ -165,31 +167,26 @@ impl<K: Key, V: Value> PoMap<K, V> {
     ) -> Result<(), Entry<K, V>> {
         debug_assert!(bucket_len > 0, "bucket_len must be non-zero");
         let start = bucket_id * bucket_len;
-        let mut slot = {
+        let start_slot = {
             let shift = slot_shift as u32;
             ((entry.hash >> shift) as usize) & bucket_mask
         };
-        for _ in 0..bucket_len {
-            let idx = start + slot;
-            if !control[idx] {
-                unsafe {
-                    entries
-                        .get_unchecked_mut(idx)
-                        .write(entry);
-                }
-                control.set(idx, true);
-                return Ok(());
+        if let Some(idx) = control.find_first_zero_in_bucket(start, bucket_len, start_slot) {
+            unsafe {
+                entries.get_unchecked_mut(idx).write(entry);
             }
-            slot = (slot + 1) & bucket_mask;
+            control.set(idx, true);
+            Ok(())
+        } else {
+            Err(entry)
         }
-        Err(entry)
     }
 
     #[inline(always)]
     fn place_entry_in_bucket(&mut self, bucket_id: usize, entry: Entry<K, V>) -> bool {
         Self::place_entry_in_slice(
             self.entries.as_mut_slice(),
-            self.occupied.as_mut_bitslice(),
+            &mut self.occupied,
             self.bucket_len,
             self.bucket_mask,
             self.slot_shift,
@@ -206,41 +203,26 @@ impl<K: Key, V: Value> PoMap<K, V> {
 
     #[inline(always)]
     fn slot_occupied(&self, idx: usize) -> bool {
-        self.occupied
-            .get(idx)
-            .map(|bit| *bit)
-            .unwrap_or(false)
+        idx < self.occupied.len() && self.occupied.get(idx)
     }
 
     #[inline(always)]
     unsafe fn entry_ref_unchecked(&self, idx: usize) -> &Entry<K, V> {
         debug_assert!(self.slot_occupied(idx));
-        unsafe {
-            self.entries
-                .get_unchecked(idx)
-                .assume_init_ref()
-        }
+        unsafe { self.entries.get_unchecked(idx).assume_init_ref() }
     }
 
     #[inline(always)]
     unsafe fn entry_mut_unchecked(&mut self, idx: usize) -> &mut Entry<K, V> {
         debug_assert!(self.slot_occupied(idx));
-        unsafe {
-            self.entries
-                .get_unchecked_mut(idx)
-                .assume_init_mut()
-        }
+        unsafe { self.entries.get_unchecked_mut(idx).assume_init_mut() }
     }
 
     #[inline(always)]
     unsafe fn read_entry_unchecked(&mut self, idx: usize) -> Entry<K, V> {
         debug_assert!(self.slot_occupied(idx));
         self.occupied.set(idx, false);
-        unsafe {
-            self.entries
-                .get_unchecked_mut(idx)
-                .assume_init_read()
-        }
+        unsafe { self.entries.get_unchecked_mut(idx).assume_init_read() }
     }
 
     #[inline(always)]
@@ -248,9 +230,7 @@ impl<K: Key, V: Value> PoMap<K, V> {
         for idx in 0..self.entries.len() {
             if self.slot_occupied(idx) {
                 unsafe {
-                    self.entries
-                        .get_unchecked_mut(idx)
-                        .assume_init_drop();
+                    self.entries.get_unchecked_mut(idx).assume_init_drop();
                 }
                 self.occupied.set(idx, false);
             }
@@ -287,16 +267,14 @@ impl<K: Key, V: Value> PoMap<K, V> {
                 0
             };
             let bucket_mask = if bucket_len > 0 { bucket_len - 1 } else { 0 };
-            let slot_shift =
-                ((64u32 - (bucket_bits as u32 + bucket_len_bits as u32)) & 63) as u8;
+            let slot_shift = ((64u32 - (bucket_bits as u32 + bucket_len_bits as u32)) & 63) as u8;
             debug_assert!(
                 (bucket_bits as u32 + bucket_len_bits as u32) <= 64,
                 "bucket and slot bits exceed hash width"
             );
             let mut new_entries = Vec::with_capacity(total_slots);
             new_entries.resize_with(total_slots, MaybeUninit::uninit);
-            let mut new_control = BitVec::with_capacity(total_slots);
-            new_control.resize(total_slots, false);
+            let mut new_control = SimdBitSet::with_len(total_slots);
             let mut success = true;
 
             while let Some(entry) = old_entries.pop() {
@@ -307,7 +285,7 @@ impl<K: Key, V: Value> PoMap<K, V> {
                 );
                 match Self::place_entry_in_slice(
                     new_entries.as_mut_slice(),
-                    new_control.as_mut_bitslice(),
+                    &mut new_control,
                     bucket_len,
                     bucket_mask,
                     slot_shift,
@@ -338,12 +316,9 @@ impl<K: Key, V: Value> PoMap<K, V> {
             }
 
             for idx in 0..new_entries.len() {
-                if new_control[idx] {
-                    let entry = unsafe {
-                        new_entries
-                            .get_unchecked_mut(idx)
-                            .assume_init_read()
-                    };
+                if new_control.get(idx) {
+                    let entry = unsafe { new_entries.get_unchecked_mut(idx).assume_init_read() };
+                    new_control.set(idx, false);
                     old_entries.push(entry);
                 }
             }

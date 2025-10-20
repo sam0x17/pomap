@@ -14,7 +14,7 @@ missing_inline_in_public_items = "deny"
 default = []
 
 [dependencies]
-bitvec = "1.0"
+wide = "0.8"
 
 [dev-dependencies]
 criterion = { version = "0.5", features = ["html_reports"] }
