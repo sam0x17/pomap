@@ -14,6 +14,7 @@ missing_inline_in_public_items = "deny"
 default = []
 
 [dependencies]
+sha2 = { version = "0.10", features = ["asm"] }
 wide = "0.8"
 
 [dev-dependencies]

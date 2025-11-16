@@ -6,6 +6,8 @@ use std::{
     mem::MaybeUninit,
 };
 
+pub mod merkle;
+
 const DEFAULT_CAPACITY: usize = 16;
 const GROWTH_FACTOR: usize = 4;
 
