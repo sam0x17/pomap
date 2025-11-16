@@ -12,7 +12,7 @@ const DEFAULT_CAPACITY: usize = 16;
 const GROWTH_FACTOR: usize = 4;
 
 #[inline(always)]
-pub fn num_buckets(n: usize) -> usize {
+pub const fn num_buckets(n: usize) -> usize {
     n / (n).ilog2() as usize
     // (n as f64).sqrt() as usize
 }

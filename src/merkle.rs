@@ -16,9 +16,32 @@ where
     hashes: Vec<HashOf<H>>,
 }
 
-impl<H: Digest + Clone + PartialOrd + Ord + PartialEq + Eq> PoaHT<H> {
+impl<H: Digest> PoaHT<H> {
+    #[inline(always)]
+    pub fn new() -> Self {
+        Self {
+            root_hash: HashOf::<H>::default(),
+            bucket_hashes: Vec::new(),
+            hashes: Vec::new(),
+        }
+    }
+
+    #[inline(always)]
+    pub fn with_capacity(capacity: usize) -> Self {
+        Self {
+            root_hash: HashOf::<H>::default(),
+            bucket_hashes: Vec::with_capacity(num_buckets(capacity)),
+            hashes: Vec::with_capacity(capacity),
+        }
+    }
+
     #[inline(always)]
     pub const fn root_hash(&self) -> &HashOf<H> {
         &self.root_hash
     }
+}
+
+#[inline(always)]
+pub const fn num_buckets(n: usize) -> usize {
+    n / (n).ilog2() as usize
 }
