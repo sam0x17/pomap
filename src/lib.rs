@@ -6,7 +6,7 @@ use std::{
     mem::MaybeUninit,
 };
 
-pub mod poaht;
+pub mod auth;
 
 const DEFAULT_CAPACITY: usize = 16;
 const GROWTH_FACTOR: usize = 4;

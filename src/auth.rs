@@ -1,15 +1,12 @@
 use sha2::digest::Output;
 use sha2::{Digest, Sha256};
 
-/// Digest output for the default [`Sha256`] hasher
-pub type Sha256Hash = Output<Sha256>;
-
 type HashOf<H> = Output<H>;
 
 const MIN_CAPACITY: usize = 16;
 
 #[derive(Default, Clone)]
-pub struct PoAHT<H: Clone + Default + Digest = Sha256>
+pub struct PoAuthTable<H: Clone + Default + Digest = Sha256>
 where
     HashOf<H>: Clone + PartialEq + Eq + PartialOrd + Ord + Default,
 {
@@ -104,7 +101,7 @@ struct BucketMeta<H: Clone + Default + Digest> {
     len: usize,      // live elements in this bucket
 }
 
-impl<H: Clone + Default + Digest> PoAHT<H> {
+impl<H: Clone + Default + Digest> PoAuthTable<H> {
     #[inline(always)]
     pub const fn root_hash(&self) -> &HashOf<H> {
         &self.root_hash
@@ -160,4 +157,36 @@ where
     let p = unsafe { bytes.as_ptr().add(bytes.len() - n) as *const usize };
     let raw = unsafe { core::ptr::read_unaligned(p) };
     usize::from_le(raw) // LE = no-op; BE = byteswap
+}
+
+#[test]
+fn test_new_with_capacity() {
+    let table: PoAuthTable<Sha256> = PoAuthTable::with_capacity(100);
+    assert_eq!(table.hashes.capacity(), 128);
+    assert_eq!(
+        table.table_meta,
+        TableMeta {
+            bucket_bits: 5,
+            in_bucket_bits: 2,
+            index_bits: 7,
+            num_buckets: 32,
+            bucket_capacity: 4,
+            index_shift: 57,
+            in_bucket_mask: 3
+        }
+    );
+    let table: PoAuthTable<sha2::Sha512> = PoAuthTable::with_capacity(1000);
+    assert_eq!(table.hashes.capacity(), 1024);
+    assert_eq!(
+        table.table_meta,
+        TableMeta {
+            bucket_bits: 7,
+            in_bucket_bits: 3,
+            index_bits: 10,
+            num_buckets: 128,
+            bucket_capacity: 8,
+            index_shift: 54,
+            in_bucket_mask: 7
+        }
+    );
 }
