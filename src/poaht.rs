@@ -22,13 +22,13 @@ where
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Debug, Default)]
 struct TableMeta {
     // How many top bits of the hash we use to choose the bucket.
-    bucket_bits: u8, // b
+    bucket_bits: usize, // b
 
     // How many following bits we use to choose where inside the bucket.
-    in_bucket_bits: u8, // r
+    in_bucket_bits: usize, // r
 
     // Derived: total index bits (b + r) == log2(capacity).
-    index_bits: u8, // m = b + r
+    index_bits: usize, // m = b + r
 
     // Number of buckets and bucket capacity in slots.
     num_buckets: usize,     // 1 << bucket_bits
@@ -37,10 +37,9 @@ struct TableMeta {
     // shift to get index: idx = msw >> index_shift
     index_shift: u32,
 
-    // masks after you have idx:
-    //   bucket_id  = (idx >> in_bucket_bits) & bucket_mask
-    //   in_bucket  = idx & in_bucket_mask
-    bucket_mask: usize,
+    // mask after you have idx:
+    //   bucket_id  = idx >> in_bucket_bits          // range [0, 2^b)
+    //   in_bucket  = idx & in_bucket_mask           // low r bits
     in_bucket_mask: usize,
 }
 
@@ -51,32 +50,33 @@ impl TableMeta {
         debug_assert!(capacity >= MIN_CAPACITY);
 
         // m = log2(capacity)
-        let m: u32 = capacity.trailing_zeros(); // m >= 4
+        let m_u32: u32 = capacity.trailing_zeros(); // m >= 4 for capacity >= 16
+        let m: usize = m_u32 as usize;
 
         // r = in-bucket bits, derived the same "ilog2" way from m
-        let r: u32 = (m as usize).ilog2() as u32; // r >= 2 for m>=4
+        let r: usize = m.ilog2() as usize; // r >= 2 for m>=4
 
         // b = bucket bits
-        let b: u32 = m - r;
+        let b: usize = m - r;
 
         let num_buckets = 1usize << b;
         let bucket_capacity = 1usize << r;
 
         let w = usize::BITS;
-        let index_shift = w - m; // top m bits → index
+        // For this design, we assume m <= usize::BITS (we only use one word of prefix)
+        debug_assert!(m as u32 <= w);
+        let index_shift = w - (m as u32); // top m bits → index
 
-        // With capacity >= 16 we know 0 < b,r < w; no branches needed here.
-        let bucket_mask = (1usize << b) - 1;
+        // With capacity >= 16 we know 0 < r < w; no branches needed here.
         let in_bucket_mask = (1usize << r) - 1;
 
         Self {
-            bucket_bits: b as u8,
-            in_bucket_bits: r as u8,
-            index_bits: m as u8,
+            bucket_bits: b,
+            in_bucket_bits: r,
+            index_bits: m,
             num_buckets,
             bucket_capacity,
             index_shift,
-            bucket_mask,
             in_bucket_mask,
         }
     }
@@ -90,8 +90,7 @@ impl TableMeta {
         let msw = msw_usize_le_unaligned::<H>(h);
         let idx = msw >> self.index_shift; // top m bits as index
 
-        let r = self.in_bucket_bits as u32;
-        let bucket_id = (idx >> r) & self.bucket_mask;
+        let bucket_id = idx >> self.in_bucket_bits; // no mask needed; range is [0, 2^b)
         let in_bucket = idx & self.in_bucket_mask;
 
         (bucket_id, in_bucket)
@@ -100,9 +99,9 @@ impl TableMeta {
 
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Default)]
 struct BucketMeta<H: Clone + Default + Digest> {
-    hash: HashOf<H>,
-    start: usize,
-    len: usize,
+    hash: HashOf<H>, // per-bucket commitment (eventual)
+    start: usize,    // run start in `hashes`
+    len: usize,      // live elements in this bucket
 }
 
 impl<H: Clone + Default + Digest> PoAHT<H> {
@@ -121,6 +120,7 @@ impl<H: Clone + Default + Digest> PoAHT<H> {
         let cap = capacity.next_power_of_two().max(MIN_CAPACITY);
         let table_meta = TableMeta::from_capacity(cap);
         let default_hash = HashOf::<H>::default();
+
         let bucket_metas = (0..table_meta.num_buckets)
             .map(|i| {
                 let start = i * table_meta.bucket_capacity;
@@ -138,6 +138,12 @@ impl<H: Clone + Default + Digest> PoAHT<H> {
             bucket_metas,
             hashes: Vec::with_capacity(cap),
         }
+    }
+
+    /// Convenience: compute (bucket_id, in_bucket_offset) for a given hash.
+    #[inline(always)]
+    pub fn bucket_and_offset_for_hash(&self, h: &HashOf<H>) -> (usize, usize) {
+        self.table_meta.bucket_and_offset_from_hash::<H>(h)
     }
 }
 
