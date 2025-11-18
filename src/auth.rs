@@ -61,8 +61,8 @@ impl TableMeta {
 
         let w = usize::BITS;
         // For this design, we assume m <= usize::BITS (we only use one word of prefix)
-        debug_assert!(m as u32 <= w);
-        let index_shift = w - (m as u32); // top m bits → index
+        debug_assert!(m_u32 <= w);
+        let index_shift = w - m_u32; // top m bits → index
 
         // With capacity >= 16 we know 0 < r < w; no branches needed here.
         let in_bucket_mask = (1usize << r) - 1;
@@ -78,9 +78,9 @@ impl TableMeta {
         }
     }
 
-    /// Map a hash to (bucket_id, in_bucket_offset).
+    /// Map a hash to (bucket_id, in_bucket_slot).
     #[inline(always)]
-    fn bucket_and_offset_from_hash<H: Digest>(&self, h: &HashOf<H>) -> (usize, usize)
+    fn bucket_and_slot_from_hash<H: Digest>(&self, h: &HashOf<H>) -> (usize, usize)
     where
         HashOf<H>: AsRef<[u8]>,
     {
@@ -135,12 +135,6 @@ impl<H: Clone + Default + Digest> PoAuthTable<H> {
             bucket_metas,
             hashes: Vec::with_capacity(cap),
         }
-    }
-
-    /// Convenience: compute (bucket_id, in_bucket_offset) for a given hash.
-    #[inline(always)]
-    pub fn bucket_and_offset_for_hash(&self, h: &HashOf<H>) -> (usize, usize) {
-        self.table_meta.bucket_and_offset_from_hash::<H>(h)
     }
 }
 
