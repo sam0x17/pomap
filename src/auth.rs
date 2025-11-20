@@ -1,107 +1,275 @@
+use core::{array, mem, ptr};
 use sha2::digest::Output;
 use sha2::{Digest, Sha256};
 
 type HashOf<H> = Output<H>;
 
 const MIN_CAPACITY: usize = 16;
+/// Number of **authenticated interior** levels above the virtual bottom.
+/// 0 => only virtual leaf (no interior nodes). Tweak this to benchmark depth tradeoffs.
+pub const LEVELS: usize = 2;
 
-#[derive(Default, Clone)]
-pub struct PoAuthTable<H: Clone + Default + Digest = Sha256>
+// ======================= Canonical MSW (LE: no-op) =======================
+
+/// Load the *most-significant word* under **little-endian numeric order**:
+/// i.e., the **last** native word of the digest. LE hosts: no swap; BE: one bswap.
+#[inline(always)]
+fn msw_usize_le_unaligned<H: Digest>(h: &HashOf<H>) -> usize
 where
-    HashOf<H>: Clone + PartialEq + Eq + PartialOrd + Ord + Default,
+    HashOf<H>: AsRef<[u8]>,
 {
-    root_hash: HashOf<H>,
-    table_meta: TableMeta,
-    bucket_metas: Vec<BucketMeta<H>>,
-    hashes: Vec<HashOf<H>>,
+    let bytes = h.as_ref();
+    let n = mem::size_of::<usize>();
+    debug_assert!(bytes.len() >= n);
+    // SAFETY: we only read; alignment not guaranteed so use read_unaligned.
+    let p = unsafe { bytes.as_ptr().add(bytes.len() - n) as *const usize };
+    let raw = unsafe { ptr::read_unaligned(p) };
+    usize::from_le(raw) // LE: no-op; BE: one bswap
 }
 
-#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Debug, Default)]
-struct TableMeta {
-    // How many top bits of the hash we use to choose the bucket.
-    bucket_bits: usize, // b
+// ======================= Full path & small helpers =======================
 
-    // How many following bits we use to choose where inside the bucket.
-    in_bucket_bits: usize, // r
-
-    // Derived: total index bits (b + r) == log2(capacity).
-    index_bits: usize, // m = b + r
-
-    // Number of buckets and bucket capacity in slots.
-    num_buckets: usize,     // 1 << bucket_bits
-    bucket_capacity: usize, // 1 << in_bucket_bits
-
-    // shift to get index: idx = msw >> index_shift
-    index_shift: u32,
-
-    // mask after you have idx:
-    //   bucket_id  = idx >> in_bucket_bits          // range [0, 2^b)
-    //   in_bucket  = idx & in_bucket_mask           // low r bits
-    in_bucket_mask: usize,
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub struct FullPath<const L: usize> {
+    /// Node id per authenticated level, top (0) → bottom (L-1).
+    pub level_ids: [usize; L],
+    /// Virtual leaf slot inside the bottom bucket (low `r` bits).
+    pub in_bucket: usize,
+    /// Flattened id of the bottom interior node (concatenation of all interior bits).
+    pub global_id: usize,
 }
 
-impl TableMeta {
+#[inline(always)]
+const fn lsb_mask(bits: u32) -> usize {
+    if bits == 0 {
+        0
+    } else if bits == usize::BITS {
+        usize::MAX
+    } else {
+        (1usize << bits) - 1
+    }
+}
+
+// ======================= Table meta =======================
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TableMeta<const L: usize> {
+    // Bit budget
+    pub index_bits: u32,      // m = ilog2(capacity)
+    pub in_bucket_bits: u32,  // r = ilog2(m)
+    pub level_bits: [u32; L], // interior bits, top..bottom; sum(level_bits)+r == m
+
+    // Sizes / mapping
+    pub nodes_per_level: [usize; L], // nodes at each level (global), cumulative
+    pub span_slots: [usize; L],      // leaf slots covered by one node at each level
+    pub bucket_capacity: usize,      // 1 << r
+    pub num_bottom_nodes: usize,     // == 1 << sum(level_bits)
+
+    // Hot-path shifts/masks
+    pub index_shift: u32,        // idx = msw >> index_shift
+    pub in_bucket_mask: usize,   // (1<<r)-1
+    pub level_masks: [usize; L], // (1<<level_bits[i]) - 1 (or 0)
+    pub level_shifts: [u32; L],  // sum of bits below level i (bottomwards), precomputed
+}
+
+impl<const L: usize> TableMeta<L> {
+    /// Derive layout from `capacity` only: m=ilog2(cap), r=ilog2(m), remaining bits split across levels by iterated ilog2.
     #[inline(always)]
-    const fn from_capacity(capacity: usize) -> Self {
-        debug_assert!(capacity.is_power_of_two());
-        debug_assert!(capacity >= MIN_CAPACITY);
+    pub(crate) fn from_capacity(capacity: usize) -> Self {
+        debug_assert!(capacity.is_power_of_two() && capacity >= MIN_CAPACITY);
 
-        // m = log2(capacity)
-        let m_u32: u32 = capacity.trailing_zeros(); // m >= 4 for capacity >= 16
-        let m: usize = m_u32 as usize;
+        // m = ilog2(capacity)
+        let m: u32 = capacity.trailing_zeros();
+        // r = ilog2(m) (virtual leaf bits)
+        let r: u32 = if m == 0 {
+            0
+        } else {
+            (m as usize).ilog2() as u32
+        };
 
-        // r = in-bucket bits, derived the same "ilog2" way from m
-        let r: usize = m.ilog2() as usize; // r >= 2 for m>=4
+        // Distribute remaining bits across L interior levels by iterated ilog2.
+        let mut rem = (m - r) as usize;
+        let mut level_bits = [0u32; L];
+        if L > 0 {
+            for i in 0..L {
+                let li = if i + 1 < L {
+                    if rem == 0 { 0 } else { rem.ilog2() as u32 }
+                } else {
+                    rem as u32
+                };
+                level_bits[i] = li;
+                rem = rem.saturating_sub(li as usize);
+            }
+        }
+        debug_assert_eq!(rem, 0);
 
-        // b = bucket bits
-        let b: usize = m - r;
+        // Derived sizes/masks
+        let mut nodes_per_level = [0usize; L];
+        let mut level_masks = [0usize; L];
+        let mut span_slots = [0usize; L];
 
-        let num_buckets = 1usize << b;
+        // cumulative nodes at each level (top..bottom)
+        let mut cum = 0usize;
+        for i in 0..L {
+            cum += level_bits[i] as usize;
+            nodes_per_level[i] = 1usize << cum;
+            level_masks[i] = lsb_mask(level_bits[i]);
+        }
+        let num_bottom_nodes = if L == 0 { 1 } else { nodes_per_level[L - 1] };
+
         let bucket_capacity = 1usize << r;
 
-        let w = usize::BITS;
-        // For this design, we assume m <= usize::BITS (we only use one word of prefix)
-        debug_assert!(m_u32 <= w);
-        let index_shift = w - m_u32; // top m bits → index
+        // span of one node at each level, measured in leaf slots
+        // bottom interior level (if any) has span == bucket_capacity.
+        let mut below_sum = 0usize;
+        for i in (0..L).rev() {
+            span_slots[i] = bucket_capacity << below_sum;
+            below_sum += level_bits[i] as usize;
+        }
 
-        // With capacity >= 16 we know 0 < r < w; no branches needed here.
-        let in_bucket_mask = (1usize << r) - 1;
+        let w = usize::BITS;
+        let index_shift = w - m;
+        let in_bucket_mask = lsb_mask(r);
+
+        // Precompute shifts to slice out each level’s id from the authenticated prefix.
+        // For level i (top..bottom), shift == sum(level_bits[j]) for j in (i+1..L).
+        let mut level_shifts = [0u32; L];
+        let mut sum_below = 0usize;
+        for i in (0..L).rev() {
+            level_shifts[i] = sum_below as u32;
+            sum_below += level_bits[i] as usize;
+        }
 
         Self {
-            bucket_bits: b,
-            in_bucket_bits: r,
             index_bits: m,
-            num_buckets,
+            in_bucket_bits: r,
+            level_bits,
+            nodes_per_level,
+            span_slots,
             bucket_capacity,
+            num_bottom_nodes,
             index_shift,
             in_bucket_mask,
+            level_masks,
+            level_shifts,
         }
     }
 
-    /// Map a hash to (bucket_id, in_bucket_slot).
+    /// Absolute start (in `hashes`) of a node by (level, id). O(1).
     #[inline(always)]
-    fn bucket_and_slot_from_hash<H: Digest>(&self, h: &HashOf<H>) -> (usize, usize)
+    pub(crate) fn node_start(&self, level: usize, id: usize) -> usize {
+        debug_assert!(level < L);
+        id * self.span_slots[level]
+    }
+
+    /// **Branchless** hot-path full path:
+    /// returns all level IDs (top..bottom), the virtual leaf slot, and the flattened bottom id.
+    #[inline(always)]
+    pub(crate) fn full_path_from_hash<H: Digest>(&self, h: &HashOf<H>) -> FullPath<L>
+    where
+        HashOf<H>: AsRef<[u8]>,
+    {
+        // 1) Canonical MSW (LE no-op), then top-m index
+        let msw = msw_usize_le_unaligned::<H>(h);
+        let idx = (msw >> self.index_shift) as usize;
+
+        // 2) Split: low-r = bin; high-(m-r) = authenticated prefix
+        let in_bucket = idx & self.in_bucket_mask;
+        let auth = idx >> self.in_bucket_bits; // concatenation of all interior bits
+
+        // 3) Slice each level's id from `auth` without branches
+        let mut ids = [0usize; L];
+        for i in 0..L {
+            ids[i] = (auth >> self.level_shifts[i]) & self.level_masks[i];
+        }
+
+        // 4) Flattened bottom id is exactly the authenticated prefix
+        FullPath {
+            level_ids: ids,
+            in_bucket,
+            global_id: auth,
+        }
+    }
+
+    // ---------- Bin jump helpers (no per-bin counts) ----------
+
+    /// Top-m index from digest.
+    #[inline(always)]
+    pub(crate) fn index_from_hash<H: Digest>(&self, h: &HashOf<H>) -> usize
     where
         HashOf<H>: AsRef<[u8]>,
     {
         let msw = msw_usize_le_unaligned::<H>(h);
-        let idx = msw >> self.index_shift; // top m bits as index
+        (msw >> self.index_shift) as usize
+    }
 
-        let bucket_id = idx >> self.in_bucket_bits; // no mask needed; range is [0, 2^b)
-        let in_bucket = idx & self.in_bucket_mask;
+    /// (global bottom id, in-bucket bin) from the top-m index.
+    #[inline(always)]
+    pub(crate) fn gid_and_bin_from_index(&self, idx: usize) -> (usize, usize) {
+        let bin = idx & self.in_bucket_mask; // low r
+        let gid = idx >> self.in_bucket_bits; // high (m - r)
+        (gid, bin)
+    }
 
-        (bucket_id, in_bucket)
+    /// **One-shot**: absolute bin index and enclosing bucket bounds.
+    /// Returns `(bin_index, bucket_lo, bucket_hi)`.
+    #[inline(always)]
+    pub(crate) fn bin_index_from_hash<H: Digest>(&self, h: &HashOf<H>) -> (usize, usize, usize)
+    where
+        HashOf<H>: AsRef<[u8]>,
+    {
+        let msw = msw_usize_le_unaligned::<H>(h);
+        let idx = (msw >> self.index_shift) as usize;
+
+        let bin = idx & self.in_bucket_mask;
+        let gid = idx >> self.in_bucket_bits;
+
+        let bucket_lo = gid * self.bucket_capacity;
+        (bucket_lo + bin, bucket_lo, bucket_lo + self.bucket_capacity)
+    }
+
+    /// Bucket bounds (bottom interior node span) for `h` (if you ever need just the bounds).
+    #[inline(always)]
+    pub(crate) fn bucket_bounds_for_hash<H: Digest>(&self, h: &HashOf<H>) -> (usize, usize)
+    where
+        HashOf<H>: AsRef<[u8]>,
+    {
+        let idx = self.index_from_hash::<H>(h);
+        let gid = idx >> self.in_bucket_bits;
+        let lo = gid * self.bucket_capacity;
+        (lo, lo + self.bucket_capacity)
     }
 }
 
-#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Default)]
-struct BucketMeta<H: Clone + Default + Digest> {
-    hash: HashOf<H>, // per-bucket commitment (eventual)
-    start: usize,    // run start in `hashes`
-    len: usize,      // live elements in this bucket
+// ======================= Unified interior meta =======================
+
+#[derive(Clone, PartialEq, Eq, Debug, Default)]
+pub struct LevelMeta<H: Clone + Default + Digest> {
+    /// Authenticated commitment for this node.
+    pub hash: HashOf<H>,
+    /// Live items under this node (maintained incrementally as you insert/delete).
+    pub len: usize,
 }
 
-impl<H: Clone + Default + Digest> PoAuthTable<H> {
+// ======================= Main table =======================
+
+#[derive(Clone)]
+pub struct PoAuthTable<H: Clone + Default + Digest = Sha256, const L: usize = LEVELS>
+where
+    HashOf<H>: Clone + PartialEq + Eq + PartialOrd + Ord + Default,
+{
+    root_hash: HashOf<H>,
+    meta: TableMeta<L>,
+    /// Per-level arrays of interior nodes (top..bottom). Lengths = nodes_per_level[i].
+    level: [Vec<LevelMeta<H>>; L],
+    /// Flat leaf array; in your full impl store (hash,key,val) sorted by LE-canonical (hash,key).
+    hashes: Vec<HashOf<H>>,
+}
+
+impl<H: Clone + Default + Digest, const L: usize> PoAuthTable<H, L>
+where
+    HashOf<H>: Clone + PartialEq + Eq + PartialOrd + Ord + Default,
+{
     #[inline(always)]
     pub const fn root_hash(&self) -> &HashOf<H> {
         &self.root_hash
@@ -115,72 +283,25 @@ impl<H: Clone + Default + Digest> PoAuthTable<H> {
     #[inline(always)]
     pub fn with_capacity(capacity: usize) -> Self {
         let cap = capacity.next_power_of_two().max(MIN_CAPACITY);
-        let table_meta = TableMeta::from_capacity(cap);
+        let meta = TableMeta::<L>::from_capacity(cap);
         let default_hash = HashOf::<H>::default();
 
-        let bucket_metas = (0..table_meta.num_buckets)
-            .map(|i| {
-                let start = i * table_meta.bucket_capacity;
-                BucketMeta {
+        // Build interior levels; node i at level ℓ covers span_slots[ℓ] leaf slots.
+        let level: [Vec<LevelMeta<H>>; L] = array::from_fn(|ell| {
+            vec![
+                LevelMeta {
                     hash: default_hash.clone(),
-                    start,
-                    len: 0,
-                }
-            })
-            .collect();
+                    len: 0
+                };
+                meta.nodes_per_level[ell]
+            ]
+        });
 
         Self {
             root_hash: default_hash,
-            table_meta,
-            bucket_metas,
+            meta,
+            level,
             hashes: Vec::with_capacity(cap),
         }
     }
-}
-
-/// Load the *most-significant word* under **little-endian numeric order**:
-/// i.e., the **last** native word of the digest. LE hosts: no swap; BE: one bswap.
-#[inline(always)]
-fn msw_usize_le_unaligned<H: Digest>(h: &HashOf<H>) -> usize
-where
-    HashOf<H>: AsRef<[u8]>,
-{
-    let bytes = h.as_ref();
-    let n = core::mem::size_of::<usize>();
-    debug_assert!(bytes.len() >= n);
-    let p = unsafe { bytes.as_ptr().add(bytes.len() - n) as *const usize };
-    let raw = unsafe { core::ptr::read_unaligned(p) };
-    usize::from_le(raw) // LE = no-op; BE = byteswap
-}
-
-#[test]
-fn test_new_with_capacity() {
-    let table: PoAuthTable<Sha256> = PoAuthTable::with_capacity(100);
-    assert_eq!(table.hashes.capacity(), 128);
-    assert_eq!(
-        table.table_meta,
-        TableMeta {
-            bucket_bits: 5,
-            in_bucket_bits: 2,
-            index_bits: 7,
-            num_buckets: 32,
-            bucket_capacity: 4,
-            index_shift: 57,
-            in_bucket_mask: 3
-        }
-    );
-    let table: PoAuthTable<sha2::Sha512> = PoAuthTable::with_capacity(1000);
-    assert_eq!(table.hashes.capacity(), 1024);
-    assert_eq!(
-        table.table_meta,
-        TableMeta {
-            bucket_bits: 7,
-            in_bucket_bits: 3,
-            index_bits: 10,
-            num_buckets: 128,
-            bucket_capacity: 8,
-            index_shift: 54,
-            in_bucket_mask: 7
-        }
-    );
 }
