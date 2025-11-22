@@ -393,11 +393,7 @@ mod tests {
 
         let level_ids: [usize; LEVELS] = array::from_fn(|i| {
             let mask = meta.level_masks[i];
-            if mask == 0 {
-                0
-            } else {
-                mask.min(i + 1)
-            }
+            if mask == 0 { 0 } else { mask.min(i + 1) }
         });
 
         let mut auth = 0usize;
@@ -444,9 +440,11 @@ mod tests {
 
         for (level_idx, nodes) in table.level.iter().enumerate() {
             assert_eq!(nodes.len(), table.meta.nodes_per_level[level_idx]);
-            assert!(nodes
-                .iter()
-                .all(|node| node.len == 0 && node.hash == HashOf::<Sha256>::default()));
+            assert!(
+                nodes
+                    .iter()
+                    .all(|node| node.len == 0 && node.hash == HashOf::<Sha256>::default())
+            );
         }
     }
 
@@ -461,9 +459,11 @@ mod tests {
 
         for (level_idx, nodes) in table.level.iter().enumerate() {
             assert_eq!(nodes.len(), table.meta.nodes_per_level[level_idx]);
-            assert!(nodes
-                .iter()
-                .all(|node| node.len == 0 && node.hash == HashOf::<Sha256>::default()));
+            assert!(
+                nodes
+                    .iter()
+                    .all(|node| node.len == 0 && node.hash == HashOf::<Sha256>::default())
+            );
         }
     }
 }

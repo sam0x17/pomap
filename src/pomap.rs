@@ -23,6 +23,7 @@ enum Slot<K: Key, V: Value> {
     Occupied { hash: u64, key: K, value: V },
 }
 
+#[derive(Clone)]
 pub struct PoMap<K: Key, V: Value> {
     meta: PoMapMeta,
     slots: Vec<Slot<K, V>>,
@@ -41,6 +42,19 @@ impl<K: Key, V: Value> PoMap<K, V> {
         let mut slots = Vec::with_capacity(vec_capacity);
         slots.resize_with(vec_capacity, || Slot::Vacant);
         Self { meta, slots }
+    }
+
+    /// Create a new [`PoMap`] with [`MIN_CAPACITY`] + [`MAX_SCAN`] internal capacity.
+    #[inline(always)]
+    pub fn new() -> Self {
+        Self::with_capacity(MIN_CAPACITY)
+    }
+}
+
+impl Default for PoMap<(), ()> {
+    #[inline(always)]
+    fn default() -> Self {
+        Self::new()
     }
 }
 
