@@ -66,10 +66,13 @@ impl<K: Key, V: Value> PoMap<K, V> {
             else {
                 break;
             };
-            match slot_hash.cmp(&hash) {
-                Ordering::Greater => return None,
-                Ordering::Equal if slot_key == key => return Some(value),
-                _ => {}
+
+            // we guarantee the slots are sorted by hash
+            if *slot_hash > hash {
+                break;
+            }
+            if *slot_hash == hash && slot_key == key {
+                return Some(value);
             }
         }
         None
