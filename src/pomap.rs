@@ -1,4 +1,4 @@
-use core::hash::Hash;
+use core::{cmp::Ordering, hash::Hash};
 
 /// Minimum capacity we will allow for PoMap
 pub const MIN_CAPACITY: usize = 16;
@@ -48,6 +48,29 @@ impl<K: Key, V: Value> PoMap<K, V> {
     #[inline(always)]
     pub fn new() -> Self {
         Self::with_capacity(MIN_CAPACITY)
+    }
+
+    #[inline(always)]
+    pub fn get_with_hash(&self, hash: u64, key: &K) -> Option<&V> {
+        let ideal_slot = self.meta.ideal_slot(hash);
+        let scan_end = ideal_slot + MAX_SCAN;
+
+        for slot in &self.slots[ideal_slot..scan_end] {
+            let Slot::Occupied {
+                hash: slot_hash,
+                key: slot_key,
+                value,
+            } = slot
+            else {
+                break;
+            };
+            match slot_hash.cmp(&hash) {
+                Ordering::Greater => break,
+                Ordering::Equal if slot_key == key => return Some(value),
+                _ => {}
+            }
+        }
+        None
     }
 }
 
