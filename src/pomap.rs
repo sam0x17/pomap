@@ -1,10 +1,14 @@
 use core::hash::Hash;
 
+/// Minimum capacity we will allow for PoMap
 pub const MIN_CAPACITY: usize = 16;
+
 /// Maximum number of slots to linearly scan starting at the ideal slot.
 /// We design the layout so that `[ideal_slot, ideal_slot + MAX_SCAN)` is
 /// always in-bounds for the backing Vec.
 pub const MAX_SCAN: usize = 4;
+
+/// Number of bits in the hashcode
 const HASH_BITS: usize = 64; // we use a 64-bit hashcode
 
 pub trait Key: Hash + Eq + Clone + Ord {}
@@ -20,7 +24,24 @@ enum Slot<K: Key, V: Value> {
 }
 
 pub struct PoMap<K: Key, V: Value> {
+    meta: PoMapMeta,
     slots: Vec<Slot<K, V>>,
+}
+
+impl<K: Key, V: Value> PoMap<K, V> {
+    /// Create a new [`PoMap`] with the given capacity.
+    ///
+    /// Note that the actual internal capacity will always be scaled up to the next power of
+    /// two (if not already a power of two) plus [`MAX_SCAN`].
+    ///
+    /// Also note that the minimum capacity is [`MIN_CAPACITY`].
+    #[inline]
+    pub fn with_capacity(capacity: usize) -> Self {
+        let (meta, vec_capacity) = PoMapMeta::new(capacity);
+        let mut slots = Vec::with_capacity(vec_capacity);
+        slots.resize_with(vec_capacity, || Slot::Vacant);
+        Self { meta, slots }
+    }
 }
 
 /// PoMAP meta for a flat, sorted-by-hash array with direct prefix indexing.
@@ -32,7 +53,7 @@ pub struct PoMap<K: Key, V: Value> {
 ///   inside a Vec of length `capacity = ideal_range + MAX_SCAN`.
 ///
 /// The caller is responsible for using the returned `capacity` to size the backing Vec.
-#[derive(Clone, Debug)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 struct PoMapMeta {
     /// Number of index bits m where `ideal_range = 1 << m`.
     index_bits: usize,
