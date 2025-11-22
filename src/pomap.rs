@@ -30,7 +30,7 @@ pub struct PoMap<K: Key, V: Value> {
 }
 
 impl<K: Key, V: Value> PoMap<K, V> {
-    /// Create a new [`PoMap`] with the given capacity.
+    /// Create a new [`PoMap`] with _at least_ the given capacity.
     ///
     /// Note that the actual internal capacity will always be scaled up to the next power of
     /// two (if not already a power of two) plus [`MAX_SCAN`].
