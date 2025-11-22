@@ -50,6 +50,8 @@ impl<K: Key, V: Value> PoMap<K, V> {
         Self::with_capacity(MIN_CAPACITY)
     }
 
+    /// Hot path for `get` that can be used when the caller already has the hash and doesn't
+    /// want to recompute it.
     #[inline(always)]
     pub fn get_with_hash(&self, hash: u64, key: &K) -> Option<&V> {
         let ideal_slot = self.meta.ideal_slot(hash);
@@ -65,7 +67,7 @@ impl<K: Key, V: Value> PoMap<K, V> {
                 break;
             };
             match slot_hash.cmp(&hash) {
-                Ordering::Greater => break,
+                Ordering::Greater => return None,
                 Ordering::Equal if slot_key == key => return Some(value),
                 _ => {}
             }
