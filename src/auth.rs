@@ -305,3 +305,165 @@ where
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use core::array;
+    use sha2::Sha256;
+
+    fn hash_with_msw(msw: usize) -> HashOf<Sha256> {
+        let mut hash = HashOf::<Sha256>::default();
+        let bytes = hash.as_mut_slice();
+        for (i, byte) in bytes.iter_mut().enumerate() {
+            *byte = (i as u8).wrapping_mul(17).wrapping_add(3);
+        }
+        let word_bytes = msw.to_le_bytes();
+        let start = bytes.len() - word_bytes.len();
+        bytes[start..].copy_from_slice(&word_bytes);
+        hash
+    }
+
+    #[test]
+    fn msw_function_extracts_inserted_value() {
+        let inserted = usize::MAX / 3;
+        let hash = hash_with_msw(inserted);
+        assert_eq!(msw_usize_le_unaligned::<Sha256>(&hash), inserted);
+    }
+
+    #[test]
+    fn table_meta_layout_consistent_for_common_capacities() {
+        let capacities = [
+            MIN_CAPACITY,
+            MIN_CAPACITY * 4,
+            MIN_CAPACITY * 16,
+            MIN_CAPACITY * 64,
+        ];
+        for &cap in capacities.iter() {
+            let meta = TableMeta::<LEVELS>::from_capacity(cap);
+            assert_eq!(meta.index_bits, cap.trailing_zeros());
+            assert_eq!(meta.bucket_capacity, 1usize << meta.in_bucket_bits);
+            let sum_level_bits: u32 = meta.level_bits.iter().sum();
+            assert_eq!(sum_level_bits + meta.in_bucket_bits, meta.index_bits);
+            let expected_bottom = meta.nodes_per_level.last().copied().unwrap_or(1);
+            assert_eq!(meta.num_bottom_nodes, expected_bottom);
+
+            let mut cumulative = 0usize;
+            for i in 0..LEVELS {
+                cumulative += meta.level_bits[i] as usize;
+                assert_eq!(meta.nodes_per_level[i], 1usize << cumulative);
+                assert_eq!(meta.level_masks[i], lsb_mask(meta.level_bits[i]));
+            }
+
+            let mut below = 0usize;
+            for i in (0..LEVELS).rev() {
+                assert_eq!(meta.span_slots[i], meta.bucket_capacity << below);
+                below += meta.level_bits[i] as usize;
+            }
+
+            let mut shift_sum = 0usize;
+            for i in (0..LEVELS).rev() {
+                assert_eq!(meta.level_shifts[i], shift_sum as u32);
+                shift_sum += meta.level_bits[i] as usize;
+            }
+        }
+    }
+
+    #[test]
+    fn node_start_matches_span_slots() {
+        if LEVELS == 0 {
+            return;
+        }
+        let meta = TableMeta::<LEVELS>::from_capacity(MIN_CAPACITY * 4);
+        for level in 0..LEVELS {
+            let span = meta.span_slots[level];
+            assert_eq!(meta.node_start(level, 0), 0);
+            if meta.nodes_per_level[level] > 1 {
+                assert_eq!(meta.node_start(level, 1), span);
+            }
+            let last = meta.nodes_per_level[level].saturating_sub(1);
+            assert_eq!(meta.node_start(level, last), last * span);
+        }
+    }
+
+    #[test]
+    fn full_path_and_bucket_helpers_are_coherent() {
+        const CAPACITY: usize = MIN_CAPACITY * 4;
+        let meta = TableMeta::<LEVELS>::from_capacity(CAPACITY);
+
+        let level_ids: [usize; LEVELS] = array::from_fn(|i| {
+            let mask = meta.level_masks[i];
+            if mask == 0 {
+                0
+            } else {
+                mask.min(i + 1)
+            }
+        });
+
+        let mut auth = 0usize;
+        for i in 0..LEVELS {
+            auth |= level_ids[i] << meta.level_shifts[i];
+        }
+
+        let desired_bin = if meta.in_bucket_mask == 0 {
+            0
+        } else {
+            meta.in_bucket_mask.min(3)
+        };
+        let idx = (auth << meta.in_bucket_bits) | desired_bin;
+        let msw = idx << meta.index_shift;
+        let hash = hash_with_msw(msw);
+
+        assert_eq!(meta.index_from_hash::<Sha256>(&hash), idx);
+
+        let path = meta.full_path_from_hash::<Sha256>(&hash);
+        assert_eq!(path.global_id, auth);
+        assert_eq!(path.in_bucket, desired_bin);
+        assert_eq!(path.level_ids, level_ids);
+
+        let (gid, bin) = meta.gid_and_bin_from_index(idx);
+        assert_eq!((gid, bin), (auth, desired_bin));
+
+        let (bin_index, bucket_lo, bucket_hi) = meta.bin_index_from_hash::<Sha256>(&hash);
+        assert_eq!(bin_index, gid * meta.bucket_capacity + bin);
+        assert_eq!(bucket_lo, gid * meta.bucket_capacity);
+        assert_eq!(bucket_hi, bucket_lo + meta.bucket_capacity);
+        assert_eq!(
+            meta.bucket_bounds_for_hash::<Sha256>(&hash),
+            (bucket_lo, bucket_hi)
+        );
+    }
+
+    #[test]
+    fn poauth_table_new_uses_min_capacity() {
+        let table = PoAuthTable::<Sha256, LEVELS>::new();
+        assert_eq!(table.hashes.len(), 0);
+        assert_eq!(table.hashes.capacity(), MIN_CAPACITY);
+        assert_eq!(table.meta, TableMeta::<LEVELS>::from_capacity(MIN_CAPACITY));
+        assert_eq!(table.root_hash(), &HashOf::<Sha256>::default());
+
+        for (level_idx, nodes) in table.level.iter().enumerate() {
+            assert_eq!(nodes.len(), table.meta.nodes_per_level[level_idx]);
+            assert!(nodes
+                .iter()
+                .all(|node| node.len == 0 && node.hash == HashOf::<Sha256>::default()));
+        }
+    }
+
+    #[test]
+    fn with_capacity_rounds_up_and_initializes_levels() {
+        let requested = MIN_CAPACITY * 3 + 5;
+        let expected_cap = requested.next_power_of_two().max(MIN_CAPACITY);
+        let table = PoAuthTable::<Sha256, LEVELS>::with_capacity(requested);
+        assert_eq!(table.hashes.len(), 0);
+        assert_eq!(table.hashes.capacity(), expected_cap);
+        assert_eq!(table.meta, TableMeta::<LEVELS>::from_capacity(expected_cap));
+
+        for (level_idx, nodes) in table.level.iter().enumerate() {
+            assert_eq!(nodes.len(), table.meta.nodes_per_level[level_idx]);
+            assert!(nodes
+                .iter()
+                .all(|node| node.len == 0 && node.hash == HashOf::<Sha256>::default()));
+        }
+    }
+}

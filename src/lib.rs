@@ -7,6 +7,7 @@ use std::{
 };
 
 pub mod auth;
+pub mod new;
 
 const DEFAULT_CAPACITY: usize = 16;
 const GROWTH_FACTOR: usize = 4;
