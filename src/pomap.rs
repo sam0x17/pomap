@@ -64,14 +64,19 @@ impl<K: Key, V: Value> PoMap<K, V> {
                 value,
             } = slot
             else {
-                break;
+                return None;
             };
 
-            // we guarantee the slots are sorted by hash
-            if *slot_hash > hash {
-                break;
+            let slot_hash = *slot_hash;
+
+            if slot_hash < hash {
+                continue;
             }
-            if *slot_hash == hash && slot_key == key {
+            // we guarantee the slots are sorted by hash
+            if slot_hash > hash {
+                return None;
+            }
+            if slot_key == key {
                 return Some(value);
             }
         }
