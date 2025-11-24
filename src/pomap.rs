@@ -1,4 +1,9 @@
-use core::{cmp::Ordering, hash::Hash};
+use core::{
+    cmp::Ordering,
+    hash::{Hash, Hasher},
+    marker::PhantomData,
+};
+use std::hash::DefaultHasher;
 
 /// Minimum capacity we will allow for PoMap
 pub const MIN_CAPACITY: usize = 16;
@@ -24,12 +29,13 @@ enum Slot<K: Key, V: Value> {
 }
 
 #[derive(Clone)]
-pub struct PoMap<K: Key, V: Value> {
+pub struct PoMap<K: Key, V: Value, H: Hasher + Default = DefaultHasher> {
     meta: PoMapMeta,
     slots: Vec<Slot<K, V>>,
+    _phantom: PhantomData<H>,
 }
 
-impl<K: Key, V: Value> PoMap<K, V> {
+impl<K: Key, V: Value, H: Hasher + Default> PoMap<K, V, H> {
     /// Create a new [`PoMap`] with _at least_ the given capacity.
     ///
     /// Note that the actual internal capacity will always be scaled up to the next power of
@@ -41,7 +47,11 @@ impl<K: Key, V: Value> PoMap<K, V> {
         let (meta, vec_capacity) = PoMapMeta::new(capacity);
         let mut slots = Vec::with_capacity(vec_capacity);
         slots.resize_with(vec_capacity, || Slot::Vacant);
-        Self { meta, slots }
+        Self {
+            meta,
+            slots,
+            _phantom: PhantomData,
+        }
     }
 
     /// Create a new [`PoMap`] with [`MIN_CAPACITY`] + [`MAX_SCAN`] internal capacity.
@@ -81,6 +91,17 @@ impl<K: Key, V: Value> PoMap<K, V> {
             }
         }
         None
+    }
+
+    /// Gets a reference to the value corresponding to the specified key, or `None` if not found.
+    ///
+    /// Calls [`Self::get_with_hash`] internally after computing the hash.
+    #[inline(always)]
+    pub fn get(&self, key: &K) -> Option<&V> {
+        let mut hasher = H::default();
+        key.hash(&mut hasher);
+        let hash = hasher.finish();
+        self.get_with_hash(hash, key)
     }
 }
 
