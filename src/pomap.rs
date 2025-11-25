@@ -62,7 +62,7 @@ impl<K: Key, V: Value, H: Hasher + Default> PoMap<K, V, H> {
 
     /// Hot path for `get` that can be used when the caller already has the hash and doesn't
     /// want to recompute it.
-    #[inline(always)]
+    #[inline]
     pub fn get_with_hash(&self, hash: u64, key: &K) -> Option<&V> {
         let ideal_slot = self.meta.ideal_slot(hash);
         let scan_end = ideal_slot + MAX_SCAN;
@@ -96,12 +96,65 @@ impl<K: Key, V: Value, H: Hasher + Default> PoMap<K, V, H> {
     /// Gets a reference to the value corresponding to the specified key, or `None` if not found.
     ///
     /// Calls [`Self::get_with_hash`] internally after computing the hash.
-    #[inline(always)]
+    #[inline]
     pub fn get(&self, key: &K) -> Option<&V> {
         let mut hasher = H::default();
         key.hash(&mut hasher);
         let hash = hasher.finish();
         self.get_with_hash(hash, key)
+    }
+
+    /// Reserve capacity for at least `requested_capacity` elements if there is not enough
+    /// capacity already.
+    ///
+    /// Returns the new capacity.
+    #[cold]
+    pub fn reserve(&mut self, requested_capacity: usize) -> usize {
+        // generate new meta
+        let current_capacity = self.slots.capacity();
+        let (new_meta, new_vec_capacity) = PoMapMeta::new(requested_capacity);
+        if new_vec_capacity <= current_capacity {
+            return current_capacity;
+        }
+
+        // allocate new vec
+        let new_slots: Vec<Slot<K, V>> = Vec::with_capacity(new_vec_capacity);
+
+        // re-insert all existing elements into the new vec in the same order, with spaces
+        // added based on hash prefix / the new meta
+        let old_slots = core::mem::replace(&mut self.slots, new_slots);
+        let mut cursor = 0;
+        for slot in old_slots.into_iter() {
+            let Slot::Occupied { hash, .. } = &slot else {
+                continue;
+            };
+
+            // calculate ideal slot in the new layout
+            let ideal_slot = new_meta.ideal_slot(*hash);
+
+            // advance cursor and fill in vacant slots as needed
+            for _ in cursor..ideal_slot {
+                self.slots.push(Slot::Vacant);
+            }
+            cursor += ideal_slot.saturating_sub(cursor) + 1;
+
+            // insert the slot, we should be at or past the ideal slot now. Because the
+            // previous layout was already valid and is strictly smaller than the new one, this
+            // can never cause us to exceed MAX_SCAN slots past the ideal slot because we are
+            // always gaining more room.
+            self.slots.push(slot.clone());
+        }
+
+        // fill remaining capacity with vacant slots (minimally to account for MAX_SCAN, or a
+        // sparse set of elements)
+        self.slots.resize_with(new_vec_capacity, || Slot::Vacant);
+
+        // apply the new meta
+        self.meta = new_meta;
+
+        debug_assert!(self.slots.capacity() == new_vec_capacity);
+
+        new_vec_capacity
     }
 }
 
@@ -176,5 +229,26 @@ impl PoMapMeta {
     #[inline(always)]
     const fn ideal_slot(&self, hash: u64) -> usize {
         (hash >> self.index_shift) as usize
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_resize_goes_up_by_power_of_two_and_never_down() {
+        let mut map: PoMap<u64, u64> = PoMap::new();
+        assert_eq!(map.slots.capacity(), MIN_CAPACITY + MAX_SCAN);
+
+        // reserve more than the current capacity
+        let new_capacity = map.reserve(100);
+        assert_eq!(map.slots.capacity(), new_capacity);
+        assert_eq!(new_capacity, 128 + MAX_SCAN); // 128 is the next power of two after 100
+
+        // reserve less than the current capacity
+        let old_capacity = map.slots.capacity();
+        let new_capacity = map.reserve(50);
+        assert_eq!(new_capacity, old_capacity);
     }
 }
