@@ -1,20 +1,21 @@
 use core::{
-    cmp::Ordering,
     hash::{Hash, Hasher},
     marker::PhantomData,
 };
 use std::hash::DefaultHasher;
 
 /// Minimum capacity we will allow for PoMap
-pub const MIN_CAPACITY: usize = 16;
+const MIN_CAPACITY: usize = 16;
 
 /// Maximum number of slots to linearly scan starting at the ideal slot.
 /// We design the layout so that `[ideal_slot, ideal_slot + MAX_SCAN)` is
 /// always in-bounds for the backing Vec.
-pub const MAX_SCAN: usize = 4;
+const MAX_SCAN: usize = 4;
 
 /// Number of bits in the hashcode
 const HASH_BITS: usize = 64; // we use a 64-bit hashcode
+
+const GROWTH_FACTOR: usize = 2;
 
 pub trait Key: Hash + Eq + Clone + Ord {}
 impl<K: Hash + Eq + Clone + Ord> Key for K {}
@@ -104,40 +105,78 @@ impl<K: Key, V: Value, H: Hasher + Default> PoMap<K, V, H> {
         self.get_with_hash(hash, key)
     }
 
+    /// Inserts a key-value pair into the map, replacing any existing value.
+    ///
+    /// Computes the hash of the key and then delegates to [`Self::insert_with_hash`].
+    #[inline]
+    pub fn insert(&mut self, key: K, value: V) -> Option<V> {
+        let mut hasher = H::default();
+        key.hash(&mut hasher);
+        let hash = hasher.finish();
+        self.insert_with_hash(hash, key, value)
+    }
+
     #[inline]
     pub fn insert_with_hash(&mut self, hash: u64, key: K, value: V) -> Option<V> {
-        let ideal_slot = self.meta.ideal_slot(hash);
-        let scan_end = ideal_slot + MAX_SCAN;
+        let key = key;
+        let value = value;
 
-        for slot in &mut self.slots[ideal_slot..scan_end] {
-            let Slot::Occupied {
-                hash: slot_hash,
-                key: slot_key,
-                value: slot_value,
-            } = slot
-            else {
-                *slot = Slot::Occupied { hash, key, value };
-                return None;
-            };
+        loop {
+            let ideal_slot = self.meta.ideal_slot(hash);
+            let scan_end = ideal_slot + MAX_SCAN;
 
-            let slot_hash = *slot_hash;
+            for idx in ideal_slot..scan_end {
+                if matches!(&self.slots[idx], Slot::Vacant) {
+                    self.slots[idx] = Slot::Occupied { hash, key, value };
+                    return None;
+                }
 
-            if slot_hash < hash {
-                continue;
+                let slot_hash = match &self.slots[idx] {
+                    Slot::Occupied {
+                        hash: slot_hash, ..
+                    } => *slot_hash,
+                    Slot::Vacant => unreachable!(),
+                };
+
+                if slot_hash < hash {
+                    continue;
+                }
+                // we guarantee the slots are sorted by hash
+                if slot_hash > hash {
+                    // we need to insert before this slot
+                    // first we need to make sure we have room to shift elements at all within our
+                    // MAX_SCAN boundary. If there is at least one free spot past this slot and
+                    // before scan_end, we can shift elements to make room.
+                    if let Some(offset) = self.slots[idx + 1..scan_end]
+                        .iter()
+                        .position(|slot| matches!(slot, Slot::Vacant))
+                    {
+                        let vacant_idx = idx + 1 + offset;
+                        // Shift elements right by one to make space for the new element.
+                        self.slots[idx..=vacant_idx].rotate_right(1);
+                        self.slots[idx] = Slot::Occupied { hash, key, value };
+                        return None;
+                    }
+                    // No room in this window; grow and retry.
+                    break;
+                }
+                if let Slot::Occupied {
+                    key: slot_key,
+                    value: slot_value,
+                    ..
+                } = &mut self.slots[idx]
+                {
+                    if *slot_key == key {
+                        let old_value = core::mem::replace(slot_value, value);
+                        return Some(old_value);
+                    }
+                }
             }
-            // we guarantee the slots are sorted by hash
-            if slot_hash > hash {
-                // we need to insert before this slot
-                // first we need to make sure we have room to shift elements at all within our
-                // MAX_SCAN boundary. If there is at least one free spot past this slot and
-                // before scan_end, we can shift elements to make room.
-            }
-            if *slot_key == key {
-                let old_value = core::mem::replace(slot_value, value);
-                return Some(old_value);
-            }
+
+            // If we make it here, we either ran out of room in the scan window or the table is
+            // saturated for this hash window. Grow and retry the insertion.
+            self.reserve(self.slots.capacity() * GROWTH_FACTOR);
         }
-        None
     }
 
     /// Reserve capacity for at least `requested_capacity` elements if there is not enough
