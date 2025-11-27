@@ -104,6 +104,42 @@ impl<K: Key, V: Value, H: Hasher + Default> PoMap<K, V, H> {
         self.get_with_hash(hash, key)
     }
 
+    #[inline]
+    pub fn insert_with_hash(&mut self, hash: u64, key: K, value: V) -> Option<V> {
+        let ideal_slot = self.meta.ideal_slot(hash);
+        let scan_end = ideal_slot + MAX_SCAN;
+
+        for slot in &mut self.slots[ideal_slot..scan_end] {
+            let Slot::Occupied {
+                hash: slot_hash,
+                key: slot_key,
+                value: slot_value,
+            } = slot
+            else {
+                *slot = Slot::Occupied { hash, key, value };
+                return None;
+            };
+
+            let slot_hash = *slot_hash;
+
+            if slot_hash < hash {
+                continue;
+            }
+            // we guarantee the slots are sorted by hash
+            if slot_hash > hash {
+                // we need to insert before this slot
+                // first we need to make sure we have room to shift elements at all within our
+                // MAX_SCAN boundary. If there is at least one free spot past this slot and
+                // before scan_end, we can shift elements to make room.
+            }
+            if *slot_key == key {
+                let old_value = core::mem::replace(slot_value, value);
+                return Some(old_value);
+            }
+        }
+        None
+    }
+
     /// Reserve capacity for at least `requested_capacity` elements if there is not enough
     /// capacity already.
     ///
