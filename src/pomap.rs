@@ -310,6 +310,49 @@ impl PoMapMeta {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rand::{Rng, SeedableRng, rngs::StdRng};
+    use std::collections::HashMap;
+
+    #[derive(Default)]
+    struct IdentityHasher(u64);
+
+    impl Hasher for IdentityHasher {
+        fn write(&mut self, bytes: &[u8]) {
+            let mut acc = 0u64;
+            for &b in bytes {
+                acc = acc.wrapping_mul(31).wrapping_add(b as u64);
+            }
+            self.0 = acc;
+        }
+
+        fn write_u8(&mut self, i: u8) {
+            self.write(&[i]);
+        }
+
+        fn write_u16(&mut self, i: u16) {
+            self.write(&i.to_le_bytes());
+        }
+
+        fn write_u32(&mut self, i: u32) {
+            self.write(&i.to_le_bytes());
+        }
+
+        fn write_u64(&mut self, i: u64) {
+            self.0 = i;
+        }
+
+        fn write_u128(&mut self, i: u128) {
+            self.write(&i.to_le_bytes());
+        }
+
+        fn write_usize(&mut self, i: usize) {
+            self.write_u64(i as u64);
+        }
+
+        fn finish(&self) -> u64 {
+            self.0
+        }
+    }
 
     #[test]
     fn test_resize_goes_up_by_power_of_two_and_never_down() {
@@ -325,5 +368,89 @@ mod tests {
         let old_capacity = map.slots.capacity();
         let new_capacity = map.reserve(50);
         assert_eq!(new_capacity, old_capacity);
+    }
+
+    #[test]
+    fn insert_and_get_roundtrip() {
+        let mut map: PoMap<u64, u64, IdentityHasher> = PoMap::new();
+
+        // Spread keys across distinct ideal slots to avoid forced rehashing during the test.
+        for i in 0..8u64 {
+            let key = (i << 60) | i;
+            assert_eq!(map.insert(key, i * 10), None);
+            assert_eq!(map.get(&key), Some(&(i * 10)));
+        }
+
+        assert_eq!(map.get(&99), None);
+    }
+
+    #[test]
+    fn insert_replaces_existing_value() {
+        let mut map: PoMap<u64, u64, IdentityHasher> = PoMap::new();
+
+        assert_eq!(map.insert(42, 1), None);
+        assert_eq!(map.insert(42, 2), Some(1));
+        assert_eq!(map.get(&42), Some(&2));
+    }
+
+    #[test]
+    fn insertion_shifts_to_keep_hash_order() {
+        let mut map: PoMap<u64, u64, IdentityHasher> = PoMap::new();
+
+        // Craft hashes that land in the same ideal slot but have different order.
+        let base = 0b01010u64 << 59;
+        let higher = base | 30;
+        let lower = base | 10;
+
+        let slot = map.meta.ideal_slot(lower);
+        assert_eq!(slot, map.meta.ideal_slot(higher));
+
+        assert_eq!(map.insert(higher, 1), None);
+        assert_eq!(map.insert(lower, 2), None);
+
+        match (&map.slots[slot], &map.slots[slot + 1]) {
+            (
+                Slot::Occupied {
+                    hash: first_hash,
+                    value: first_value,
+                    ..
+                },
+                Slot::Occupied {
+                    hash: second_hash,
+                    value: second_value,
+                    ..
+                },
+            ) => {
+                assert_eq!((*first_hash, *first_value), (lower, 2));
+                assert_eq!((*second_hash, *second_value), (higher, 1));
+            }
+            other => panic!("unexpected slot layout: {other:?}"),
+        }
+
+        assert_eq!(map.get(&higher), Some(&1));
+        assert_eq!(map.get(&lower), Some(&2));
+    }
+
+    #[test]
+    fn mass_inserts_and_gets() {
+        let total = 1_000_000usize;
+        let mut map: PoMap<u64, u64, IdentityHasher> = PoMap::new();
+        let mut expected: HashMap<u64, u64> = HashMap::new();
+
+        // Fixed seed for determinism while still using fully random values to stress layout.
+        let mut rng = StdRng::seed_from_u64(0xDEADBEEF);
+
+        for _ in 0..total {
+            let key_val: u64 = rng.random();
+            let val: u64 = rng.random();
+
+            let prev_expected = expected.insert(key_val, val);
+            let prev_actual = map.insert(key_val, val);
+            assert_eq!(prev_actual, prev_expected);
+        }
+
+        for (key, val) in expected.iter() {
+            assert_eq!(map.get(key), Some(val));
+        }
     }
 }
