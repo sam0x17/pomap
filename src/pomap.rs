@@ -1,4 +1,5 @@
 use core::{
+    cmp::Ordering,
     hash::{Hash, Hasher},
     marker::PhantomData,
 };
@@ -126,50 +127,44 @@ impl<K: Key, V: Value, H: Hasher + Default> PoMap<K, V, H> {
             let scan_end = ideal_slot + MAX_SCAN;
 
             for idx in ideal_slot..scan_end {
-                if matches!(&self.slots[idx], Slot::Vacant) {
-                    self.slots[idx] = Slot::Occupied { hash, key, value };
-                    return None;
-                }
-
-                let slot_hash = match &self.slots[idx] {
-                    Slot::Occupied {
-                        hash: slot_hash, ..
-                    } => *slot_hash,
-                    Slot::Vacant => unreachable!(),
-                };
-
-                if slot_hash < hash {
-                    continue;
-                }
-                // we guarantee the slots are sorted by hash
-                if slot_hash > hash {
-                    // we need to insert before this slot
-                    // first we need to make sure we have room to shift elements at all within our
-                    // MAX_SCAN boundary. If there is at least one free spot past this slot and
-                    // before scan_end, we can shift elements to make room.
-                    if let Some(offset) = self.slots[idx + 1..scan_end]
-                        .iter()
-                        .position(|slot| matches!(slot, Slot::Vacant))
-                    {
-                        let vacant_idx = idx + 1 + offset;
-                        // Shift elements right by one to make space for the new element.
-                        self.slots[idx..=vacant_idx].rotate_right(1);
+                match &mut self.slots[idx] {
+                    Slot::Vacant => {
                         self.slots[idx] = Slot::Occupied { hash, key, value };
                         return None;
                     }
-                    // No room in this window; grow and retry.
-                    break;
-                }
-                if let Slot::Occupied {
-                    key: slot_key,
-                    value: slot_value,
-                    ..
-                } = &mut self.slots[idx]
-                {
-                    if *slot_key == key {
-                        let old_value = core::mem::replace(slot_value, value);
-                        return Some(old_value);
-                    }
+                    Slot::Occupied {
+                        hash: slot_hash,
+                        key: slot_key,
+                        value: slot_value,
+                    } => match (*slot_hash).cmp(&hash) {
+                        Ordering::Less => continue,
+                        Ordering::Greater => {
+                            // we need to insert before this slot; attempt in-window shift
+                            // note: it is OK that we do not check whether we are shifting
+                            // elements belonging to a different prefix window here because
+                            // when we hit the Orering::Less case we always continue, and our
+                            // intrusion into the next slot's window is always at maximum
+                            // MAX_SCAN - 1, so even if we shift elements from the next prefix,
+                            // they will never exceed that window's MAX_SCAN limit.
+                            if let Some(offset) = self.slots[idx + 1..scan_end]
+                                .iter()
+                                .position(|slot| matches!(slot, Slot::Vacant))
+                            {
+                                let vacant_idx = idx + 1 + offset;
+                                self.slots[idx..=vacant_idx].rotate_right(1);
+                                self.slots[idx] = Slot::Occupied { hash, key, value };
+                                return None;
+                            }
+                            // No room in this window; grow and retry.
+                            break;
+                        }
+                        Ordering::Equal => {
+                            if *slot_key == key {
+                                let old_value = core::mem::replace(slot_value, value);
+                                return Some(old_value);
+                            }
+                        }
+                    },
                 }
             }
 
