@@ -22,6 +22,10 @@ fn bench_insert_allocate(c: &mut Criterion) {
     group.bench_function("pomap", |b| {
         let mut map: PoMap<u64, u64> = PoMap::new();
         b.iter(|| {
+            if cursor == INPUT_SIZE {
+                map = PoMap::new();
+                cursor = 0;
+            }
             let key = keys[cursor];
             let val = values[cursor];
             black_box(map.insert(key, val));
@@ -34,6 +38,10 @@ fn bench_insert_allocate(c: &mut Criterion) {
     group.bench_function("std_hashmap", |b| {
         let mut map: HashMap<u64, u64> = HashMap::new();
         b.iter(|| {
+            if cursor == INPUT_SIZE {
+                map = HashMap::new();
+                cursor = 0;
+            }
             let key = keys[cursor];
             let val = values[cursor];
             black_box(map.insert(key, val));
@@ -53,6 +61,10 @@ fn bench_insert_preallocated(c: &mut Criterion) {
     group.bench_function("pomap", |b| {
         let mut map: PoMap<u64, u64> = PoMap::with_capacity((INPUT_SIZE + 1).next_power_of_two());
         b.iter(|| {
+            if cursor == INPUT_SIZE {
+                map = PoMap::with_capacity((INPUT_SIZE + 1).next_power_of_two());
+                cursor = 0;
+            }
             let key = keys[cursor];
             let val = values[cursor];
             black_box(map.insert(key, val));
@@ -66,6 +78,10 @@ fn bench_insert_preallocated(c: &mut Criterion) {
         let mut map: HashMap<u64, u64> =
             HashMap::with_capacity((INPUT_SIZE + 1).next_power_of_two());
         b.iter(|| {
+            if cursor == INPUT_SIZE {
+                map = HashMap::with_capacity((INPUT_SIZE + 1).next_power_of_two());
+                cursor = 0;
+            }
             let key = keys[cursor];
             let val = values[cursor];
             black_box(map.insert(key, val));
