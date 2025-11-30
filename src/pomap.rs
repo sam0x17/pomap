@@ -118,9 +118,6 @@ impl<K: Key, V: Value, H: Hasher + Default> PoMap<K, V, H> {
 
     #[inline]
     pub fn insert_with_hash(&mut self, hash: u64, key: K, value: V) -> Option<V> {
-        let key = key;
-        let value = value;
-
         loop {
             let ideal_slot = self.meta.ideal_slot(hash);
             let scan_end = ideal_slot + MAX_SCAN;
