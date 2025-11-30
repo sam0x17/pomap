@@ -218,8 +218,6 @@ impl<K: Key, V: Value, H: Hasher + Default> PoMap<K, V, H> {
         // apply the new meta
         self.meta = new_meta;
 
-        debug_assert!(self.slots.capacity() == new_vec_capacity);
-
         new_vec_capacity
     }
 }
