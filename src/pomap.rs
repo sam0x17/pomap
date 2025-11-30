@@ -47,8 +47,7 @@ impl<K: Key, V: Value, H: Hasher + Default> PoMap<K, V, H> {
     #[inline]
     pub fn with_capacity(capacity: usize) -> Self {
         let (meta, vec_capacity) = PoMapMeta::new(capacity);
-        let mut slots = Vec::with_capacity(0);
-        slots.resize_with(vec_capacity, || Slot::Vacant);
+        let slots = vec![Slot::Vacant; vec_capacity];
         Self {
             meta,
             slots,
@@ -188,7 +187,7 @@ impl<K: Key, V: Value, H: Hasher + Default> PoMap<K, V, H> {
         }
 
         // allocate new vec
-        let new_slots: Vec<Slot<K, V>> = Vec::with_capacity(new_vec_capacity);
+        let new_slots: Vec<Slot<K, V>> = vec![Slot::Vacant; new_vec_capacity];
 
         // re-insert all existing elements into the new vec in the same order, with spaces
         // added based on hash prefix / the new meta
@@ -196,28 +195,25 @@ impl<K: Key, V: Value, H: Hasher + Default> PoMap<K, V, H> {
         let mut cursor = 0;
         for slot in old_slots.into_iter() {
             let Slot::Occupied { hash, .. } = &slot else {
+                cursor += 1;
                 continue;
             };
 
             // calculate ideal slot in the new layout
             let ideal_slot = new_meta.ideal_slot(*hash);
 
-            // advance cursor and fill in vacant slots as needed
-            for _ in cursor..ideal_slot {
-                self.slots.push(Slot::Vacant);
-            }
-            cursor += ideal_slot.saturating_sub(cursor) + 1;
+            // advance cursor
+            cursor += ideal_slot.saturating_sub(cursor);
 
             // insert the slot, we should be at or past the ideal slot now. Because the
             // previous layout was already valid and is strictly smaller than the new one, this
             // can never cause us to exceed MAX_SCAN slots past the ideal slot because we are
             // always gaining more room.
-            self.slots.push(slot.clone());
-        }
+            self.slots[cursor] = slot;
 
-        // fill remaining capacity with vacant slots (minimally to account for MAX_SCAN, or a
-        // sparse set of elements)
-        self.slots.resize_with(new_vec_capacity, || Slot::Vacant);
+            // advance cursor
+            cursor += 1;
+        }
 
         // apply the new meta
         self.meta = new_meta;
