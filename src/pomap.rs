@@ -6,7 +6,7 @@ use core::{
 use std::hash::DefaultHasher;
 
 /// Minimum capacity we will allow for PoMap
-const MIN_CAPACITY: usize = 16;
+const MIN_CAPACITY: usize = 64;
 
 /// Maximum number of slots to linearly scan starting at the ideal slot.
 /// We design the layout so that `[ideal_slot, ideal_slot + MAX_SCAN)` is
