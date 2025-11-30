@@ -11,7 +11,7 @@ const MIN_CAPACITY: usize = 16;
 /// Maximum number of slots to linearly scan starting at the ideal slot.
 /// We design the layout so that `[ideal_slot, ideal_slot + MAX_SCAN)` is
 /// always in-bounds for the backing Vec.
-const MAX_SCAN: usize = 4;
+const MAX_SCAN: usize = 8;
 
 /// Number of bits in the hashcode
 const HASH_BITS: usize = 64; // we use a 64-bit hashcode
