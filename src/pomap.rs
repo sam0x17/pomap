@@ -202,8 +202,8 @@ impl<K: Key, V: Value, H: Hasher + Default> PoMap<K, V, H> {
             // calculate ideal slot in the new layout
             let ideal_slot = new_meta.ideal_slot(*hash);
 
-            // advance cursor
-            cursor += ideal_slot.saturating_sub(cursor);
+            // advance cursor to at least the ideal slot
+            cursor = ideal_slot.max(cursor);
 
             // insert the slot, we should be at or past the ideal slot now. Because the
             // previous layout was already valid and is strictly smaller than the new one, this
