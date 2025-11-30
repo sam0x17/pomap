@@ -6,7 +6,7 @@ use core::{
 use std::hash::DefaultHasher;
 
 /// Minimum capacity we will allow for PoMap
-const MIN_CAPACITY: usize = 64;
+const MIN_CAPACITY: usize = 16;
 
 /// Maximum number of slots to linearly scan starting at the ideal slot.
 /// We design the layout so that `[ideal_slot, ideal_slot + MAX_SCAN)` is
@@ -47,7 +47,7 @@ impl<K: Key, V: Value, H: Hasher + Default> PoMap<K, V, H> {
     #[inline]
     pub fn with_capacity(capacity: usize) -> Self {
         let (meta, vec_capacity) = PoMapMeta::new(capacity);
-        let mut slots = Vec::with_capacity(vec_capacity);
+        let mut slots = Vec::with_capacity(0);
         slots.resize_with(vec_capacity, || Slot::Vacant);
         Self {
             meta,
