@@ -32,6 +32,7 @@ enum Slot<K: Key, V: Value> {
 
 #[derive(Clone)]
 pub struct PoMap<K: Key, V: Value, H: Hasher + Default = DefaultHasher> {
+    len: usize,
     meta: PoMapMeta,
     slots: Vec<Slot<K, V>>,
     _phantom: PhantomData<H>,
@@ -49,6 +50,7 @@ impl<K: Key, V: Value, H: Hasher + Default> PoMap<K, V, H> {
         let (meta, vec_capacity) = PoMapMeta::new(capacity);
         let slots = vec![Slot::Vacant; vec_capacity];
         Self {
+            len: 0,
             meta,
             slots,
             _phantom: PhantomData,
@@ -64,6 +66,18 @@ impl<K: Key, V: Value, H: Hasher + Default> PoMap<K, V, H> {
     #[inline(always)]
     pub const fn capacity(&self) -> usize {
         self.slots.capacity()
+    }
+
+    /// Current number of occupied entries.
+    #[inline(always)]
+    pub const fn len(&self) -> usize {
+        self.len
+    }
+
+    /// Returns true if the map contains no elements.
+    #[inline(always)]
+    pub const fn is_empty(&self) -> bool {
+        self.len == 0
     }
 
     /// Hot path for `get` that can be used when the caller already has the hash and doesn't
@@ -143,6 +157,7 @@ impl<K: Key, V: Value, H: Hasher + Default> PoMap<K, V, H> {
                 match slot {
                     Slot::Vacant => {
                         *slot = Slot::Occupied { hash, key, value };
+                        self.len += 1;
                         return None;
                     }
                     Slot::Occupied {
@@ -176,6 +191,7 @@ impl<K: Key, V: Value, H: Hasher + Default> PoMap<K, V, H> {
                                     unsafe { slice::from_raw_parts_mut(slots_ptr.add(idx), len) };
                                 slice.rotate_right(1);
                                 slice[0] = Slot::Occupied { hash, key, value };
+                                self.len += 1;
                                 return None;
                             }
                             search += 1;
@@ -391,6 +407,8 @@ mod tests {
         }
 
         assert_eq!(map.get(&99), None);
+        assert_eq!(map.len(), 8);
+        assert!(!map.is_empty());
     }
 
     #[test]
@@ -400,6 +418,7 @@ mod tests {
         assert_eq!(map.insert(42, 1), None);
         assert_eq!(map.insert(42, 2), Some(1));
         assert_eq!(map.get(&42), Some(&2));
+        assert_eq!(map.len(), 1);
     }
 
     #[test]
@@ -438,6 +457,7 @@ mod tests {
 
         assert_eq!(map.get(&higher), Some(&1));
         assert_eq!(map.get(&lower), Some(&2));
+        assert_eq!(map.len(), 2);
     }
 
     #[test]
@@ -461,5 +481,7 @@ mod tests {
         for (key, val) in expected.iter() {
             assert_eq!(map.get(key), Some(val));
         }
+        assert_eq!(map.len(), expected.len());
+        assert!(!map.is_empty());
     }
 }
