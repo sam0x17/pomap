@@ -61,6 +61,11 @@ impl<K: Key, V: Value, H: Hasher + Default> PoMap<K, V, H> {
         Self::with_capacity(MIN_CAPACITY)
     }
 
+    #[inline(always)]
+    pub const fn capacity(&self) -> usize {
+        self.slots.capacity()
+    }
+
     /// Hot path for `get` that can be used when the caller already has the hash and doesn't
     /// want to recompute it.
     #[inline]

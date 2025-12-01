@@ -4,7 +4,7 @@ use criterion::{Criterion, criterion_group, criterion_main};
 use pomap::pomap::PoMap;
 use rand::{Rng, SeedableRng, rngs::StdRng};
 
-const INPUT_SIZE: usize = 200_000_usize.next_power_of_two();
+const INPUT_SIZE: usize = 20_000_000_usize.next_power_of_two();
 const HOT_SET: usize = (INPUT_SIZE.ilog2() as usize).next_power_of_two()
     * (INPUT_SIZE.ilog2() as usize).next_power_of_two();
 
