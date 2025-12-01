@@ -4,7 +4,7 @@ use criterion::{Criterion, criterion_group, criterion_main};
 use pomap::pomap::PoMap;
 use rand::{Rng, SeedableRng, rngs::StdRng};
 
-const INPUT_SIZE: usize = 1_000_000_usize.next_power_of_two();
+const INPUT_SIZE: usize = 200_000_usize.next_power_of_two();
 const HOT_SET: usize = (INPUT_SIZE.ilog2() as usize).next_power_of_two()
     * (INPUT_SIZE.ilog2() as usize).next_power_of_two();
 
@@ -99,7 +99,7 @@ fn bench_get_hits(c: &mut Criterion) {
     let mut group = c.comparison_benchmark_group("get_hits");
 
     group.bench_function("pomap", |b| {
-        let mut map: PoMap<u64, u64> = PoMap::with_capacity(keys.len().next_power_of_two());
+        let mut map: PoMap<u64, u64> = PoMap::new();
         for &key in &keys {
             map.insert(key, values[cursor]);
             cursor = (cursor + 1) % INPUT_SIZE;
@@ -116,7 +116,7 @@ fn bench_get_hits(c: &mut Criterion) {
     cursor = 0;
 
     group.bench_function("std_hashmap", |b| {
-        let mut map: HashMap<u64, u64> = HashMap::with_capacity(keys.len().next_power_of_two());
+        let mut map: HashMap<u64, u64> = HashMap::new();
         for &key in &keys {
             map.insert(key, values[cursor]);
             cursor = (cursor + 1) % INPUT_SIZE;
@@ -141,7 +141,7 @@ fn bench_get_misses(c: &mut Criterion) {
     let mut group = c.comparison_benchmark_group("get_misses");
 
     group.bench_function("pomap", |b| {
-        let mut map: PoMap<u64, u64> = PoMap::with_capacity(present_keys.len().next_power_of_two());
+        let mut map: PoMap<u64, u64> = PoMap::new();
         for &key in &present_keys {
             map.insert(key, present_values[cursor]);
             cursor = (cursor + 1) % INPUT_SIZE;
@@ -158,8 +158,7 @@ fn bench_get_misses(c: &mut Criterion) {
     cursor = 0;
 
     group.bench_function("std_hashmap", |b| {
-        let mut map: HashMap<u64, u64> =
-            HashMap::with_capacity(present_keys.len().next_power_of_two());
+        let mut map: HashMap<u64, u64> = HashMap::new();
         for &key in &present_keys {
             map.insert(key, present_values[cursor]);
             cursor = (cursor + 1) % INPUT_SIZE;
@@ -184,7 +183,7 @@ fn bench_update(c: &mut Criterion) {
     let mut group = c.comparison_benchmark_group("update_existing");
 
     group.bench_function("pomap", |b| {
-        let mut map: PoMap<u64, u64> = PoMap::with_capacity(keys.len().next_power_of_two());
+        let mut map: PoMap<u64, u64> = PoMap::new();
         for &key in &keys {
             map.insert(key, initial_values[cursor]);
             cursor = (cursor + 1) % INPUT_SIZE;
@@ -202,7 +201,7 @@ fn bench_update(c: &mut Criterion) {
     cursor = 0;
 
     group.bench_function("std_hashmap", |b| {
-        let mut map: HashMap<u64, u64> = HashMap::with_capacity(keys.len().next_power_of_two());
+        let mut map: HashMap<u64, u64> = HashMap::new();
         for &key in &keys {
             map.insert(key, initial_values[cursor]);
             cursor = (cursor + 1) % INPUT_SIZE;
@@ -230,7 +229,7 @@ fn bench_hot_gets(c: &mut Criterion) {
     let mut group = c.comparison_benchmark_group("get_hotset");
 
     group.bench_function("pomap", |b| {
-        let mut map: PoMap<u64, u64> = PoMap::with_capacity(map_keys.len().next_power_of_two());
+        let mut map: PoMap<u64, u64> = PoMap::new();
         for (idx, &key) in map_keys.iter().enumerate() {
             map.insert(key, map_values[idx]);
         }
@@ -244,7 +243,7 @@ fn bench_hot_gets(c: &mut Criterion) {
     });
 
     group.bench_function("std_hashmap", |b| {
-        let mut map: HashMap<u64, u64> = HashMap::with_capacity(map_keys.len().next_power_of_two());
+        let mut map: HashMap<u64, u64> = HashMap::new();
         for (idx, &key) in map_keys.iter().enumerate() {
             map.insert(key, map_values[idx]);
         }
