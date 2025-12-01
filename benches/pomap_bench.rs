@@ -98,14 +98,14 @@ fn bench_get_hits(c: &mut Criterion) {
     let mut cursor = 0;
     let mut group = c.comparison_benchmark_group("get_hits");
 
-    group.bench_function("pomap", |b| {
-        let mut map: PoMap<u64, u64> = PoMap::new();
-        for &key in &keys {
-            map.insert(key, values[cursor]);
-            cursor = (cursor + 1) % INPUT_SIZE;
-        }
-        cursor = 0;
+    let mut map: PoMap<u64, u64> = PoMap::new();
+    for &key in &keys {
+        map.insert(key, values[cursor]);
+        cursor = (cursor + 1) % INPUT_SIZE;
+    }
 
+    group.bench_function("pomap", |b| {
+        cursor = 0;
         b.iter(|| {
             let key = keys[cursor];
             black_box(map.get(&key));
@@ -115,14 +115,14 @@ fn bench_get_hits(c: &mut Criterion) {
 
     cursor = 0;
 
-    group.bench_function("std_hashmap", |b| {
-        let mut map: HashMap<u64, u64> = HashMap::new();
-        for &key in &keys {
-            map.insert(key, values[cursor]);
-            cursor = (cursor + 1) % INPUT_SIZE;
-        }
-        cursor = 0;
+    let mut map: HashMap<u64, u64> = HashMap::new();
+    for &key in &keys {
+        map.insert(key, values[cursor]);
+        cursor = (cursor + 1) % INPUT_SIZE;
+    }
 
+    group.bench_function("std_hashmap", |b| {
+        cursor = 0;
         b.iter(|| {
             let key = keys[cursor];
             black_box(map.get(&key));
@@ -140,12 +140,13 @@ fn bench_get_misses(c: &mut Criterion) {
     let mut cursor = 0;
     let mut group = c.comparison_benchmark_group("get_misses");
 
+    let mut map = PoMap::<u64, u64>::new();
+    for &key in &present_keys {
+        map.insert(key, present_values[cursor]);
+        cursor = (cursor + 1) % INPUT_SIZE;
+    }
+
     group.bench_function("pomap", |b| {
-        let mut map: PoMap<u64, u64> = PoMap::new();
-        for &key in &present_keys {
-            map.insert(key, present_values[cursor]);
-            cursor = (cursor + 1) % INPUT_SIZE;
-        }
         cursor = 0;
 
         b.iter(|| {
@@ -157,12 +158,13 @@ fn bench_get_misses(c: &mut Criterion) {
 
     cursor = 0;
 
+    let mut map: HashMap<u64, u64> = HashMap::new();
+    for &key in &present_keys {
+        map.insert(key, present_values[cursor]);
+        cursor = (cursor + 1) % INPUT_SIZE;
+    }
+
     group.bench_function("std_hashmap", |b| {
-        let mut map: HashMap<u64, u64> = HashMap::new();
-        for &key in &present_keys {
-            map.insert(key, present_values[cursor]);
-            cursor = (cursor + 1) % INPUT_SIZE;
-        }
         cursor = 0;
 
         b.iter(|| {
@@ -182,12 +184,13 @@ fn bench_update(c: &mut Criterion) {
     let mut cursor = 0usize;
     let mut group = c.comparison_benchmark_group("update_existing");
 
+    let mut map: PoMap<u64, u64> = PoMap::new();
+    for &key in &keys {
+        map.insert(key, initial_values[cursor]);
+        cursor = (cursor + 1) % INPUT_SIZE;
+    }
+
     group.bench_function("pomap", |b| {
-        let mut map: PoMap<u64, u64> = PoMap::new();
-        for &key in &keys {
-            map.insert(key, initial_values[cursor]);
-            cursor = (cursor + 1) % INPUT_SIZE;
-        }
         cursor = 0;
 
         b.iter(|| {
@@ -200,12 +203,13 @@ fn bench_update(c: &mut Criterion) {
 
     cursor = 0;
 
+    let mut map: HashMap<u64, u64> = HashMap::new();
+    for &key in &keys {
+        map.insert(key, initial_values[cursor]);
+        cursor = (cursor + 1) % INPUT_SIZE;
+    }
+
     group.bench_function("std_hashmap", |b| {
-        let mut map: HashMap<u64, u64> = HashMap::new();
-        for &key in &keys {
-            map.insert(key, initial_values[cursor]);
-            cursor = (cursor + 1) % INPUT_SIZE;
-        }
         cursor = 0;
 
         b.iter(|| {
@@ -228,13 +232,13 @@ fn bench_hot_gets(c: &mut Criterion) {
 
     let mut group = c.comparison_benchmark_group("get_hotset");
 
-    group.bench_function("pomap", |b| {
-        let mut map: PoMap<u64, u64> = PoMap::new();
-        for (idx, &key) in map_keys.iter().enumerate() {
-            map.insert(key, map_values[idx]);
-        }
+    let mut map: PoMap<u64, u64> = PoMap::new();
+    for (idx, &key) in map_keys.iter().enumerate() {
+        map.insert(key, map_values[idx]);
+    }
 
-        let mut cursor = 0usize;
+    group.bench_function("pomap", |b| {
+        let mut cursor = 0;
         b.iter(|| {
             let key = hot_keys[cursor % HOT_SET];
             cursor = (cursor + 1) % INPUT_SIZE;
@@ -242,13 +246,13 @@ fn bench_hot_gets(c: &mut Criterion) {
         });
     });
 
-    group.bench_function("std_hashmap", |b| {
-        let mut map: HashMap<u64, u64> = HashMap::new();
-        for (idx, &key) in map_keys.iter().enumerate() {
-            map.insert(key, map_values[idx]);
-        }
+    let mut map: HashMap<u64, u64> = HashMap::new();
+    for (idx, &key) in map_keys.iter().enumerate() {
+        map.insert(key, map_values[idx]);
+    }
 
-        let mut cursor = 0usize;
+    group.bench_function("std_hashmap", |b| {
+        let mut cursor = 0;
         b.iter(|| {
             let key = hot_keys[cursor % HOT_SET];
             cursor = (cursor + 1) % INPUT_SIZE;
