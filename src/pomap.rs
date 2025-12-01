@@ -122,50 +122,57 @@ impl<K: Key, V: Value, H: Hasher + Default> PoMap<K, V, H> {
             let ideal_slot = self.meta.ideal_slot(hash);
             let scan_end = ideal_slot + MAX_SCAN;
 
-            for idx in ideal_slot..scan_end {
-                match &mut self.slots[idx] {
+            // Local alias to avoid repeated &mut self.slots borrowing.
+            let slots = &mut self.slots;
+
+            let mut idx = ideal_slot;
+            while idx < scan_end {
+                match &mut slots[idx] {
                     Slot::Vacant => {
-                        self.slots[idx] = Slot::Occupied { hash, key, value };
+                        slots[idx] = Slot::Occupied { hash, key, value };
                         return None;
                     }
                     Slot::Occupied {
                         hash: slot_hash,
                         key: slot_key,
                         value: slot_value,
-                    } => match (*slot_hash).cmp(&hash) {
-                        Ordering::Less => continue,
-                        Ordering::Greater => {
-                            // we need to insert before this slot; attempt in-window shift
-                            // note: it is OK that we do not check whether we are shifting
-                            // elements belonging to a different prefix window here because
-                            // when we hit the Orering::Less case we always continue, and our
-                            // intrusion into the next slot's window is always at maximum
-                            // MAX_SCAN - 1, so even if we shift elements from the next prefix,
-                            // they will never exceed that window's MAX_SCAN limit.
-                            if let Some(offset) = self.slots[idx + 1..scan_end]
-                                .iter()
-                                .position(|slot| matches!(slot, Slot::Vacant))
-                            {
-                                let vacant_idx = idx + 1 + offset;
-                                self.slots[idx..=vacant_idx].rotate_right(1);
-                                self.slots[idx] = Slot::Occupied { hash, key, value };
+                    } => {
+                        let slot_hash = *slot_hash;
+
+                        // Common case: existing hash < new hash → keep scanning forward.
+                        if slot_hash < hash {
+                            idx += 1;
+                            continue;
+                        }
+
+                        // Existing hash == new hash → maybe update in place.
+                        if slot_hash == hash && *slot_key == key {
+                            let old_value = core::mem::replace(slot_value, value);
+                            return Some(old_value);
+                        }
+
+                        // Here: slot_hash > hash  OR (== but different key).
+                        // We need to insert before this slot; attempt in-window shift.
+                        // Search for a Vacant in (idx, scan_end).
+                        let mut search = idx + 1;
+                        while search < scan_end {
+                            if matches!(slots[search], Slot::Vacant) {
+                                // Rotate [idx..=search] right by 1 and drop new element at idx.
+                                slots[idx..=search].rotate_right(1);
+                                slots[idx] = Slot::Occupied { hash, key, value };
                                 return None;
                             }
-                            // No room in this window; grow and retry.
-                            break;
+                            search += 1;
                         }
-                        Ordering::Equal => {
-                            if *slot_key == key {
-                                let old_value = core::mem::replace(slot_value, value);
-                                return Some(old_value);
-                            }
-                        }
-                    },
+
+                        // No room in this window; grow and retry.
+                        break;
+                    }
                 }
             }
 
-            // If we make it here, we either ran out of room in the scan window or the table is
-            // saturated for this hash window. Grow and retry the insertion.
+            // If we make it here, we either ran out of room in the scan window
+            // or the table is saturated for this hash window. Grow and retry.
             self.reserve(self.slots.capacity() * GROWTH_FACTOR);
         }
     }
