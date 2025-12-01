@@ -1,6 +1,7 @@
 use core::{
     hash::{Hash, Hasher},
     marker::PhantomData,
+    slice,
 };
 use std::hash::DefaultHasher;
 
@@ -68,9 +69,10 @@ impl<K: Key, V: Value, H: Hasher + Default> PoMap<K, V, H> {
         let scan_end = ideal_slot + MAX_SCAN;
 
         // SAFETY: ideal_slot..scan_end is always in-bounds for the backing Vec.
-        let window = unsafe { self.slots.get_unchecked(ideal_slot..scan_end) };
+        let slots_ptr = self.slots.as_ptr();
 
-        for slot in window {
+        for idx in ideal_slot..scan_end {
+            let slot = unsafe { &*slots_ptr.add(idx) };
             let Slot::Occupied {
                 hash: slot_hash,
                 key: slot_key,
@@ -127,14 +129,15 @@ impl<K: Key, V: Value, H: Hasher + Default> PoMap<K, V, H> {
             let scan_end = ideal_slot + MAX_SCAN;
 
             // SAFETY: ideal_slot..scan_end is always in-bounds for the backing Vec.
-            let window = unsafe { self.slots.get_unchecked_mut(ideal_slot..scan_end) };
-            let len = window.len();
+            let slots_ptr = self.slots.as_mut_ptr();
 
-            let mut idx = 0;
-            while idx < len {
-                match &mut window[idx] {
+            let mut idx = ideal_slot;
+            while idx < scan_end {
+                let slot = unsafe { &mut *slots_ptr.add(idx) };
+
+                match slot {
                     Slot::Vacant => {
-                        window[idx] = Slot::Occupied { hash, key, value };
+                        *slot = Slot::Occupied { hash, key, value };
                         return None;
                     }
                     Slot::Occupied {
@@ -160,11 +163,14 @@ impl<K: Key, V: Value, H: Hasher + Default> PoMap<K, V, H> {
                         // We need to insert before this slot; attempt in-window shift.
                         // Search for a Vacant in (idx, scan_end).
                         let mut search = idx + 1;
-                        while search < len {
-                            if matches!(window[search], Slot::Vacant) {
+                        while search < scan_end {
+                            if matches!(unsafe { &*slots_ptr.add(search) }, Slot::Vacant) {
                                 // Rotate [idx..=search] right by 1 and drop new element at idx.
-                                window[idx..=search].rotate_right(1);
-                                window[idx] = Slot::Occupied { hash, key, value };
+                                let len = search - idx + 1;
+                                let slice =
+                                    unsafe { slice::from_raw_parts_mut(slots_ptr.add(idx), len) };
+                                slice.rotate_right(1);
+                                slice[0] = Slot::Occupied { hash, key, value };
                                 return None;
                             }
                             search += 1;
