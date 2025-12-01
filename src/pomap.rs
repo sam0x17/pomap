@@ -1,5 +1,4 @@
 use core::{
-    cmp::Ordering,
     hash::{Hash, Hasher},
     marker::PhantomData,
 };
