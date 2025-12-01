@@ -82,10 +82,12 @@ impl<K: Key, V: Value, H: Hasher + Default> PoMap<K, V, H> {
             if slot_hash < hash {
                 continue;
             }
+
             // we guarantee the slots are sorted by hash
             if slot_hash > hash {
                 return None;
             }
+
             if slot_key == key {
                 return Some(value);
             }
