@@ -67,7 +67,10 @@ impl<K: Key, V: Value, H: Hasher + Default> PoMap<K, V, H> {
         let ideal_slot = self.meta.ideal_slot(hash);
         let scan_end = ideal_slot + MAX_SCAN;
 
-        for slot in &self.slots[ideal_slot..scan_end] {
+        // SAFETY: ideal_slot..scan_end is always in-bounds for the backing Vec.
+        let window = unsafe { self.slots.get_unchecked(ideal_slot..scan_end) };
+
+        for slot in window {
             let Slot::Occupied {
                 hash: slot_hash,
                 key: slot_key,
@@ -123,14 +126,15 @@ impl<K: Key, V: Value, H: Hasher + Default> PoMap<K, V, H> {
             let ideal_slot = self.meta.ideal_slot(hash);
             let scan_end = ideal_slot + MAX_SCAN;
 
-            // Local alias to avoid repeated &mut self.slots borrowing.
-            let slots = &mut self.slots;
+            // SAFETY: ideal_slot..scan_end is always in-bounds for the backing Vec.
+            let window = unsafe { self.slots.get_unchecked_mut(ideal_slot..scan_end) };
+            let len = window.len();
 
-            let mut idx = ideal_slot;
-            while idx < scan_end {
-                match &mut slots[idx] {
+            let mut idx = 0;
+            while idx < len {
+                match &mut window[idx] {
                     Slot::Vacant => {
-                        slots[idx] = Slot::Occupied { hash, key, value };
+                        window[idx] = Slot::Occupied { hash, key, value };
                         return None;
                     }
                     Slot::Occupied {
@@ -156,11 +160,11 @@ impl<K: Key, V: Value, H: Hasher + Default> PoMap<K, V, H> {
                         // We need to insert before this slot; attempt in-window shift.
                         // Search for a Vacant in (idx, scan_end).
                         let mut search = idx + 1;
-                        while search < scan_end {
-                            if matches!(slots[search], Slot::Vacant) {
+                        while search < len {
+                            if matches!(window[search], Slot::Vacant) {
                                 // Rotate [idx..=search] right by 1 and drop new element at idx.
-                                slots[idx..=search].rotate_right(1);
-                                slots[idx] = Slot::Occupied { hash, key, value };
+                                window[idx..=search].rotate_right(1);
+                                window[idx] = Slot::Occupied { hash, key, value };
                                 return None;
                             }
                             search += 1;
