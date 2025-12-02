@@ -4,7 +4,7 @@ use criterion::{Criterion, criterion_group, criterion_main};
 use pomap::pomap::PoMap;
 use rand::{Rng, SeedableRng, rngs::StdRng};
 
-const INPUT_SIZE: usize = 100_000_000_usize.next_power_of_two();
+const INPUT_SIZE: usize = 1_000_000_usize.next_power_of_two();
 const HOT_SET: usize = (INPUT_SIZE.ilog2() as usize).next_power_of_two()
     * (INPUT_SIZE.ilog2() as usize).next_power_of_two();
 
@@ -16,36 +16,27 @@ fn random_data(seed: u64, count: usize) -> Vec<u64> {
 fn bench_insert_allocate(c: &mut Criterion) {
     let keys = random_data(0xA11CE, INPUT_SIZE);
     let values = random_data(0xFACE, INPUT_SIZE);
-    let mut cursor = 0;
+    let combined = keys
+        .into_iter()
+        .zip(values.into_iter())
+        .collect::<Vec<(u64, u64)>>();
     let mut group = c.comparison_benchmark_group("insert_allocate");
 
     group.bench_function("pomap", |b| {
-        let mut map: PoMap<u64, u64> = PoMap::new();
         b.iter(|| {
-            if cursor == INPUT_SIZE {
-                map = PoMap::new();
-                cursor = 0;
+            let mut map: PoMap<u64, u64> = PoMap::new();
+            for &(key, val) in &combined {
+                black_box(map.insert(key, val));
             }
-            let key = keys[cursor];
-            let val = values[cursor];
-            black_box(map.insert(key, val));
-            cursor = (cursor + 1) % INPUT_SIZE;
         });
     });
 
-    cursor = 0;
-
     group.bench_function("std_hashmap", |b| {
-        let mut map: HashMap<u64, u64> = HashMap::new();
         b.iter(|| {
-            if cursor == INPUT_SIZE {
-                map = HashMap::new();
-                cursor = 0;
+            let mut map: HashMap<u64, u64> = HashMap::new();
+            for &(key, val) in &combined {
+                black_box(map.insert(key, val));
             }
-            let key = keys[cursor];
-            let val = values[cursor];
-            black_box(map.insert(key, val));
-            cursor = (cursor + 1) % INPUT_SIZE;
         });
     });
 
@@ -55,37 +46,27 @@ fn bench_insert_allocate(c: &mut Criterion) {
 fn bench_insert_preallocated(c: &mut Criterion) {
     let keys = random_data(0xBEEF, INPUT_SIZE);
     let values = random_data(0xF00D, INPUT_SIZE);
-    let mut cursor = 0;
+    let combined = keys
+        .into_iter()
+        .zip(values.into_iter())
+        .collect::<Vec<(u64, u64)>>();
     let mut group = c.comparison_benchmark_group("insert_preallocated");
 
     group.bench_function("pomap", |b| {
-        let mut map: PoMap<u64, u64> = PoMap::with_capacity((INPUT_SIZE + 1).next_power_of_two());
         b.iter(|| {
-            if cursor == INPUT_SIZE {
-                map = PoMap::with_capacity((INPUT_SIZE + 1).next_power_of_two());
-                cursor = 0;
+            let mut map: PoMap<u64, u64> = PoMap::with_capacity(INPUT_SIZE * 16);
+            for &(key, val) in &combined {
+                black_box(map.insert(key, val));
             }
-            let key = keys[cursor];
-            let val = values[cursor];
-            black_box(map.insert(key, val));
-            cursor = (cursor + 1) % INPUT_SIZE;
         });
     });
 
-    cursor = 0;
-
     group.bench_function("std_hashmap", |b| {
-        let mut map: HashMap<u64, u64> =
-            HashMap::with_capacity((INPUT_SIZE + 1).next_power_of_two());
         b.iter(|| {
-            if cursor == INPUT_SIZE {
-                map = HashMap::with_capacity((INPUT_SIZE + 1).next_power_of_two());
-                cursor = 0;
+            let mut map: HashMap<u64, u64> = HashMap::with_capacity(INPUT_SIZE * 16);
+            for &(key, val) in &combined {
+                black_box(map.insert(key, val));
             }
-            let key = keys[cursor];
-            let val = values[cursor];
-            black_box(map.insert(key, val));
-            cursor = (cursor + 1) % INPUT_SIZE;
         });
     });
 
