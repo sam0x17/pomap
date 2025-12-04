@@ -10,6 +10,7 @@ pub struct Bitset {
 const WORD_SHIFT: usize = 6;
 const WORD_BITS: usize = 1 << WORD_SHIFT;
 const WORD_MASK: usize = WORD_BITS - 1;
+const RANGE_LIMIT: usize = super::pomap::MAX_SCAN; // max 64 on 32-bit, 128 on 64-bit
 
 #[inline(always)]
 const fn split_index(idx: usize) -> (usize, usize) {
@@ -53,9 +54,20 @@ impl Bitset {
         self.len_bits == 0
     }
 
-    /// Set bit `idx` to 1.
+    /// Set bit `idx` to 1. Clamps out-of-range indices to a no-op.
     #[inline(always)]
     pub fn set(&mut self, idx: usize) {
+        if idx < self.len_bits {
+            unsafe { self.set_unchecked(idx) };
+        }
+    }
+
+    /// Set bit `idx` to 1 without bounds checks.
+    ///
+    /// # Safety
+    /// Caller must ensure `idx < self.len_bits`.
+    #[inline(always)]
+    pub unsafe fn set_unchecked(&mut self, idx: usize) {
         debug_assert!(idx < self.len_bits);
         let (word, bit) = split_index(idx);
         unsafe {
@@ -63,9 +75,20 @@ impl Bitset {
         }
     }
 
-    /// Set bit `idx` to 0.
+    /// Set bit `idx` to 0. Clamps out-of-range indices to a no-op.
     #[inline(always)]
     pub fn clear(&mut self, idx: usize) {
+        if idx < self.len_bits {
+            unsafe { self.clear_unchecked(idx) };
+        }
+    }
+
+    /// Set bit `idx` to 0 without bounds checks.
+    ///
+    /// # Safety
+    /// Caller must ensure `idx < self.len_bits`.
+    #[inline(always)]
+    pub unsafe fn clear_unchecked(&mut self, idx: usize) {
         debug_assert!(idx < self.len_bits);
         let (word, bit) = split_index(idx);
         let mask = !(1u64 << bit);
@@ -74,19 +97,43 @@ impl Bitset {
         }
     }
 
-    /// Set bit `idx` to `value`.
+    /// Set bit `idx` to `value`. Clamps out-of-range indices to a no-op.
     #[inline(always)]
     pub fn set_to(&mut self, idx: usize, value: bool) {
-        if value {
-            self.set(idx);
-        } else {
-            self.clear(idx);
+        if idx < self.len_bits {
+            unsafe { self.set_to_unchecked(idx, value) };
         }
     }
 
-    /// Read bit `idx`.
+    /// Set bit `idx` to `value` without bounds checks.
+    ///
+    /// # Safety
+    /// Caller must ensure `idx < self.len_bits`.
+    #[inline(always)]
+    pub unsafe fn set_to_unchecked(&mut self, idx: usize, value: bool) {
+        if value {
+            unsafe { self.set_unchecked(idx) };
+        } else {
+            unsafe { self.clear_unchecked(idx) };
+        }
+    }
+
+    /// Read bit `idx`. Out-of-range indices return false.
     #[inline(always)]
     pub fn get(&self, idx: usize) -> bool {
+        if idx < self.len_bits {
+            unsafe { self.get_unchecked(idx) }
+        } else {
+            false
+        }
+    }
+
+    /// Read bit `idx` without bounds checks.
+    ///
+    /// # Safety
+    /// Caller must ensure `idx < self.len_bits`.
+    #[inline(always)]
+    pub unsafe fn get_unchecked(&self, idx: usize) -> bool {
         debug_assert!(idx < self.len_bits);
         let (word, bit) = split_index(idx);
         unsafe { ((*self.data.get_unchecked(word) >> bit) & 1) != 0 }
@@ -100,17 +147,31 @@ impl Bitset {
         }
     }
 
-    /// Returns true if *any* bit is 1 in [start, start+len).
-    ///
-    /// PoMap only calls this with len <= MAX_SCAN (16),
-    /// so this is optimized for that and touches at most 2 words.
+    /// Returns true if *any* bit is 1 in [start, start+len), clamping to the
+    /// available length and to RANGE_LIMIT (16).
     #[inline(always)]
     pub fn any_one_in_range(&self, start: usize, len: usize) -> bool {
-        if len == 0 {
-            return false;
+        if let Some((s, l)) = clamp_range(start, len, self.len_bits) {
+            let l = l.min(RANGE_LIMIT);
+            if l == 0 {
+                return false;
+            }
+            unsafe { self.any_one_in_range_unchecked(s, l) }
+        } else {
+            false
         }
-        debug_assert!(len <= 16, "this bitset is tuned for MAX_SCAN = 16");
+    }
+
+    /// Returns true if *any* bit is 1 in [start, start+len) without clamping.
+    ///
+    /// PoMap only calls this with len <= RANGE_LIMIT (16),
+    /// so this is optimized for that and touches at most 2 words. Caller must
+    /// uphold that bound.
+    #[inline(always)]
+    pub unsafe fn any_one_in_range_unchecked(&self, start: usize, len: usize) -> bool {
+        debug_assert!(len <= RANGE_LIMIT, "this bitset is tuned for MAX_SCAN = 16");
         debug_assert!(start + len <= self.len_bits);
+        debug_assert!(len > 0);
 
         let (word_idx, bit_off) = split_index(start);
 
@@ -139,18 +200,31 @@ impl Bitset {
         }
     }
 
-    /// Find the first 0-bit (vacant slot) in [start, start+len).
+    /// Find the first 0-bit (vacant slot) in [start, start+len), clamping to
+    /// the available length and RANGE_LIMIT (16).
+    #[inline(always)]
+    pub fn first_zero_in_range(&self, start: usize, len: usize) -> Option<usize> {
+        if let Some((s, l)) = clamp_range(start, len, self.len_bits) {
+            let l = l.min(RANGE_LIMIT);
+            if l == 0 {
+                return None;
+            }
+            unsafe { self.first_zero_in_range_unchecked(s, l) }
+        } else {
+            None
+        }
+    }
+
+    /// Find the first 0-bit (vacant slot) in [start, start+len) without clamping.
     ///
     /// Returns the *global* bit index if found, or None.
     ///
     /// Again, tuned for len <= MAX_SCAN (16); at most 2 word loads.
     #[inline(always)]
-    pub fn first_zero_in_range(&self, start: usize, len: usize) -> Option<usize> {
-        if len == 0 {
-            return None;
-        }
-        debug_assert!(len <= 16, "this bitset is tuned for MAX_SCAN = 16");
+    pub unsafe fn first_zero_in_range_unchecked(&self, start: usize, len: usize) -> Option<usize> {
+        debug_assert!(len <= RANGE_LIMIT, "this bitset is tuned for MAX_SCAN = 16");
         debug_assert!(start + len <= self.len_bits);
+        debug_assert!(len > 0);
 
         let (word_idx, bit_off) = split_index(start);
 
@@ -189,11 +263,8 @@ impl Bitset {
     }
 
     /// PoMap helper: search for the first 0-bit inside a "bucket" window of length `bucket_len`,
-    /// starting at offset `start_slot` within that bucket, and wrapping around.
-    ///
-    /// - `bucket_start` is the global bit index of the bucket's first slot.
-    /// - `bucket_len` will be MAX_SCAN (=16) for PoMap.
-    /// - `start_slot` is 0..bucket_len (usually the probe offset).
+    /// starting at offset `start_slot` within that bucket, and wrapping around. Safe wrapper
+    /// clamps to in-bounds ranges and RANGE_LIMIT.
     #[inline(always)]
     pub fn first_zero_in_bucket(
         &self,
@@ -201,22 +272,69 @@ impl Bitset {
         bucket_len: usize,
         start_slot: usize,
     ) -> Option<usize> {
-        debug_assert!(bucket_len <= 16, "bucket_len should be <= MAX_SCAN");
+        let Some((bucket_start, raw_len)) = clamp_range(bucket_start, bucket_len, self.len_bits)
+        else {
+            return None;
+        };
+        let bucket_len = raw_len.min(RANGE_LIMIT);
+        if bucket_len == 0 {
+            return None;
+        }
+        if start_slot >= bucket_len {
+            return None;
+        }
+        unsafe { self.first_zero_in_bucket_unchecked(bucket_start, bucket_len, start_slot) }
+    }
+
+    /// PoMap helper: search for the first 0-bit inside a "bucket" window of length `bucket_len`,
+    /// starting at offset `start_slot` within that bucket, and wrapping around. Unsafe and
+    /// unchecked; caller must guarantee bounds.
+    ///
+    /// - `bucket_start` is the global bit index of the bucket's first slot.
+    /// - `bucket_len` will be MAX_SCAN (=16) for PoMap.
+    /// - `start_slot` is 0..bucket_len (usually the probe offset).
+    #[inline(always)]
+    pub unsafe fn first_zero_in_bucket_unchecked(
+        &self,
+        bucket_start: usize,
+        bucket_len: usize,
+        start_slot: usize,
+    ) -> Option<usize> {
+        debug_assert!(
+            bucket_len <= RANGE_LIMIT,
+            "bucket_len should be <= MAX_SCAN"
+        );
         debug_assert!(start_slot < bucket_len);
         debug_assert!(bucket_start + bucket_len <= self.len_bits);
 
         // First try [bucket_start + start_slot .. bucket_start + bucket_len)
         let first_len = bucket_len - start_slot;
-        if let Some(idx) = self.first_zero_in_range(bucket_start + start_slot, first_len) {
+        if let Some(idx) =
+            unsafe { self.first_zero_in_range_unchecked(bucket_start + start_slot, first_len) }
+        {
             return Some(idx);
         }
 
         // Then wrap to [bucket_start .. bucket_start + start_slot)
         if start_slot > 0 {
-            self.first_zero_in_range(bucket_start, start_slot)
+            unsafe { self.first_zero_in_range_unchecked(bucket_start, start_slot) }
         } else {
             None
         }
+    }
+}
+
+#[inline(always)]
+fn clamp_range(start: usize, len: usize, max_len: usize) -> Option<(usize, usize)> {
+    if start >= max_len {
+        return None;
+    }
+    let remaining = max_len - start;
+    let clamped_len = len.min(remaining);
+    if clamped_len == 0 {
+        None
+    } else {
+        Some((start, clamped_len))
     }
 }
 
@@ -294,6 +412,18 @@ mod tests {
     }
 
     #[test]
+    fn safe_methods_clamp_out_of_range() {
+        let mut bits = Bitset::with_len(10);
+        bits.set(15);
+        bits.set_to(20, true);
+        assert!(bits.data.iter().all(|&w| w == 0));
+        assert!(!bits.get(15));
+
+        bits.clear(25); // no panic, no effect
+        assert!(!bits.get(9));
+    }
+
+    #[test]
     fn first_zero_in_range_single_and_cross_word() {
         let mut bits = Bitset::with_len(WORD_BITS * 2);
         assert_eq!(bits.first_zero_in_range(0, 8), Some(0));
@@ -323,6 +453,18 @@ mod tests {
     }
 
     #[test]
+    fn range_methods_clamp_len_and_bounds() {
+        let mut bits = Bitset::with_len(WORD_BITS * 2);
+        unsafe { bits.set_unchecked(WORD_BITS + 5) };
+
+        // len clamps to RANGE_LIMIT
+        assert!(bits.any_one_in_range(WORD_BITS, 100));
+        // start beyond length returns false
+        assert!(!bits.any_one_in_range(bits.len(), 1));
+        assert_eq!(bits.first_zero_in_range(bits.len(), 4), None);
+    }
+
+    #[test]
     fn first_zero_in_bucket_wraps_when_needed() {
         let mut bits = Bitset::with_len(32);
         let bucket_start = 8;
@@ -340,6 +482,34 @@ mod tests {
 
         bits.set(bucket_start + 2);
         assert_eq!(bits.first_zero_in_bucket(bucket_start, bucket_len, 0), None);
+    }
+
+    #[test]
+    fn bucket_clamps_to_available_bits() {
+        let mut bits = Bitset::with_len(20);
+        let bucket_start = 18; // only 2 bits available
+        let bucket_len = 8;
+        bits.set(bucket_start);
+
+        // start_slot beyond clamped len returns None.
+        assert_eq!(bits.first_zero_in_bucket(bucket_start, bucket_len, 5), None);
+
+        // With valid start_slot, clamps bucket_len to remaining bits and finds the zero.
+        assert_eq!(
+            bits.first_zero_in_bucket(bucket_start, bucket_len, 1),
+            Some(19)
+        );
+    }
+
+    #[test]
+    fn unsafe_variants_require_no_clamp() {
+        let mut bits = Bitset::with_len(WORD_BITS);
+        unsafe { bits.set_unchecked(3) };
+        unsafe { bits.clear_unchecked(2) };
+        assert!(unsafe { bits.get_unchecked(3) });
+        assert!(!unsafe { bits.any_one_in_range_unchecked(0, 1) });
+        assert!(unsafe { bits.any_one_in_range_unchecked(0, 4) });
+        assert_eq!(unsafe { bits.first_zero_in_range_unchecked(0, 4) }, Some(0));
     }
 
     #[test]
