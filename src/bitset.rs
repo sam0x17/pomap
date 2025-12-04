@@ -219,3 +219,152 @@ impl Bitset {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rand::{Rng, SeedableRng, rngs::StdRng};
+
+    #[test]
+    fn new_and_with_len_establish_capacity() {
+        let empty = Bitset::new();
+        assert_eq!(empty.len(), 0);
+        assert!(empty.is_empty());
+        assert_eq!(empty.data.len(), 0);
+
+        let single = Bitset::with_len(1);
+        assert_eq!(single.len(), 1);
+        assert!(!single.is_empty());
+        assert_eq!(single.data.len(), 1);
+
+        let full_word = Bitset::with_len(WORD_BITS);
+        assert_eq!(full_word.data.len(), 1);
+
+        let two_words = Bitset::with_len(WORD_BITS + 1);
+        assert_eq!(two_words.data.len(), 2);
+    }
+
+    #[test]
+    fn set_get_clear_roundtrip_edges() {
+        let mut bits = Bitset::with_len((WORD_BITS * 2) + 2);
+        let indices = [0, WORD_BITS - 1, WORD_BITS, bits.len() - 1];
+
+        for &idx in &indices {
+            bits.set(idx);
+            assert!(bits.get(idx));
+        }
+
+        for &idx in &indices {
+            bits.clear(idx);
+            assert!(!bits.get(idx));
+        }
+    }
+
+    #[test]
+    fn clear_all_resets_words() {
+        let mut bits = Bitset::with_len(WORD_BITS * 3);
+        for i in (0..bits.len()).step_by(3) {
+            bits.set(i);
+        }
+
+        bits.clear_all();
+        assert!(bits.data.iter().all(|&w| w == 0));
+        for i in 0..bits.len() {
+            assert!(!bits.get(i));
+        }
+    }
+
+    #[test]
+    fn any_one_in_range_handles_single_and_cross_word() {
+        let mut bits = Bitset::with_len(WORD_BITS * 2);
+        bits.set(5);
+        bits.set(WORD_BITS - 1);
+        bits.set(WORD_BITS);
+        bits.set(WORD_BITS + 3);
+
+        assert!(!bits.any_one_in_range(0, 5));
+        assert!(bits.any_one_in_range(5, 1));
+        assert!(bits.any_one_in_range(4, 4));
+
+        assert!(bits.any_one_in_range(WORD_BITS - 2, 4));
+        assert!(bits.any_one_in_range(WORD_BITS - 1, 1));
+        assert!(bits.any_one_in_range(WORD_BITS, 1));
+        assert!(!bits.any_one_in_range(WORD_BITS + 1, 2));
+        assert!(bits.any_one_in_range(WORD_BITS + 2, 2));
+    }
+
+    #[test]
+    fn first_zero_in_range_single_and_cross_word() {
+        let mut bits = Bitset::with_len(WORD_BITS * 2);
+        assert_eq!(bits.first_zero_in_range(0, 8), Some(0));
+
+        for i in 0..8 {
+            bits.set(i);
+        }
+        assert_eq!(bits.first_zero_in_range(0, 8), None);
+        assert_eq!(bits.first_zero_in_range(0, 9), Some(8));
+
+        for i in (WORD_BITS - 8)..(WORD_BITS + 4) {
+            bits.set(i);
+        }
+        bits.clear(WORD_BITS - 3);
+        bits.clear(WORD_BITS + 1);
+
+        assert_eq!(
+            bits.first_zero_in_range(WORD_BITS - 8, 12),
+            Some(WORD_BITS - 3)
+        );
+
+        bits.set(WORD_BITS - 3);
+        assert_eq!(
+            bits.first_zero_in_range(WORD_BITS - 8, 12),
+            Some(WORD_BITS + 1)
+        );
+    }
+
+    #[test]
+    fn first_zero_in_bucket_wraps_when_needed() {
+        let mut bits = Bitset::with_len(32);
+        let bucket_start = 8;
+        let bucket_len = 8;
+
+        for i in 0..bucket_len {
+            bits.set(bucket_start + i);
+        }
+        bits.clear(bucket_start + 2);
+
+        assert_eq!(
+            bits.first_zero_in_bucket(bucket_start, bucket_len, 5),
+            Some(bucket_start + 2)
+        );
+
+        bits.set(bucket_start + 2);
+        assert_eq!(bits.first_zero_in_bucket(bucket_start, bucket_len, 0), None);
+    }
+
+    #[test]
+    fn randomized_queries_match_bool_reference() {
+        let len_bits = 256;
+        let mut rng = StdRng::seed_from_u64(0xBAD5EED);
+        let mut bits = Bitset::with_len(len_bits);
+        let mut reference = vec![false; len_bits];
+
+        for _ in 0..500 {
+            let idx = rng.random_range(0..len_bits);
+            let val = rng.random_bool(0.5);
+            bits.set_to(idx, val);
+            reference[idx] = val;
+
+            let start = rng.random_range(0..len_bits);
+            let remaining = len_bits - start;
+            let range_len = rng.random_range(0..=remaining.min(16));
+            let slice = &reference[start..start + range_len];
+
+            let expected_any = slice.iter().any(|&b| b);
+            let expected_zero = slice.iter().position(|b| !b).map(|off| start + off);
+
+            assert_eq!(bits.any_one_in_range(start, range_len), expected_any);
+            assert_eq!(bits.first_zero_in_range(start, range_len), expected_zero);
+        }
+    }
+}
