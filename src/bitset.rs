@@ -7,10 +7,17 @@ pub struct Bitset {
     len_bits: usize,
 }
 
+impl Default for Bitset {
+    #[inline(always)]
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Bitset {
     /// Create an empty bitset.
     #[inline(always)]
-    pub fn new() -> Self {
+    pub const fn new() -> Self {
         Self {
             data: Vec::new(),
             len_bits: 0,
@@ -20,7 +27,7 @@ impl Bitset {
     /// Create a bitset with space for `bits` bits, all initialized to 0.
     #[inline(always)]
     pub fn with_len(bits: usize) -> Self {
-        let words = (bits + 63) / 64;
+        let words = bits.div_ceil(64);
         Self {
             data: vec![0u64; words],
             len_bits: bits,
@@ -28,8 +35,13 @@ impl Bitset {
     }
 
     #[inline(always)]
-    pub fn len(&self) -> usize {
+    pub const fn len(&self) -> usize {
         self.len_bits
+    }
+
+    #[inline(always)]
+    pub const fn is_empty(&self) -> bool {
+        self.len_bits == 0
     }
 
     /// Set bit `idx` to 1.
