@@ -1,15 +1,16 @@
 use std::{
     collections::HashMap,
-    hash::{BuildHasherDefault, DefaultHasher},
+    hash::BuildHasherDefault,
     hint::black_box,
 };
 
+use ahash::AHasher;
 use criterion::{Criterion, criterion_group, criterion_main};
 use pomap::pomap::PoMap;
 use rand::{Rng, SeedableRng, rngs::StdRng};
 
 /// Hasher configuration shared by PoMap and std::collections benchmarks.
-type BenchHasher = DefaultHasher;
+type BenchHasher = AHasher;
 type BenchHasherBuilder = BuildHasherDefault<BenchHasher>;
 type BenchPoMap<K, V> = PoMap<K, V, BenchHasher>;
 type BenchHashMap<K, V> = HashMap<K, V, BenchHasherBuilder>;

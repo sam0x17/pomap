@@ -20,6 +20,7 @@ wide = "0.8"
 [dev-dependencies]
 criterion = { git = "https://github.com/sam0x17/criterion.rs" }
 rand = { version = "0.10.0-rc.5", features = ["std"] }
+ahash = { version = "0.8", features = ["runtime-rng"] }
 
 [profile.release]
 lto = true
