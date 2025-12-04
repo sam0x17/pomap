@@ -7,6 +7,15 @@ pub struct Bitset {
     len_bits: usize,
 }
 
+const WORD_SHIFT: usize = 6;
+const WORD_BITS: usize = 1 << WORD_SHIFT;
+const WORD_MASK: usize = WORD_BITS - 1;
+
+#[inline(always)]
+const fn split_index(idx: usize) -> (usize, usize) {
+    (idx >> WORD_SHIFT, idx & WORD_MASK)
+}
+
 impl Default for Bitset {
     #[inline(always)]
     fn default() -> Self {
@@ -27,7 +36,7 @@ impl Bitset {
     /// Create a bitset with space for `bits` bits, all initialized to 0.
     #[inline(always)]
     pub fn with_len(bits: usize) -> Self {
-        let words = bits.div_ceil(64);
+        let words = bits.div_ceil(WORD_BITS);
         Self {
             data: vec![0u64; words],
             len_bits: bits,
@@ -48,18 +57,21 @@ impl Bitset {
     #[inline(always)]
     pub fn set(&mut self, idx: usize) {
         debug_assert!(idx < self.len_bits);
-        let word = idx >> 6;
-        let bit = idx & 63;
-        self.data[word] |= 1u64 << bit;
+        let (word, bit) = split_index(idx);
+        unsafe {
+            *self.data.get_unchecked_mut(word) |= 1u64 << bit;
+        }
     }
 
     /// Set bit `idx` to 0.
     #[inline(always)]
     pub fn clear(&mut self, idx: usize) {
         debug_assert!(idx < self.len_bits);
-        let word = idx >> 6;
-        let bit = idx & 63;
-        self.data[word] &= !(1u64 << bit);
+        let (word, bit) = split_index(idx);
+        let mask = !(1u64 << bit);
+        unsafe {
+            *self.data.get_unchecked_mut(word) &= mask;
+        }
     }
 
     /// Set bit `idx` to `value`.
@@ -76,16 +88,15 @@ impl Bitset {
     #[inline(always)]
     pub fn get(&self, idx: usize) -> bool {
         debug_assert!(idx < self.len_bits);
-        let word = idx >> 6;
-        let bit = idx & 63;
-        ((self.data[word] >> bit) & 1) != 0
+        let (word, bit) = split_index(idx);
+        unsafe { ((*self.data.get_unchecked(word) >> bit) & 1) != 0 }
     }
 
     /// Clear all bits to 0, keeping capacity.
     #[inline(always)]
     pub fn clear_all(&mut self) {
-        for w in &mut self.data {
-            *w = 0;
+        unsafe {
+            core::ptr::write_bytes(self.data.as_mut_ptr(), 0, self.data.len());
         }
     }
 
@@ -101,28 +112,30 @@ impl Bitset {
         debug_assert!(len <= 16, "this bitset is tuned for MAX_SCAN = 16");
         debug_assert!(start + len <= self.len_bits);
 
-        let word_idx = start >> 6;
-        let bit_off = start & 63;
+        let (word_idx, bit_off) = split_index(start);
 
         // Range fits entirely in one word.
-        if bit_off + len <= 64 {
+        if bit_off + len <= WORD_BITS {
             let mask = ((1u64 << len) - 1) << bit_off;
-            (self.data[word_idx] & mask) != 0
+            let word = unsafe { *self.data.get_unchecked(word_idx) };
+            (word & mask) != 0
         } else {
             // Crosses a word boundary: part in word_idx, rest in word_idx+1.
-            let bits_first = 64 - bit_off;
+            let bits_first = WORD_BITS - bit_off;
             let bits_second = len - bits_first;
 
             // First word: bits [bit_off .. 63]
             let mask_first = (!0u64) << bit_off;
-            if (self.data[word_idx] & mask_first) != 0 {
+            let first = unsafe { *self.data.get_unchecked(word_idx) };
+            if (first & mask_first) != 0 {
                 return true;
             }
 
             // Second word: bits [0 .. bits_second)
             // bits_second <= 16 and < 64, so shift is safe.
             let mask_second = (1u64 << bits_second) - 1;
-            (self.data[word_idx + 1] & mask_second) != 0
+            let second = unsafe { *self.data.get_unchecked(word_idx + 1) };
+            (second & mask_second) != 0
         }
     }
 
@@ -139,38 +152,37 @@ impl Bitset {
         debug_assert!(len <= 16, "this bitset is tuned for MAX_SCAN = 16");
         debug_assert!(start + len <= self.len_bits);
 
-        let word_idx = start >> 6;
-        let bit_off = start & 63;
+        let (word_idx, bit_off) = split_index(start);
 
         // Range fits entirely in one word.
-        if bit_off + len <= 64 {
+        if bit_off + len <= WORD_BITS {
             let mask = ((1u64 << len) - 1) << bit_off;
-            let zeros = (!self.data[word_idx]) & mask;
+            let zeros = (!unsafe { *self.data.get_unchecked(word_idx) }) & mask;
             if zeros != 0 {
                 let tz = zeros.trailing_zeros() as usize;
-                return Some((word_idx << 6) + tz);
+                return Some((word_idx << WORD_SHIFT) + tz);
             }
             return None;
         }
 
         // Crosses word boundary.
-        let bits_first = 64 - bit_off;
+        let bits_first = WORD_BITS - bit_off;
         let bits_second = len - bits_first;
 
         // First word: bits [bit_off .. 63]
         let mask_first = (!0u64) << bit_off;
-        let zeros_first = (!self.data[word_idx]) & mask_first;
+        let zeros_first = (!unsafe { *self.data.get_unchecked(word_idx) }) & mask_first;
         if zeros_first != 0 {
             let tz = zeros_first.trailing_zeros() as usize;
-            return Some((word_idx << 6) + tz);
+            return Some((word_idx << WORD_SHIFT) + tz);
         }
 
         // Second word: bits [0 .. bits_second)
         let mask_second = (1u64 << bits_second) - 1;
-        let zeros_second = (!self.data[word_idx + 1]) & mask_second;
+        let zeros_second = (!unsafe { *self.data.get_unchecked(word_idx + 1) }) & mask_second;
         if zeros_second != 0 {
             let tz = zeros_second.trailing_zeros() as usize;
-            return Some(((word_idx + 1) << 6) + tz);
+            return Some(((word_idx + 1) << WORD_SHIFT) + tz);
         }
 
         None
