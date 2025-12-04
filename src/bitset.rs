@@ -10,7 +10,15 @@ pub struct Bitset {
 const WORD_SHIFT: usize = 6;
 const WORD_BITS: usize = 1 << WORD_SHIFT;
 const WORD_MASK: usize = WORD_BITS - 1;
-const RANGE_LIMIT: usize = super::pomap::MAX_SCAN; // max 64 on 32-bit, 128 on 64-bit
+const RANGE_LIMIT: usize = super::pomap::MAX_SCAN;
+
+// Keep this invariant hard:
+const _: () = {
+    assert!(
+        RANGE_LIMIT <= WORD_BITS,
+        "Bitset only supports MAX_SCAN <= WORD_BITS (64)"
+    );
+};
 
 #[inline(always)]
 const fn split_index(idx: usize) -> (usize, usize) {
@@ -148,7 +156,7 @@ impl Bitset {
     }
 
     /// Returns true if *any* bit is 1 in [start, start+len), clamping to the
-    /// available length and to RANGE_LIMIT (16).
+    /// available length and to RANGE_LIMIT.
     #[inline(always)]
     pub fn any_one_in_range(&self, start: usize, len: usize) -> bool {
         if let Some((s, l)) = clamp_range(start, len, self.len_bits) {
@@ -169,7 +177,11 @@ impl Bitset {
     /// uphold that bound.
     #[inline(always)]
     pub unsafe fn any_one_in_range_unchecked(&self, start: usize, len: usize) -> bool {
-        debug_assert!(len <= RANGE_LIMIT, "this bitset is tuned for MAX_SCAN = 16");
+        debug_assert!(
+            len <= RANGE_LIMIT,
+            "this bitset is tuned for len <= RANGE_LIMIT (= MAX_SCAN)"
+        );
+
         debug_assert!(start + len <= self.len_bits);
         debug_assert!(len > 0);
 
@@ -222,7 +234,11 @@ impl Bitset {
     /// Again, tuned for len <= MAX_SCAN (16); at most 2 word loads.
     #[inline(always)]
     pub unsafe fn first_zero_in_range_unchecked(&self, start: usize, len: usize) -> Option<usize> {
-        debug_assert!(len <= RANGE_LIMIT, "this bitset is tuned for MAX_SCAN = 16");
+        debug_assert!(
+            len <= RANGE_LIMIT,
+            "this bitset is tuned for len <= RANGE_LIMIT (= MAX_SCAN)"
+        );
+
         debug_assert!(start + len <= self.len_bits);
         debug_assert!(len > 0);
 
