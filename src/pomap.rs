@@ -292,7 +292,7 @@ impl PoMapMeta {
         };
 
         // Step 2: ceil-div by BUCKET_SIZE to get minimum bucket count
-        let min_buckets = (min_r + BUCKET_SIZE - 1) / BUCKET_SIZE;
+        let min_buckets = min_r.div_ceil(BUCKET_SIZE);
 
         // Step 3: round bucket count up to a power of two
         let buckets = min_buckets.next_power_of_two();
