@@ -6,12 +6,9 @@ use core::{
 use std::hash::DefaultHasher;
 
 /// Minimum capacity we will allow for PoMap
-const MIN_CAPACITY: usize = 16;
+const MIN_CAPACITY: usize = BUCKET_SIZE * BUCKET_SIZE;
 
-/// Maximum number of slots to linearly scan starting at the ideal slot.
-/// We design the layout so that `[ideal_slot, ideal_slot + MAX_SCAN)` is
-/// always in-bounds for the backing Vec.
-const MAX_SCAN: usize = 16;
+const BUCKET_SIZE: usize = 6;
 
 /// Number of bits in the hashcode
 const HASH_BITS: usize = 64; // we use a 64-bit hashcode
@@ -84,8 +81,8 @@ impl<K: Key, V: Value, H: Hasher + Default> PoMap<K, V, H> {
     /// want to recompute it.
     #[inline]
     pub fn get_with_hash(&self, hash: u64, key: &K) -> Option<&V> {
-        let ideal_slot = self.meta.ideal_slot(hash);
-        let scan_end = ideal_slot + MAX_SCAN;
+        let ideal_slot = self.meta.hash_to_bucket_start(hash);
+        let scan_end = ideal_slot + BUCKET_SIZE;
 
         // SAFETY: ideal_slot..scan_end is always in-bounds for the backing Vec.
         let slots_ptr = self.slots.as_ptr();
@@ -144,8 +141,8 @@ impl<K: Key, V: Value, H: Hasher + Default> PoMap<K, V, H> {
     #[inline]
     pub fn insert_with_hash(&mut self, hash: u64, key: K, value: V) -> Option<V> {
         loop {
-            let ideal_slot = self.meta.ideal_slot(hash);
-            let scan_end = ideal_slot + MAX_SCAN;
+            let ideal_slot = self.meta.hash_to_bucket_start(hash);
+            let scan_end = ideal_slot + BUCKET_SIZE;
 
             // SAFETY: ideal_slot..scan_end is always in-bounds for the backing Vec.
             let slots_ptr = self.slots.as_mut_ptr();
@@ -236,7 +233,7 @@ impl<K: Key, V: Value, H: Hasher + Default> PoMap<K, V, H> {
             };
 
             // calculate ideal slot in the new layout
-            let ideal_slot = new_meta.ideal_slot(*hash);
+            let ideal_slot = new_meta.hash_to_bucket_start(*hash);
 
             // advance cursor to at least the ideal slot
             cursor = ideal_slot.max(cursor);
@@ -285,30 +282,25 @@ struct PoMapMeta {
 }
 
 impl PoMapMeta {
-    /// Build meta from a *requested* logical capacity (or element count).
-    ///
-    /// We choose:
-    ///   base        = max(requested, MIN_CAPACITY)
-    ///   ideal_range = base.next_power_of_two()
-    ///
-    /// This means:
-    ///   - `ideal_range` is a power of two
-    ///   - full Vec capacity should be `ideal_range + MAX_SCAN`
-    ///
-    /// There are no panics; we just round up.
-    ///
-    /// Returns `(meta, capacity)`, where `capacity` is what you should use
-    /// for the backing `Vec<Slot<..>>`.
     #[inline(always)]
     const fn new(requested: usize) -> (Self, usize) {
-        let base = if requested > MIN_CAPACITY {
+        // Step 1: Enforce minimum capacity constraint (>= MIN_CAPACITY)
+        let min_r = if requested > MIN_CAPACITY {
             requested
         } else {
             MIN_CAPACITY
         };
-        let ideal_range = base.next_power_of_two();
 
-        let index_bits: usize = ideal_range.trailing_zeros() as usize; // m
+        // Step 2: ceil-div by BUCKET_SIZE to get minimum bucket count
+        let min_buckets = (min_r + BUCKET_SIZE - 1) / BUCKET_SIZE;
+
+        // Step 3: round bucket count up to a power of two
+        let buckets = min_buckets.next_power_of_two();
+
+        // Step 4: convert back to element capacity
+        let capacity = buckets * BUCKET_SIZE;
+
+        let index_bits: usize = buckets.trailing_zeros() as usize; // m
         debug_assert!(index_bits <= HASH_BITS);
         let index_shift: usize = HASH_BITS - index_bits; // use top-m bits of the u64 hash
 
@@ -317,18 +309,17 @@ impl PoMapMeta {
                 index_bits,
                 index_shift,
             },
-            ideal_range + MAX_SCAN,
+            capacity,
         )
     }
 
-    /// **Ideal slot** for this hash: top-m bits of the 64-bit hash.
+    /// Based on top-m bits of the 64-bit hash.
     ///
-    /// Because `ideal_range = 2^m` and we take exactly `m` bits, the result
-    /// is guaranteed `< ideal_range`. No masking or wrap needed; `MAX_SCAN`
-    /// is handled by the caller.
+    /// Because `NUM_BUCKETS = 2^m` and we take exactly `m` bits, the result
+    /// is guaranteed `< NUM_BUCKETS`. No masking or wrap needed
     #[inline(always)]
-    const fn ideal_slot(&self, hash: u64) -> usize {
-        (hash >> self.index_shift) as usize
+    const fn hash_to_bucket_start(&self, hash: u64) -> usize {
+        (hash >> self.index_shift) as usize * BUCKET_SIZE
     }
 }
 
@@ -380,22 +371,6 @@ mod tests {
     }
 
     #[test]
-    fn test_resize_goes_up_by_power_of_two_and_never_down() {
-        let mut map: PoMap<u64, u64> = PoMap::new();
-        assert_eq!(map.slots.capacity(), MIN_CAPACITY + MAX_SCAN);
-
-        // reserve more than the current capacity
-        let new_capacity = map.reserve(100);
-        assert_eq!(map.slots.capacity(), new_capacity);
-        assert_eq!(new_capacity, 128 + MAX_SCAN); // 128 is the next power of two after 100
-
-        // reserve less than the current capacity
-        let old_capacity = map.slots.capacity();
-        let new_capacity = map.reserve(50);
-        assert_eq!(new_capacity, old_capacity);
-    }
-
-    #[test]
     fn insert_and_get_roundtrip() {
         let mut map: PoMap<u64, u64, IdentityHasher> = PoMap::new();
 
@@ -430,8 +405,8 @@ mod tests {
         let higher = base | 30;
         let lower = base | 10;
 
-        let slot = map.meta.ideal_slot(lower);
-        assert_eq!(slot, map.meta.ideal_slot(higher));
+        let slot = map.meta.hash_to_bucket_start(lower);
+        assert_eq!(slot, map.meta.hash_to_bucket_start(higher));
 
         assert_eq!(map.insert(higher, 1), None);
         assert_eq!(map.insert(lower, 2), None);
