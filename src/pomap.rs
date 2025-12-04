@@ -205,7 +205,15 @@ impl<K: Key, V: Value, H: Hasher + Default> PoMap<K, V, H> {
 
             // If we make it here, we either ran out of room in the scan window
             // or the table is saturated for this hash window. Grow and retry.
+            // let old_cap = self.slots.capacity();
+            // let load_factor = self.len as f64 / old_cap as f64;
             self.reserve(self.slots.capacity() * GROWTH_FACTOR);
+            // let new_cap = self.slots.capacity();
+            // let new_load_factor = self.len as f64 / new_cap as f64;
+            /*println!(
+                "PoMap resized from {} to {} (load factor {:.2}), {:.2} after",
+                old_cap, new_cap, load_factor, new_load_factor
+            );*/
         }
     }
 
@@ -301,6 +309,7 @@ impl PoMapMeta {
     /// for the backing `Vec<Slot<..>>`.
     #[inline(always)]
     const fn new(requested: usize) -> (Self, usize) {
+        let requested = requested.saturating_sub(MAX_SCAN);
         let base = if requested > MIN_CAPACITY {
             requested
         } else {

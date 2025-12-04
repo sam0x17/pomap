@@ -52,18 +52,26 @@ fn bench_insert_preallocated(c: &mut Criterion) {
         .collect::<Vec<(u64, u64)>>();
     let mut group = c.comparison_benchmark_group("insert_preallocated");
 
+    let mut map: PoMap<u64, u64> = PoMap::new();
+    for &(key, val) in &combined {
+        black_box(map.insert(key, val));
+    }
+    let initial_cap = map.capacity();
+    drop(map);
+
     group.bench_function("pomap", |b| {
         b.iter(|| {
-            let mut map: PoMap<u64, u64> = PoMap::with_capacity(INPUT_SIZE * 16);
+            let mut map: PoMap<u64, u64> = PoMap::with_capacity(initial_cap);
             for &(key, val) in &combined {
                 black_box(map.insert(key, val));
             }
+            assert_eq!(map.capacity(), initial_cap);
         });
     });
 
     group.bench_function("std_hashmap", |b| {
         b.iter(|| {
-            let mut map: HashMap<u64, u64> = HashMap::with_capacity(INPUT_SIZE * 16);
+            let mut map: HashMap<u64, u64> = HashMap::with_capacity(INPUT_SIZE);
             for &(key, val) in &combined {
                 black_box(map.insert(key, val));
             }
