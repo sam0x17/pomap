@@ -1,8 +1,4 @@
-use std::{
-    collections::HashMap,
-    hash::BuildHasherDefault,
-    hint::black_box,
-};
+use std::{collections::HashMap, hash::BuildHasherDefault, hint::black_box};
 
 use ahash::AHasher;
 use criterion::{Criterion, criterion_group, criterion_main};
