@@ -185,9 +185,6 @@ impl<K: Key, V: Value, H: Hasher + Default> PoMap<K, V, H> {
         for idx in ideal_slot..scan_end {
             let slot = unsafe { &*slots_ptr.add(idx) };
             let slot_hash = slot.hash;
-            if slot_hash == VACANT_HASH {
-                return None;
-            }
 
             if slot_hash < hash {
                 continue;
