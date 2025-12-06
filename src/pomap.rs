@@ -32,6 +32,11 @@ struct Entry<K: Key, V: Value> {
     value: MaybeUninit<V>,
 }
 
+#[inline(always)]
+fn encode_hash(h: u64) -> u64 {
+    h.wrapping_sub(1)
+}
+
 impl<K: Key, V: Value> Entry<K, V> {
     #[inline(always)]
     fn vacant() -> Self {
@@ -211,7 +216,7 @@ impl<K: Key, V: Value, H: Hasher + Default> PoMap<K, V, H> {
     pub fn get(&self, key: &K) -> Option<&V> {
         let mut hasher = H::default();
         key.hash(&mut hasher);
-        let hash = hasher.finish();
+        let hash = encode_hash(hasher.finish());
         self.get_with_hash(hash, key)
     }
 
@@ -222,7 +227,7 @@ impl<K: Key, V: Value, H: Hasher + Default> PoMap<K, V, H> {
     pub fn insert(&mut self, key: K, value: V) -> Option<V> {
         let mut hasher = H::default();
         key.hash(&mut hasher);
-        let hash = hasher.finish();
+        let hash = encode_hash(hasher.finish());
         self.insert_with_hash(hash, key, value)
     }
 
@@ -512,13 +517,12 @@ mod tests {
     fn insertion_shifts_to_keep_hash_order() {
         let mut map: PoMap<u64, u64, IdentityHasher> = PoMap::new();
 
-        // Craft hashes that land in the same ideal slot but have different order.
         let base = 0b01010u64 << 59;
         let higher = base | 30;
         let lower = base | 10;
 
-        let slot = map.meta.ideal_slot(lower);
-        assert_eq!(slot, map.meta.ideal_slot(higher));
+        let slot = map.meta.ideal_slot(encode_hash(lower));
+        assert_eq!(slot, map.meta.ideal_slot(encode_hash(higher)));
 
         assert_eq!(map.insert(higher, 1), None);
         assert_eq!(map.insert(lower, 2), None);
@@ -528,17 +532,22 @@ mod tests {
 
         assert!(!first.is_vacant());
         assert!(!second.is_vacant());
+
+        // Check hash order with encoded hashes
+        let lower_h = encode_hash(lower);
+        let higher_h = encode_hash(higher);
+
+        assert_eq!(first.hash, lower_h);
+        assert_eq!(second.hash, higher_h);
+
+        // And make sure key/value order matches expectation
         assert_eq!(
-            (first.hash, unsafe { *first.key_ref() }, unsafe {
-                *first.value_ref()
-            }),
-            (lower, lower, 2)
+            unsafe { (*first.key_ref(), *first.value_ref()) },
+            (lower, 2),
         );
         assert_eq!(
-            (second.hash, unsafe { *second.key_ref() }, unsafe {
-                *second.value_ref()
-            }),
-            (higher, higher, 1)
+            unsafe { (*second.key_ref(), *second.value_ref()) },
+            (higher, 1),
         );
 
         assert_eq!(map.get(&higher), Some(&1));
