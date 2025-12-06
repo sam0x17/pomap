@@ -1,6 +1,7 @@
 use core::{
     hash::{Hash, Hasher},
     marker::PhantomData,
+    mem::MaybeUninit,
     slice,
 };
 use std::hash::DefaultHasher;
@@ -17,6 +18,7 @@ pub const MAX_SCAN: usize = 16;
 const HASH_BITS: usize = 64; // we use a 64-bit hashcode
 
 const GROWTH_FACTOR: usize = 2;
+const VACANT_HASH: u64 = u64::MAX;
 
 pub trait Key: Hash + Eq + Clone + Ord {}
 impl<K: Hash + Eq + Clone + Ord> Key for K {}
@@ -24,17 +26,107 @@ impl<K: Hash + Eq + Clone + Ord> Key for K {}
 pub trait Value: Clone {}
 impl<V: Clone> Value for V {}
 
-#[derive(Hash, Clone, Debug)]
-enum Slot<K: Key, V: Value> {
-    Vacant,
-    Occupied { hash: u64, key: K, value: V },
+struct Entry<K: Key, V: Value> {
+    hash: u64,
+    key: MaybeUninit<K>,
+    value: MaybeUninit<V>,
+}
+
+impl<K: Key, V: Value> Entry<K, V> {
+    #[inline(always)]
+    fn vacant() -> Self {
+        Self {
+            hash: VACANT_HASH,
+            key: MaybeUninit::uninit(),
+            value: MaybeUninit::uninit(),
+        }
+    }
+
+    #[inline(always)]
+    fn occupied(hash: u64, key: K, value: V) -> Self {
+        debug_assert!(hash != VACANT_HASH);
+        Self {
+            hash,
+            key: MaybeUninit::new(key),
+            value: MaybeUninit::new(value),
+        }
+    }
+
+    #[inline(always)]
+    fn is_vacant(&self) -> bool {
+        self.hash == VACANT_HASH
+    }
+
+    #[inline(always)]
+    fn occupy(&mut self, hash: u64, key: K, value: V) {
+        debug_assert!(hash != VACANT_HASH);
+        debug_assert!(self.is_vacant());
+        self.hash = hash;
+        self.key.write(key);
+        self.value.write(value);
+    }
+
+    #[inline(always)]
+    unsafe fn key_ref(&self) -> &K {
+        debug_assert!(!self.is_vacant());
+        unsafe { self.key.assume_init_ref() }
+    }
+
+    #[inline(always)]
+    unsafe fn value_ref(&self) -> &V {
+        debug_assert!(!self.is_vacant());
+        unsafe { self.value.assume_init_ref() }
+    }
+
+    #[inline(always)]
+    unsafe fn value_mut(&mut self) -> &mut V {
+        debug_assert!(!self.is_vacant());
+        unsafe { self.value.assume_init_mut() }
+    }
+}
+
+impl<K: Key, V: Value> Clone for Entry<K, V> {
+    fn clone(&self) -> Self {
+        if self.is_vacant() {
+            Self::vacant()
+        } else {
+            Self::occupied(self.hash, unsafe { self.key_ref().clone() }, unsafe {
+                self.value_ref().clone()
+            })
+        }
+    }
+}
+
+impl<K: Key, V: Value> Drop for Entry<K, V> {
+    fn drop(&mut self) {
+        if !self.is_vacant() {
+            unsafe {
+                self.key.assume_init_drop();
+                self.value.assume_init_drop();
+            }
+        }
+    }
+}
+
+impl<K: Key + core::fmt::Debug, V: Value + core::fmt::Debug> core::fmt::Debug for Entry<K, V> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        if self.is_vacant() {
+            f.write_str("Vacant")
+        } else {
+            f.debug_struct("Occupied")
+                .field("hash", &self.hash)
+                .field("key", unsafe { self.key_ref() })
+                .field("value", unsafe { self.value_ref() })
+                .finish()
+        }
+    }
 }
 
 #[derive(Clone)]
 pub struct PoMap<K: Key, V: Value, H: Hasher + Default = DefaultHasher> {
     len: usize,
     meta: PoMapMeta,
-    slots: Vec<Slot<K, V>>,
+    slots: Vec<Entry<K, V>>,
     _phantom: PhantomData<H>,
 }
 
@@ -48,7 +140,7 @@ impl<K: Key, V: Value, H: Hasher + Default> PoMap<K, V, H> {
     #[inline]
     pub fn with_capacity(capacity: usize) -> Self {
         let (meta, vec_capacity) = PoMapMeta::new(capacity);
-        let slots = vec![Slot::Vacant; vec_capacity];
+        let slots = vec![Entry::vacant(); vec_capacity];
         Self {
             len: 0,
             meta,
@@ -92,16 +184,10 @@ impl<K: Key, V: Value, H: Hasher + Default> PoMap<K, V, H> {
 
         for idx in ideal_slot..scan_end {
             let slot = unsafe { &*slots_ptr.add(idx) };
-            let Slot::Occupied {
-                hash: slot_hash,
-                key: slot_key,
-                value,
-            } = slot
-            else {
+            let slot_hash = slot.hash;
+            if slot_hash == VACANT_HASH {
                 return None;
-            };
-
-            let slot_hash = *slot_hash;
+            }
 
             if slot_hash < hash {
                 continue;
@@ -112,8 +198,10 @@ impl<K: Key, V: Value, H: Hasher + Default> PoMap<K, V, H> {
                 return None;
             }
 
-            if slot_key == key {
-                return Some(value);
+            // SAFETY: we guard with VACANT_HASH above.
+            if unsafe { slot.key_ref() } == key {
+                // SAFETY: slot is occupied.
+                return Some(unsafe { slot.value_ref() });
             }
         }
         None
@@ -153,54 +241,46 @@ impl<K: Key, V: Value, H: Hasher + Default> PoMap<K, V, H> {
             let mut idx = ideal_slot;
             while idx < scan_end {
                 let slot = unsafe { &mut *slots_ptr.add(idx) };
+                let slot_hash = slot.hash;
 
-                match slot {
-                    Slot::Vacant => {
-                        *slot = Slot::Occupied { hash, key, value };
+                if slot_hash == VACANT_HASH {
+                    slot.occupy(hash, key, value);
+                    self.len += 1;
+                    return None;
+                }
+
+                // Common case: existing hash < new hash → keep scanning forward.
+                if slot_hash < hash {
+                    idx += 1;
+                    continue;
+                }
+
+                // Existing hash == new hash → maybe update in place.
+                if slot_hash == hash && unsafe { slot.key_ref() } == &key {
+                    let old_value = core::mem::replace(unsafe { slot.value_mut() }, value);
+                    return Some(old_value);
+                }
+
+                // Here: slot_hash > hash  OR (== but different key).
+                // We need to insert before this slot; attempt in-window shift.
+                // Search for a Vacant in (idx, scan_end).
+                let mut search = idx + 1;
+                while search < scan_end {
+                    let candidate = unsafe { &*slots_ptr.add(search) };
+                    if candidate.is_vacant() {
+                        // Rotate [idx..=search] right by 1 and drop new element at idx.
+                        let len = search - idx + 1;
+                        let slice = unsafe { slice::from_raw_parts_mut(slots_ptr.add(idx), len) };
+                        slice.rotate_right(1);
+                        slice[0] = Entry::occupied(hash, key, value);
                         self.len += 1;
                         return None;
                     }
-                    Slot::Occupied {
-                        hash: slot_hash,
-                        key: slot_key,
-                        value: slot_value,
-                    } => {
-                        let slot_hash = *slot_hash;
-
-                        // Common case: existing hash < new hash → keep scanning forward.
-                        if slot_hash < hash {
-                            idx += 1;
-                            continue;
-                        }
-
-                        // Existing hash == new hash → maybe update in place.
-                        if slot_hash == hash && *slot_key == key {
-                            let old_value = core::mem::replace(slot_value, value);
-                            return Some(old_value);
-                        }
-
-                        // Here: slot_hash > hash  OR (== but different key).
-                        // We need to insert before this slot; attempt in-window shift.
-                        // Search for a Vacant in (idx, scan_end).
-                        let mut search = idx + 1;
-                        while search < scan_end {
-                            if matches!(unsafe { &*slots_ptr.add(search) }, Slot::Vacant) {
-                                // Rotate [idx..=search] right by 1 and drop new element at idx.
-                                let len = search - idx + 1;
-                                let slice =
-                                    unsafe { slice::from_raw_parts_mut(slots_ptr.add(idx), len) };
-                                slice.rotate_right(1);
-                                slice[0] = Slot::Occupied { hash, key, value };
-                                self.len += 1;
-                                return None;
-                            }
-                            search += 1;
-                        }
-
-                        // No room in this window; grow and retry.
-                        break;
-                    }
+                    search += 1;
                 }
+
+                // No room in this window; grow and retry.
+                break;
             }
 
             // If we make it here, we either ran out of room in the scan window
@@ -231,20 +311,21 @@ impl<K: Key, V: Value, H: Hasher + Default> PoMap<K, V, H> {
         }
 
         // allocate new vec
-        let new_slots: Vec<Slot<K, V>> = vec![Slot::Vacant; new_vec_capacity];
+        let new_slots: Vec<Entry<K, V>> = vec![Entry::vacant(); new_vec_capacity];
 
         // re-insert all existing elements into the new vec in the same order, with spaces
         // added based on hash prefix / the new meta
         let old_slots = core::mem::replace(&mut self.slots, new_slots);
         let mut cursor = 0;
         for slot in old_slots.into_iter() {
-            let Slot::Occupied { hash, .. } = &slot else {
+            if slot.is_vacant() {
                 cursor += 1;
                 continue;
-            };
+            }
+            let hash = slot.hash;
 
             // calculate ideal slot in the new layout
-            let ideal_slot = new_meta.ideal_slot(*hash);
+            let ideal_slot = new_meta.ideal_slot(hash);
 
             // advance cursor to at least the ideal slot
             cursor = ideal_slot.max(cursor);
@@ -306,7 +387,7 @@ impl PoMapMeta {
     /// There are no panics; we just round up.
     ///
     /// Returns `(meta, capacity)`, where `capacity` is what you should use
-    /// for the backing `Vec<Slot<..>>`.
+    /// for the backing `Vec<Entry<..>>`.
     #[inline(always)]
     const fn new(requested: usize) -> (Self, usize) {
         let requested = requested.saturating_sub(MAX_SCAN);
@@ -445,24 +526,23 @@ mod tests {
         assert_eq!(map.insert(higher, 1), None);
         assert_eq!(map.insert(lower, 2), None);
 
-        match (&map.slots[slot], &map.slots[slot + 1]) {
-            (
-                Slot::Occupied {
-                    hash: first_hash,
-                    value: first_value,
-                    ..
-                },
-                Slot::Occupied {
-                    hash: second_hash,
-                    value: second_value,
-                    ..
-                },
-            ) => {
-                assert_eq!((*first_hash, *first_value), (lower, 2));
-                assert_eq!((*second_hash, *second_value), (higher, 1));
-            }
-            other => panic!("unexpected slot layout: {other:?}"),
-        }
+        let first = &map.slots[slot];
+        let second = &map.slots[slot + 1];
+
+        assert!(!first.is_vacant());
+        assert!(!second.is_vacant());
+        assert_eq!(
+            (first.hash, unsafe { *first.key_ref() }, unsafe {
+                *first.value_ref()
+            }),
+            (lower, lower, 2)
+        );
+        assert_eq!(
+            (second.hash, unsafe { *second.key_ref() }, unsafe {
+                *second.value_ref()
+            }),
+            (higher, higher, 1)
+        );
 
         assert_eq!(map.get(&higher), Some(&1));
         assert_eq!(map.get(&lower), Some(&2));
