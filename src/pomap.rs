@@ -49,11 +49,7 @@ struct Entry<K: Key, V: Value> {
 
 #[inline(always)]
 fn encode_hash(h: u64) -> u64 {
-    if h == VACANT_HASH {
-        VACANT_HASH - 1
-    } else {
-        h
-    }
+    if h == VACANT_HASH { VACANT_HASH - 1 } else { h }
 }
 
 impl<K: Key, V: Value> Entry<K, V> {
