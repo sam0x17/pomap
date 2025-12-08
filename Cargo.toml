@@ -12,6 +12,7 @@ missing_inline_in_public_items = "deny"
 
 [features]
 default = []
+verbose = []
 
 [dependencies]
 sha2 = { version = "0.10", features = ["asm"] }
