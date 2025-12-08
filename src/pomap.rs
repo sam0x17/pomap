@@ -9,16 +9,17 @@ use std::hash::DefaultHasher;
 /// Minimum capacity we will allow for PoMap
 const MIN_CAPACITY: usize = 16;
 
-/// Maximum number of slots to linearly scan starting at the ideal slot.
-/// We design the layout so that `[ideal_slot, ideal_slot + MAX_SCAN)` is
-/// always in-bounds for the backing Vec.
-pub const MAX_SCAN: usize = 16;
-
 /// Number of bits in the hashcode
 const HASH_BITS: usize = 64; // we use a 64-bit hashcode
 
 const GROWTH_FACTOR: usize = 2;
 const VACANT_HASH: u64 = u64::MAX;
+
+#[inline(always)]
+const fn max_scan_for_capacity(capacity: usize) -> usize {
+    // log2 rounded down; capacity is always >= MIN_CAPACITY (non-zero).
+    capacity.next_power_of_two().trailing_zeros() as usize
+}
 
 // Simple logging macro gated on the `verbose` feature.
 #[cfg(feature = "verbose")]
@@ -154,7 +155,7 @@ impl<K: Key, V: Value, H: Hasher + Default> PoMap<K, V, H> {
     /// Create a new [`PoMap`] with _at least_ the given capacity.
     ///
     /// Note that the actual internal capacity will always be scaled up to the next power of
-    /// two (if not already a power of two) plus [`MAX_SCAN`].
+    /// two (if not already a power of two) plus `max_scan_for_capacity(ideal_range)`.
     ///
     /// Also note that the minimum capacity is [`MIN_CAPACITY`].
     #[inline]
@@ -169,7 +170,7 @@ impl<K: Key, V: Value, H: Hasher + Default> PoMap<K, V, H> {
         }
     }
 
-    /// Create a new [`PoMap`] with [`MIN_CAPACITY`] + [`MAX_SCAN`] internal capacity.
+    /// Create a new [`PoMap`] with [`MIN_CAPACITY`] + max-scan internal capacity.
     #[inline(always)]
     pub fn new() -> Self {
         Self::with_capacity(MIN_CAPACITY)
@@ -178,6 +179,11 @@ impl<K: Key, V: Value, H: Hasher + Default> PoMap<K, V, H> {
     #[inline(always)]
     pub const fn capacity(&self) -> usize {
         self.slots.capacity()
+    }
+
+    #[inline(always)]
+    pub const fn max_scan(&self) -> usize {
+        self.meta.max_scan
     }
 
     /// Current number of occupied entries.
@@ -197,7 +203,7 @@ impl<K: Key, V: Value, H: Hasher + Default> PoMap<K, V, H> {
     #[inline]
     pub fn get_with_hash(&self, hash: u64, key: &K) -> Option<&V> {
         let ideal_slot = self.meta.ideal_slot(hash);
-        let scan_end = ideal_slot + MAX_SCAN;
+        let scan_end = ideal_slot + self.meta.max_scan;
 
         verbose_log!();
         verbose_log!(
@@ -274,7 +280,7 @@ impl<K: Key, V: Value, H: Hasher + Default> PoMap<K, V, H> {
     pub fn insert_with_hash(&mut self, hash: u64, key: K, value: V) -> Option<V> {
         loop {
             let ideal_slot = self.meta.ideal_slot(hash);
-            let scan_end = ideal_slot + MAX_SCAN;
+            let scan_end = ideal_slot + self.meta.max_scan;
             verbose_log!();
             verbose_log!(
                 "insert_with_hash: hash={} ideal_slot={} scan_end={}",
@@ -408,7 +414,7 @@ impl<K: Key, V: Value, H: Hasher + Default> PoMap<K, V, H> {
 
             // insert the slot, we should be at or past the ideal slot now. Because the
             // previous layout was already valid and is strictly smaller than the new one, this
-            // can never cause us to exceed MAX_SCAN slots past the ideal slot because we are
+            // can never cause us to exceed the scan limit past the ideal slot because we are
             // always gaining more room.
             self.slots[cursor] = slot;
 
@@ -435,8 +441,8 @@ impl Default for PoMap<(), ()> {
 /// We pick an internal `ideal_range` that is a power of two, and guarantee:
 ///
 ///   ideal_slot(hash) ∈ [0, ideal_range)
-///   and you can safely scan `[ideal_slot, ideal_slot + MAX_SCAN)`
-///   inside a Vec of length `capacity = ideal_range + MAX_SCAN`.
+///   and you can safely scan `[ideal_slot, ideal_slot + max_scan)`
+///   inside a Vec of length `capacity = ideal_range + max_scan`.
 ///
 /// The caller is responsible for using the returned `capacity` to size the backing Vec.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -447,6 +453,9 @@ struct PoMapMeta {
     /// Shift to extract the top-m bits from the 64-bit hash:
     ///   ideal_slot = (hash >> index_shift)
     index_shift: usize,
+
+    /// Maximum scan distance for this capacity.
+    max_scan: usize,
 }
 
 impl PoMapMeta {
@@ -455,10 +464,11 @@ impl PoMapMeta {
     /// We choose:
     ///   base        = max(requested, MIN_CAPACITY)
     ///   ideal_range = base.next_power_of_two()
+    ///   max_scan    = max_scan_for_capacity(ideal_range)
     ///
     /// This means:
     ///   - `ideal_range` is a power of two
-    ///   - full Vec capacity should be `ideal_range + MAX_SCAN`
+    ///   - full Vec capacity should be `ideal_range + max_scan`
     ///
     /// There are no panics; we just round up.
     ///
@@ -466,13 +476,13 @@ impl PoMapMeta {
     /// for the backing `Vec<Entry<..>>`.
     #[inline(always)]
     const fn new(requested: usize) -> (Self, usize) {
-        let requested = requested.saturating_sub(MAX_SCAN);
         let base = if requested > MIN_CAPACITY {
             requested
         } else {
             MIN_CAPACITY
         };
         let ideal_range = base.next_power_of_two();
+        let max_scan = max_scan_for_capacity(ideal_range);
 
         let index_bits: usize = ideal_range.trailing_zeros() as usize; // m
         debug_assert!(index_bits <= HASH_BITS);
@@ -482,15 +492,16 @@ impl PoMapMeta {
             Self {
                 index_bits,
                 index_shift,
+                max_scan,
             },
-            ideal_range + MAX_SCAN,
+            ideal_range + max_scan,
         )
     }
 
     /// **Ideal slot** for this hash: top-m bits of the 64-bit hash.
     ///
     /// Because `ideal_range = 2^m` and we take exactly `m` bits, the result
-    /// is guaranteed `< ideal_range`. No masking or wrap needed; `MAX_SCAN`
+    /// is guaranteed `< ideal_range`. No masking or wrap needed; scan length
     /// is handled by the caller.
     #[inline(always)]
     const fn ideal_slot(&self, hash: u64) -> usize {
@@ -548,12 +559,15 @@ mod tests {
     #[test]
     fn test_resize_goes_up_by_power_of_two_and_never_down() {
         let mut map: PoMap<u64, u64> = PoMap::new();
-        assert_eq!(map.slots.capacity(), MIN_CAPACITY + MAX_SCAN);
+        let initial_expected_capacity =
+            MIN_CAPACITY.next_power_of_two() + max_scan_for_capacity(MIN_CAPACITY);
+        assert_eq!(map.slots.capacity(), initial_expected_capacity);
 
         // reserve more than the current capacity
         let new_capacity = map.reserve(100);
         assert_eq!(map.slots.capacity(), new_capacity);
-        assert_eq!(new_capacity, 128 + MAX_SCAN); // 128 is the next power of two after 100
+        let expected_new = 128 + max_scan_for_capacity(128); // 128 is the next power of two after 100
+        assert_eq!(new_capacity, expected_new);
 
         // reserve less than the current capacity
         let old_capacity = map.slots.capacity();
