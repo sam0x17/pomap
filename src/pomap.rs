@@ -1,4 +1,5 @@
 use core::{
+    cmp::Ordering,
     hash::{Hash, Hasher},
     marker::PhantomData,
     mem::MaybeUninit,
@@ -317,15 +318,46 @@ impl<K: Key, V: Value, H: Hasher + Default> PoMap<K, V, H> {
                     continue;
                 }
 
-                // Existing hash == new hash → maybe update in place.
-                if slot_hash == hash && unsafe { slot.key_ref() } == &key {
-                    verbose_log!("insert_with_hash: update in place at idx={}", idx);
-                    let old_value = core::mem::replace(unsafe { slot.value_mut() }, value);
-                    return Some(old_value);
+                // Existing hash == new hash → order by key for canonical layout.
+                if slot_hash == hash {
+                    let slot_key = unsafe { slot.key_ref() };
+                    match slot_key.cmp(&key) {
+                        Ordering::Equal => {
+                            verbose_log!("insert_with_hash: update in place at idx={}", idx);
+                            let old_value = core::mem::replace(unsafe { slot.value_mut() }, value);
+                            return Some(old_value);
+                        }
+                        Ordering::Less => {
+                            verbose_log!(
+                                "insert_with_hash: idx={} (hash match) slot_key<{:?} key<{:?}>, keep scanning",
+                                idx,
+                                slot_key,
+                                key
+                            );
+                            idx += 1;
+                            continue;
+                        }
+                        Ordering::Greater => {
+                            verbose_log!(
+                                "insert_with_hash: idx={} (hash match) slot_key>{:?} key<{:?}>, insert here",
+                                idx,
+                                slot_key,
+                                key
+                            );
+                            // fall through to shift
+                        }
+                    }
+                } else {
+                    // slot_hash > hash → fall through to shift
+                    verbose_log!(
+                        "insert_with_hash: idx={} slot_hash {} > hash {}, insert here",
+                        idx,
+                        slot_hash,
+                        hash
+                    );
                 }
 
-                // Here: slot_hash > hash  OR (== but different key).
-                // We need to insert before this slot; attempt in-window shift.
+                // Here: (hash, key) should be inserted before this slot.
                 // Search for a Vacant in (idx, scan_end).
                 let mut search = idx + 1;
                 while search < scan_end {
