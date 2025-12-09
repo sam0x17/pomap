@@ -8,7 +8,7 @@ use core::{
 use std::hash::DefaultHasher;
 
 /// Minimum capacity we will allow for PoMap
-const MIN_CAPACITY: usize = 16;
+const MIN_CAPACITY: usize = 4;
 
 /// Number of bits in the hashcode
 const HASH_BITS: usize = 64; // we use a 64-bit hashcode
@@ -36,7 +36,8 @@ struct Entry<K: Key, V: Value> {
 
 #[inline(always)]
 fn encode_hash(h: u64) -> u64 {
-    if h == VACANT_HASH { VACANT_HASH - 1 } else { h }
+    h.saturating_sub(1)
+    //f h == VACANT_HASH { VACANT_HASH - 1 } else { h }
 }
 
 impl<K: Key, V: Value> Entry<K, V> {
