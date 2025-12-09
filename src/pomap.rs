@@ -22,21 +22,6 @@ const fn max_scan_for_capacity(capacity: usize) -> usize {
     capacity.next_power_of_two().trailing_zeros() as usize
 }
 
-// Simple logging macro gated on the `verbose` feature.
-#[cfg(feature = "verbose")]
-macro_rules! verbose_log {
-    ($($t:tt)*) => {
-        println!($($t)*);
-    };
-}
-
-#[cfg(not(feature = "verbose"))]
-macro_rules! verbose_log {
-    ($($t:tt)*) => {
-        // no-op when verbose is disabled
-    };
-}
-
 pub trait Key: Hash + Eq + Clone + Ord {}
 impl<K: Hash + Eq + Clone + Ord> Key for K {}
 
@@ -206,27 +191,12 @@ impl<K: Key, V: Value, H: Hasher + Default> PoMap<K, V, H> {
         let ideal_slot = self.meta.ideal_slot(hash);
         let scan_end = ideal_slot + self.meta.max_scan;
 
-        verbose_log!();
-        verbose_log!(
-            "get_with_hash: hash={} ideal_slot={} scan_end={}",
-            hash,
-            ideal_slot,
-            scan_end
-        );
-
         // SAFETY: ideal_slot..scan_end is always in-bounds for the backing Vec.
         let slots_ptr = self.slots.as_ptr();
 
         for idx in ideal_slot..scan_end {
             let slot = unsafe { &*slots_ptr.add(idx) };
             let slot_hash = slot.hash;
-            let _vacant = slot_hash == VACANT_HASH;
-            verbose_log!(
-                "get_with_hash: idx={} slot_hash={} vacant={}",
-                idx,
-                slot_hash,
-                _vacant
-            );
 
             if slot_hash < hash {
                 continue;
@@ -234,24 +204,15 @@ impl<K: Key, V: Value, H: Hasher + Default> PoMap<K, V, H> {
 
             // we guarantee the slots are sorted by hash
             if slot_hash > hash {
-                verbose_log!(
-                    "get_with_hash: stop at idx={}, slot_hash {} > hash {}",
-                    idx,
-                    slot_hash,
-                    hash
-                );
                 return None;
             }
 
             // SAFETY: we guard with VACANT_HASH above.
             if unsafe { slot.key_ref() } == key {
                 // SAFETY: slot is occupied.
-                verbose_log!("get_with_hash: found at idx={}", idx);
                 return Some(unsafe { slot.value_ref() });
             }
-            verbose_log!("get_with_hash: hash match but key mismatch at idx={}", idx);
         }
-        verbose_log!("get_with_hash: not found in window");
         None
     }
 
@@ -282,13 +243,6 @@ impl<K: Key, V: Value, H: Hasher + Default> PoMap<K, V, H> {
         loop {
             let ideal_slot = self.meta.ideal_slot(hash);
             let scan_end = ideal_slot + self.meta.max_scan;
-            verbose_log!();
-            verbose_log!(
-                "insert_with_hash: hash={} ideal_slot={} scan_end={}",
-                hash,
-                ideal_slot,
-                scan_end
-            );
 
             // SAFETY: ideal_slot..scan_end is always in-bounds for the backing Vec.
             let slots_ptr = self.slots.as_mut_ptr();
@@ -297,16 +251,8 @@ impl<K: Key, V: Value, H: Hasher + Default> PoMap<K, V, H> {
             while idx < scan_end {
                 let slot = unsafe { &mut *slots_ptr.add(idx) };
                 let slot_hash = slot.hash;
-                let _vacant = slot_hash == VACANT_HASH;
-                verbose_log!(
-                    "insert_with_hash: idx={} slot_hash={} vacant={}",
-                    idx,
-                    slot_hash,
-                    _vacant
-                );
 
                 if slot_hash == VACANT_HASH {
-                    verbose_log!("insert_with_hash: inserting into vacant idx={}", idx);
                     slot.occupy(hash, key, value);
                     self.len += 1;
                     return None;
@@ -323,38 +269,19 @@ impl<K: Key, V: Value, H: Hasher + Default> PoMap<K, V, H> {
                     let slot_key = unsafe { slot.key_ref() };
                     match slot_key.cmp(&key) {
                         Ordering::Equal => {
-                            verbose_log!("insert_with_hash: update in place at idx={}", idx);
                             let old_value = core::mem::replace(unsafe { slot.value_mut() }, value);
                             return Some(old_value);
                         }
                         Ordering::Less => {
-                            verbose_log!(
-                                "insert_with_hash: idx={} (hash match) slot_key<{:?} key<{:?}>, keep scanning",
-                                idx,
-                                slot_key,
-                                key
-                            );
                             idx += 1;
                             continue;
                         }
                         Ordering::Greater => {
-                            verbose_log!(
-                                "insert_with_hash: idx={} (hash match) slot_key>{:?} key<{:?}>, insert here",
-                                idx,
-                                slot_key,
-                                key
-                            );
                             // fall through to shift
                         }
                     }
                 } else {
                     // slot_hash > hash → fall through to shift
-                    verbose_log!(
-                        "insert_with_hash: idx={} slot_hash {} > hash {}, insert here",
-                        idx,
-                        slot_hash,
-                        hash
-                    );
                 }
 
                 // Here: (hash, key) should be inserted before this slot.
@@ -364,19 +291,7 @@ impl<K: Key, V: Value, H: Hasher + Default> PoMap<K, V, H> {
                     let candidate = unsafe { &*slots_ptr.add(search) };
                     let cand_hash = candidate.hash;
                     let cand_vacant = cand_hash == VACANT_HASH;
-                    verbose_log!(
-                        "insert_with_hash: search idx={} slot_hash={} vacant={}",
-                        search,
-                        cand_hash,
-                        cand_vacant
-                    );
                     if cand_vacant {
-                        verbose_log!(
-                            "insert_with_hash: shift window idx={}..={} (len {})",
-                            idx,
-                            search,
-                            search - idx + 1
-                        );
                         // Rotate [idx..=search] right by 1 and drop new element at idx.
                         let len = search - idx + 1;
                         let slice = unsafe { slice::from_raw_parts_mut(slots_ptr.add(idx), len) };
@@ -388,11 +303,6 @@ impl<K: Key, V: Value, H: Hasher + Default> PoMap<K, V, H> {
                     search += 1;
                 }
 
-                verbose_log!(
-                    "insert_with_hash: no room in window [{}, {}), growing",
-                    ideal_slot,
-                    scan_end
-                );
                 // No room in this window; grow and retry.
                 break;
             }
