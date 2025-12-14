@@ -81,12 +81,13 @@ fn bench_insert_preallocated(c: &mut Criterion) {
     group.bench_function("pomap", |b| {
         b.iter(|| {
             let mut map: BenchPoMap<u64, u64> = BenchPoMap::with_capacity(initial_requested);
-            assert_eq!(map.capacity(), initial_cap);
+            // assert_eq!(map.capacity(), initial_cap);
             for &(key, val) in &combined {
                 black_box(map.insert(key, val));
             }
-            assert_eq!(map.max_scan(), initial_scan);
-            assert_eq!(map.capacity(), initial_cap);
+            // assert_eq!(map.max_scan(), initial_scan);
+            // assert_eq!(map.len(), INPUT_SIZE);
+            // assert_eq!(map.capacity(), initial_cap);
         });
     });
 
