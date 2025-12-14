@@ -332,6 +332,10 @@ impl<K: Key, V: Value, H: Hasher + Default> PoMap<K, V, H> {
         let current_capacity = self.slots.capacity();
         let (new_meta, new_vec_capacity) = PoMapMeta::new(requested_capacity);
         if new_vec_capacity <= current_capacity {
+            println!(
+                "PoMap::reserve requested={} resulting_capacity={}",
+                requested_capacity, current_capacity
+            );
             return current_capacity;
         }
 
@@ -367,6 +371,11 @@ impl<K: Key, V: Value, H: Hasher + Default> PoMap<K, V, H> {
 
         // apply the new meta
         self.meta = new_meta;
+
+        println!(
+            "PoMap::reserve requested={} resulting_capacity={}",
+            requested_capacity, new_vec_capacity
+        );
 
         new_vec_capacity
     }
