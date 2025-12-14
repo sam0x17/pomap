@@ -148,7 +148,7 @@ impl<K: Key, V: Value, H: Hasher + Default> PoMap<K, V, H> {
     #[inline]
     pub fn with_capacity(capacity: usize) -> Self {
         let (meta, vec_capacity) = PoMapMeta::new(capacity);
-        let slots = vec![Entry::vacant(); vec_capacity];
+        let slots = new_vec_fast(vec_capacity);
         Self {
             len: 0,
             meta,
@@ -336,7 +336,7 @@ impl<K: Key, V: Value, H: Hasher + Default> PoMap<K, V, H> {
         }
 
         // allocate new vec
-        let new_slots: Vec<Entry<K, V>> = vec![Entry::vacant(); new_vec_capacity];
+        let new_slots: Vec<Entry<K, V>> = new_vec_fast(new_vec_capacity);
 
         // re-insert all existing elements into the new vec in the same order, with spaces
         // added based on hash prefix / the new meta
@@ -450,6 +450,16 @@ impl PoMapMeta {
     const fn ideal_slot(&self, hash: u64) -> usize {
         (hash >> self.index_shift) as usize
     }
+}
+
+#[inline(always)]
+fn new_vec_fast<K: Key, V: Value>(capacity: usize) -> Vec<Entry<K, V>> {
+    let mut slots: Vec<Entry<K, V>> = Vec::with_capacity(capacity);
+    unsafe {
+        slots.set_len(capacity);
+        core::ptr::write_bytes(slots.as_mut_ptr(), 0xFF, capacity);
+    }
+    slots
 }
 
 #[cfg(test)]
