@@ -329,7 +329,7 @@ impl<K: Key, V: Value, H: Hasher + Default> PoMap<K, V, H> {
     #[cold]
     pub fn reserve(&mut self, requested_capacity: usize) -> usize {
         // generate new meta
-        let current_capacity = self.slots.capacity().saturating_sub(self.meta.max_scan);
+        let current_capacity = self.slots.capacity();
         let (new_meta, new_vec_capacity) = PoMapMeta::new(requested_capacity);
         if new_vec_capacity <= current_capacity {
             /*println!(
