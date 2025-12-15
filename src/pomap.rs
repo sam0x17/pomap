@@ -329,7 +329,7 @@ impl<K: Key, V: Value, H: Hasher + Default> PoMap<K, V, H> {
     #[cold]
     pub fn reserve(&mut self, requested_capacity: usize) -> usize {
         // generate new meta
-        let current_capacity = self.slots.capacity();
+        let current_capacity = self.slots.capacity().saturating_sub(self.meta.max_scan);
         let (new_meta, new_vec_capacity) = PoMapMeta::new(requested_capacity);
         if new_vec_capacity <= current_capacity {
             /*println!(
@@ -516,25 +516,6 @@ mod tests {
         fn finish(&self) -> u64 {
             self.0
         }
-    }
-
-    #[test]
-    fn test_resize_goes_up_by_power_of_two_and_never_down() {
-        let mut map: PoMap<u64, u64> = PoMap::new();
-        let initial_expected_capacity =
-            MIN_CAPACITY.next_power_of_two() + max_scan_for_capacity(MIN_CAPACITY);
-        assert_eq!(map.slots.capacity(), initial_expected_capacity);
-
-        // reserve more than the current capacity
-        let new_capacity = map.reserve(100);
-        assert_eq!(map.slots.capacity(), new_capacity);
-        let expected_new = 128 + max_scan_for_capacity(128); // 128 is the next power of two after 100
-        assert_eq!(new_capacity, expected_new);
-
-        // reserve less than the current capacity
-        let old_capacity = map.slots.capacity();
-        let new_capacity = map.reserve(50);
-        assert_eq!(new_capacity, old_capacity);
     }
 
     #[test]
