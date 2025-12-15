@@ -270,7 +270,16 @@ impl<K: Key, V: Value, H: Hasher + Default> PoMap<K, V, H> {
                     let slot_key = unsafe { slot.key_ref() };
                     match slot_key.cmp(&key) {
                         Ordering::Equal => {
-                            let old_value = core::mem::replace(unsafe { slot.value_mut() }, value);
+                            let old_value = if core::mem::needs_drop::<V>() {
+                                core::mem::replace(unsafe { slot.value_mut() }, value)
+                            } else {
+                                // For POD values, avoid drop glue by doing a raw read+write.
+                                unsafe {
+                                    let old = slot.value.assume_init_read();
+                                    slot.value.write(value);
+                                    old
+                                }
+                            };
                             return Some(old_value);
                         }
                         Ordering::Less => {
