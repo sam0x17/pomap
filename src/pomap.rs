@@ -13,7 +13,7 @@ const MIN_CAPACITY: usize = 4;
 /// Number of bits in the hashcode
 const HASH_BITS: usize = 64; // we use a 64-bit hashcode
 
-const GROWTH_FACTOR: usize = 2;
+const GROWTH_FACTOR: usize = 4;
 const VACANT_HASH: u64 = u64::MAX;
 
 #[inline(always)]
@@ -319,11 +319,16 @@ impl<K: Key, V: Value, H: Hasher + Default> PoMap<K, V, H> {
 
             // If we make it here, we either ran out of room in the scan window
             // or the table is saturated for this hash window. Grow and retry.
+            #[cfg(feature = "resize-logging")]
             let old_cap = self.slots.capacity();
+            #[cfg(feature = "resize-logging")]
             let load_factor = self.len as f64 / old_cap as f64;
-            self.reserve(self.slots.capacity() * GROWTH_FACTOR);
+            self.reserve((self.slots.capacity() - self.meta.max_scan) * GROWTH_FACTOR);
+            #[cfg(feature = "resize-logging")]
             let new_cap = self.slots.capacity();
+            #[cfg(feature = "resize-logging")]
             let new_load_factor = self.len as f64 / new_cap as f64;
+            #[cfg(feature = "resize-logging")]
             println!(
                 "PoMap resized from {} to {} (load factor {:.2}), {:.2} after",
                 old_cap, new_cap, load_factor, new_load_factor
