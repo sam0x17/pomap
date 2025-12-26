@@ -74,7 +74,7 @@ fn bench_insert_preallocated(c: &mut Criterion) {
         black_box(map.insert(key, val));
     }
     let initial_cap = map.capacity();
-    let initial_scan = map.max_scan();
+    let initial_scan = 16;
     let initial_requested = initial_cap - initial_scan;
     drop(map);
 

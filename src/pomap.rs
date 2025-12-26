@@ -7,20 +7,20 @@ use core::{
 };
 use std::hash::DefaultHasher;
 
-/// Minimum capacity we will allow for PoMap
+use wide::u8x16;
+
+/// Minimum capacity we will allow for PoMap (not including MAX_SCAN).
 const MIN_CAPACITY: usize = 4;
+
+/// Farthest we will scan from the ideal slot when looking for an entry
+const MAX_SCAN: usize = 16;
 
 /// Number of bits in the hashcode
 const HASH_BITS: usize = 64; // we use a 64-bit hashcode
 
 const GROWTH_FACTOR: usize = 4;
 const VACANT_HASH: u64 = u64::MAX;
-
-#[inline(always)]
-const fn max_scan_for_capacity(capacity: usize) -> usize {
-    // log2 rounded down; capacity is always >= MIN_CAPACITY (non-zero).
-    capacity.next_power_of_two().trailing_zeros() as usize
-}
+const VACANT_CTRL: u8 = 0xFF;
 
 pub trait Key: Hash + Eq + Clone + Ord {}
 impl<K: Hash + Eq + Clone + Ord> Key for K {}
@@ -38,6 +38,17 @@ struct Entry<K: Key, V: Value> {
 fn encode_hash(h: u64) -> u64 {
     h.saturating_sub(1)
     //f h == VACANT_HASH { VACANT_HASH - 1 } else { h }
+}
+
+macro_rules! for_each_match_lane {
+    ($mask:expr, |$lane:ident| $body:block) => {{
+        let mut __bits: u32 = (($mask).to_bitmask() & 0xFFFF) as u32;
+        while __bits != 0 {
+            let $lane: usize = __bits.trailing_zeros() as usize;
+            __bits &= __bits - 1;
+            $body
+        }
+    }};
 }
 
 impl<K: Key, V: Value> Entry<K, V> {
@@ -134,6 +145,7 @@ impl<K: Key + core::fmt::Debug, V: Value + core::fmt::Debug> core::fmt::Debug fo
 pub struct PoMap<K: Key, V: Value, H: Hasher + Default = DefaultHasher> {
     len: usize,
     meta: PoMapMeta,
+    ctrl: Vec<u8>,
     slots: Vec<Entry<K, V>>,
     _phantom: PhantomData<H>,
 }
@@ -149,11 +161,13 @@ impl<K: Key, V: Value, H: Hasher + Default> PoMap<K, V, H> {
     pub fn with_capacity(capacity: usize) -> Self {
         let (meta, vec_capacity) = PoMapMeta::new(capacity);
         let slots = new_vec_fast(vec_capacity);
+        let ctrl = new_ctrl_fast(vec_capacity);
         Self {
             len: 0,
             meta,
             slots,
             _phantom: PhantomData,
+            ctrl,
         }
     }
 
@@ -166,11 +180,6 @@ impl<K: Key, V: Value, H: Hasher + Default> PoMap<K, V, H> {
     #[inline(always)]
     pub const fn capacity(&self) -> usize {
         self.slots.capacity()
-    }
-
-    #[inline(always)]
-    pub const fn max_scan(&self) -> usize {
-        self.meta.max_scan
     }
 
     /// Current number of occupied entries.
@@ -190,30 +199,28 @@ impl<K: Key, V: Value, H: Hasher + Default> PoMap<K, V, H> {
     #[inline]
     pub fn get_with_hash(&self, hash: u64, key: &K) -> Option<&V> {
         let ideal_slot = self.meta.ideal_slot(hash);
-        let scan_end = ideal_slot + self.meta.max_scan;
 
         // SAFETY: ideal_slot..scan_end is always in-bounds for the backing Vec.
         let slots_ptr = self.slots.as_ptr();
 
-        for idx in ideal_slot..scan_end {
+        let ctrl_ptr = self.ctrl.as_ptr();
+        let ctrl_window = unsafe { load_u8x16_unaligned(ctrl_ptr.add(ideal_slot)) };
+        let target_ctrl_byte = ctrl_for_hash(&self.meta, hash);
+        let target = u8x16::splat(target_ctrl_byte);
+        let eq_mask = ctrl_window.simd_eq(target);
+
+        for_each_match_lane!(eq_mask, |lane| {
+            // lane is 0..15 in ascending order
+            let idx = ideal_slot + lane;
             let slot = unsafe { &*slots_ptr.add(idx) };
-            let slot_hash = slot.hash;
 
-            if slot_hash < hash {
-                continue;
-            }
-
-            // we guarantee the slots are sorted by hash
-            if slot_hash > hash {
-                return None;
-            }
-
-            // SAFETY: we guard with VACANT_HASH above.
+            // SAFETY: cannot be vacant if ctrl matched
             if unsafe { slot.key_ref() } == key {
                 // SAFETY: slot is occupied.
                 return Some(unsafe { slot.value_ref() });
             }
-        }
+        });
+
         None
     }
 
@@ -243,7 +250,7 @@ impl<K: Key, V: Value, H: Hasher + Default> PoMap<K, V, H> {
     pub fn insert_with_hash(&mut self, hash: u64, key: K, value: V) -> Option<V> {
         loop {
             let ideal_slot = self.meta.ideal_slot(hash);
-            let scan_end = ideal_slot + self.meta.max_scan;
+            let scan_end = ideal_slot + MAX_SCAN;
 
             // SAFETY: ideal_slot..scan_end is always in-bounds for the backing Vec.
             let slots_ptr = self.slots.as_mut_ptr();
@@ -255,6 +262,10 @@ impl<K: Key, V: Value, H: Hasher + Default> PoMap<K, V, H> {
 
                 if slot_hash == VACANT_HASH {
                     slot.occupy(hash, key, value);
+                    let ctrl_byte = unsafe { self.ctrl.as_mut_ptr().add(idx) };
+                    unsafe {
+                        ctrl_byte.write(ctrl_for_hash(&self.meta, hash));
+                    }
                     self.len += 1;
                     return None;
                 }
@@ -280,6 +291,10 @@ impl<K: Key, V: Value, H: Hasher + Default> PoMap<K, V, H> {
                                     old
                                 }
                             };
+                            let ctrl_byte = unsafe { self.ctrl.as_mut_ptr().add(idx) };
+                            unsafe {
+                                ctrl_byte.write(ctrl_for_hash(&self.meta, hash));
+                            }
                             return Some(old_value);
                         }
                         Ordering::Less => {
@@ -307,6 +322,11 @@ impl<K: Key, V: Value, H: Hasher + Default> PoMap<K, V, H> {
                         let slice = unsafe { slice::from_raw_parts_mut(slots_ptr.add(idx), len) };
                         slice.rotate_right(1);
                         slice[0] = Entry::occupied(hash, key, value);
+                        let ctrl_slice = unsafe {
+                            slice::from_raw_parts_mut(self.ctrl.as_mut_ptr().add(idx), len)
+                        };
+                        ctrl_slice.rotate_right(1);
+                        ctrl_slice[0] = ctrl_for_hash(&self.meta, hash);
                         self.len += 1;
                         return None;
                     }
@@ -323,7 +343,7 @@ impl<K: Key, V: Value, H: Hasher + Default> PoMap<K, V, H> {
             let old_cap = self.slots.capacity();
             #[cfg(feature = "resize-logging")]
             let load_factor = self.len as f64 / old_cap as f64;
-            self.reserve((self.slots.capacity() - self.meta.max_scan) * GROWTH_FACTOR);
+            self.reserve((self.slots.capacity() - MAX_SCAN) * GROWTH_FACTOR);
             #[cfg(feature = "resize-logging")]
             let new_cap = self.slots.capacity();
             #[cfg(feature = "resize-logging")]
@@ -355,10 +375,13 @@ impl<K: Key, V: Value, H: Hasher + Default> PoMap<K, V, H> {
 
         // allocate new vec
         let new_slots: Vec<Entry<K, V>> = new_vec_fast(new_vec_capacity);
+        let mut new_ctrl: Vec<u8> = new_ctrl_fast(new_vec_capacity);
 
         // re-insert all existing elements into the new vec in the same order, with spaces
         // added based on hash prefix / the new meta
         let old_slots = core::mem::replace(&mut self.slots, new_slots);
+        let slots_ptr = self.slots.as_mut_ptr();
+        let ctrl_ptr = new_ctrl.as_mut_ptr();
         let mut cursor = 0;
         for slot in old_slots.into_iter() {
             if slot.is_vacant() {
@@ -373,11 +396,14 @@ impl<K: Key, V: Value, H: Hasher + Default> PoMap<K, V, H> {
             // advance cursor to at least the ideal slot
             cursor = ideal_slot.max(cursor);
 
-            // insert the slot, we should be at or past the ideal slot now. Because the
-            // previous layout was already valid and is strictly smaller than the new one, this
-            // can never cause us to exceed the scan limit past the ideal slot because we are
-            // always gaining more room.
-            self.slots[cursor] = slot;
+            unsafe {
+                // insert the slot, we should be at or past the ideal slot now. Because the
+                // previous layout was already valid and is strictly smaller than the new one, this
+                // can never cause us to exceed the scan limit past the ideal slot because we are
+                // always gaining more room.
+                slots_ptr.add(cursor).write(slot);
+                ctrl_ptr.add(cursor).write(ctrl_for_hash(&new_meta, hash));
+            }
 
             // advance cursor
             cursor += 1;
@@ -385,6 +411,7 @@ impl<K: Key, V: Value, H: Hasher + Default> PoMap<K, V, H> {
 
         // apply the new meta
         self.meta = new_meta;
+        self.ctrl = new_ctrl;
 
         /*println!(
             "PoMap::reserve requested={} resulting_capacity={}",
@@ -419,9 +446,6 @@ struct PoMapMeta {
     /// Shift to extract the top-m bits from the 64-bit hash:
     ///   ideal_slot = (hash >> index_shift)
     index_shift: usize,
-
-    /// Maximum scan distance for this capacity.
-    max_scan: usize,
 }
 
 impl PoMapMeta {
@@ -448,7 +472,6 @@ impl PoMapMeta {
             MIN_CAPACITY
         };
         let ideal_range = base.next_power_of_two();
-        let max_scan = max_scan_for_capacity(ideal_range);
 
         let index_bits: usize = ideal_range.trailing_zeros() as usize; // m
         debug_assert!(index_bits <= HASH_BITS);
@@ -458,9 +481,8 @@ impl PoMapMeta {
             Self {
                 index_bits,
                 index_shift,
-                max_scan,
             },
-            ideal_range + max_scan,
+            ideal_range + MAX_SCAN,
         )
     }
 
@@ -483,6 +505,33 @@ fn new_vec_fast<K: Key, V: Value>(capacity: usize) -> Vec<Entry<K, V>> {
         core::ptr::write_bytes(slots.as_mut_ptr(), 0xFF, capacity);
     }
     slots
+}
+
+#[inline(always)]
+fn new_ctrl_fast(capacity: usize) -> Vec<u8> {
+    let mut ctrl: Vec<u8> = Vec::with_capacity(capacity);
+    unsafe {
+        ctrl.set_len(capacity);
+        core::ptr::write_bytes(ctrl.as_mut_ptr(), VACANT_CTRL, capacity);
+    }
+    ctrl
+}
+
+#[inline(always)]
+const fn ctrl_for_hash(meta: &PoMapMeta, hash: u64) -> u8 {
+    debug_assert!(meta.index_shift >= 4);
+
+    let prefix4 = (meta.ideal_slot(hash) as u8) & 0x0F;
+    let suffix4 = ((hash >> (meta.index_shift - 4)) as u8) & 0x0F;
+
+    let c = (prefix4 << 4) | suffix4;
+
+    if c == VACANT_CTRL { 0xFE } else { c }
+}
+
+#[inline(always)]
+const unsafe fn load_u8x16_unaligned(p: *const u8) -> u8x16 {
+    unsafe { core::ptr::read_unaligned(p as *const u8x16) }
 }
 
 #[cfg(test)]
