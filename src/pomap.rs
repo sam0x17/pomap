@@ -3,9 +3,13 @@ use core::{
     hash::{Hash, Hasher},
     marker::PhantomData,
     mem::MaybeUninit,
+    ptr::{self, NonNull},
     slice,
 };
-use std::hash::DefaultHasher;
+use std::{
+    alloc::{Layout, alloc, dealloc, handle_alloc_error},
+    hash::DefaultHasher,
+};
 
 /// Minimum capacity we will allow for PoMap
 const MIN_CAPACITY: usize = 4;
@@ -29,7 +33,6 @@ pub trait Value: Clone {}
 impl<V: Clone> Value for V {}
 
 struct Entry<K: Key, V: Value> {
-    hash: u64,
     key: MaybeUninit<K>,
     value: MaybeUninit<V>,
 }
@@ -42,99 +45,137 @@ fn encode_hash(h: u64) -> u64 {
 
 impl<K: Key, V: Value> Entry<K, V> {
     #[inline(always)]
-    fn vacant() -> Self {
-        Self {
-            hash: VACANT_HASH,
-            key: MaybeUninit::uninit(),
-            value: MaybeUninit::uninit(),
-        }
-    }
-
-    #[inline(always)]
-    fn occupied(hash: u64, key: K, value: V) -> Self {
-        debug_assert!(hash != VACANT_HASH);
-        Self {
-            hash,
-            key: MaybeUninit::new(key),
-            value: MaybeUninit::new(value),
-        }
-    }
-
-    #[inline(always)]
-    fn is_vacant(&self) -> bool {
-        self.hash == VACANT_HASH
-    }
-
-    #[inline(always)]
-    fn occupy(&mut self, hash: u64, key: K, value: V) {
-        debug_assert!(hash != VACANT_HASH);
-        debug_assert!(self.is_vacant());
-        self.hash = hash;
+    fn occupy(&mut self, key: K, value: V) {
         self.key.write(key);
         self.value.write(value);
     }
 
     #[inline(always)]
     unsafe fn key_ref(&self) -> &K {
-        debug_assert!(!self.is_vacant());
         unsafe { self.key.assume_init_ref() }
     }
 
     #[inline(always)]
     unsafe fn value_ref(&self) -> &V {
-        debug_assert!(!self.is_vacant());
         unsafe { self.value.assume_init_ref() }
     }
 
     #[inline(always)]
     unsafe fn value_mut(&mut self) -> &mut V {
-        debug_assert!(!self.is_vacant());
         unsafe { self.value.assume_init_mut() }
     }
-}
 
-impl<K: Key, V: Value> Clone for Entry<K, V> {
-    fn clone(&self) -> Self {
-        if self.is_vacant() {
-            Self::vacant()
-        } else {
-            Self::occupied(self.hash, unsafe { self.key_ref().clone() }, unsafe {
-                self.value_ref().clone()
-            })
+    #[inline(always)]
+    unsafe fn drop_contents(&mut self) {
+        unsafe {
+            self.key.assume_init_drop();
+            self.value.assume_init_drop();
         }
     }
 }
 
-impl<K: Key, V: Value> Drop for Entry<K, V> {
+struct Slots<K: Key, V: Value> {
+    ptr: NonNull<u8>,
+    hashes: *mut u64,
+    entries: *mut Entry<K, V>,
+    capacity: usize,
+    layout: Layout,
+    _marker: PhantomData<Entry<K, V>>,
+}
+
+impl<K: Key, V: Value> Slots<K, V> {
+    #[inline(always)]
+    fn new(capacity: usize) -> Self {
+        let hashes_layout =
+            Layout::array::<u64>(capacity).expect("PoMap hash layout overflow on creation");
+        let entries_layout = Layout::array::<Entry<K, V>>(capacity)
+            .expect("PoMap entry layout overflow on creation");
+        let (layout, entries_offset) = hashes_layout
+            .extend(entries_layout)
+            .expect("PoMap combined layout overflow on creation");
+        let layout = layout.pad_to_align();
+
+        let ptr = unsafe { alloc(layout) };
+        let ptr = match NonNull::new(ptr) {
+            Some(p) => p,
+            None => handle_alloc_error(layout),
+        };
+
+        let hashes = ptr.as_ptr() as *mut u64;
+        let entries = unsafe { ptr.as_ptr().add(entries_offset) as *mut Entry<K, V> };
+
+        unsafe {
+            // Mark all hashes as vacant.
+            ptr::write_bytes(hashes, 0xFF, capacity);
+            // Initialize entry backing memory so rotations can safely move them around.
+            ptr::write_bytes(entries, 0x00, capacity);
+        }
+
+        Self {
+            ptr,
+            hashes,
+            entries,
+            capacity,
+            layout,
+            _marker: PhantomData,
+        }
+    }
+
+    #[inline(always)]
+    const fn capacity(&self) -> usize {
+        self.capacity
+    }
+
+    #[inline(always)]
+    fn hashes_ptr(&self) -> *mut u64 {
+        self.hashes
+    }
+
+    #[inline(always)]
+    fn entries_ptr(&self) -> *mut Entry<K, V> {
+        self.entries
+    }
+
+    #[inline(always)]
+    unsafe fn set_hash(&mut self, idx: usize, hash: u64) {
+        debug_assert!(idx < self.capacity);
+        unsafe { *self.hashes.add(idx) = hash };
+    }
+
+    #[inline(always)]
+    unsafe fn clear_slot(&mut self, idx: usize) {
+        unsafe { self.set_hash(idx, VACANT_HASH) };
+    }
+
+    #[inline(always)]
+    unsafe fn write_slot(&mut self, idx: usize, hash: u64, key: K, value: V) {
+        unsafe {
+            self.set_hash(idx, hash);
+            let entry = &mut *self.entries.add(idx);
+            entry.occupy(key, value);
+        }
+    }
+}
+
+impl<K: Key, V: Value> Drop for Slots<K, V> {
     fn drop(&mut self) {
-        if !self.is_vacant() {
-            unsafe {
-                self.key.assume_init_drop();
-                self.value.assume_init_drop();
+        unsafe {
+            let hashes = slice::from_raw_parts(self.hashes, self.capacity);
+            for (idx, &hash) in hashes.iter().enumerate() {
+                if hash != VACANT_HASH {
+                    let entry = &mut *self.entries.add(idx);
+                    entry.drop_contents();
+                }
             }
+            dealloc(self.ptr.as_ptr(), self.layout);
         }
     }
 }
 
-impl<K: Key + core::fmt::Debug, V: Value + core::fmt::Debug> core::fmt::Debug for Entry<K, V> {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        if self.is_vacant() {
-            f.write_str("Vacant")
-        } else {
-            f.debug_struct("Occupied")
-                .field("hash", &self.hash)
-                .field("key", unsafe { self.key_ref() })
-                .field("value", unsafe { self.value_ref() })
-                .finish()
-        }
-    }
-}
-
-#[derive(Clone)]
 pub struct PoMap<K: Key, V: Value, H: Hasher + Default = DefaultHasher> {
     len: usize,
     meta: PoMapMeta,
-    slots: Vec<Entry<K, V>>,
+    slots: Slots<K, V>,
     _phantom: PhantomData<H>,
 }
 
@@ -148,7 +189,7 @@ impl<K: Key, V: Value, H: Hasher + Default> PoMap<K, V, H> {
     #[inline]
     pub fn with_capacity(capacity: usize) -> Self {
         let (meta, vec_capacity) = PoMapMeta::new(capacity);
-        let slots = new_vec_fast(vec_capacity);
+        let slots = Slots::new(vec_capacity);
         Self {
             len: 0,
             meta,
@@ -192,12 +233,12 @@ impl<K: Key, V: Value, H: Hasher + Default> PoMap<K, V, H> {
         let ideal_slot = self.meta.ideal_slot(hash);
         let scan_end = ideal_slot + self.meta.max_scan;
 
-        // SAFETY: ideal_slot..scan_end is always in-bounds for the backing Vec.
-        let slots_ptr = self.slots.as_ptr();
+        // SAFETY: ideal_slot..scan_end is always in-bounds for the backing allocation.
+        let hashes_ptr = self.slots.hashes_ptr();
+        let entries_ptr = self.slots.entries_ptr();
 
         for idx in ideal_slot..scan_end {
-            let slot = unsafe { &*slots_ptr.add(idx) };
-            let slot_hash = slot.hash;
+            let slot_hash = unsafe { *hashes_ptr.add(idx) };
 
             if slot_hash < hash {
                 continue;
@@ -209,9 +250,10 @@ impl<K: Key, V: Value, H: Hasher + Default> PoMap<K, V, H> {
             }
 
             // SAFETY: we guard with VACANT_HASH above.
-            if unsafe { slot.key_ref() } == key {
+            let slot_entry = unsafe { &*entries_ptr.add(idx) };
+            if unsafe { slot_entry.key_ref() } == key {
                 // SAFETY: slot is occupied.
-                return Some(unsafe { slot.value_ref() });
+                return Some(unsafe { slot_entry.value_ref() });
             }
         }
         None
@@ -245,16 +287,19 @@ impl<K: Key, V: Value, H: Hasher + Default> PoMap<K, V, H> {
             let ideal_slot = self.meta.ideal_slot(hash);
             let scan_end = ideal_slot + self.meta.max_scan;
 
-            // SAFETY: ideal_slot..scan_end is always in-bounds for the backing Vec.
-            let slots_ptr = self.slots.as_mut_ptr();
+            // SAFETY: ideal_slot..scan_end is always in-bounds for the backing allocation.
+            let hashes_ptr = self.slots.hashes_ptr();
+            let entries_ptr = self.slots.entries_ptr();
 
             let mut idx = ideal_slot;
             while idx < scan_end {
-                let slot = unsafe { &mut *slots_ptr.add(idx) };
-                let slot_hash = slot.hash;
+                let slot_hash = unsafe { *hashes_ptr.add(idx) };
 
                 if slot_hash == VACANT_HASH {
-                    slot.occupy(hash, key, value);
+                    unsafe {
+                        *hashes_ptr.add(idx) = hash;
+                        (*entries_ptr.add(idx)).occupy(key, value);
+                    }
                     self.len += 1;
                     return None;
                 }
@@ -267,6 +312,7 @@ impl<K: Key, V: Value, H: Hasher + Default> PoMap<K, V, H> {
 
                 // Existing hash == new hash → order by key for canonical layout.
                 if slot_hash == hash {
+                    let slot = unsafe { &mut *entries_ptr.add(idx) };
                     let slot_key = unsafe { slot.key_ref() };
                     match slot_key.cmp(&key) {
                         Ordering::Equal => {
@@ -298,15 +344,18 @@ impl<K: Key, V: Value, H: Hasher + Default> PoMap<K, V, H> {
                 // Search for a Vacant in (idx, scan_end).
                 let mut search = idx + 1;
                 while search < scan_end {
-                    let candidate = unsafe { &*slots_ptr.add(search) };
-                    let cand_hash = candidate.hash;
-                    let cand_vacant = cand_hash == VACANT_HASH;
-                    if cand_vacant {
+                    let cand_hash = unsafe { *hashes_ptr.add(search) };
+                    if cand_hash == VACANT_HASH {
                         // Rotate [idx..=search] right by 1 and drop new element at idx.
                         let len = search - idx + 1;
-                        let slice = unsafe { slice::from_raw_parts_mut(slots_ptr.add(idx), len) };
-                        slice.rotate_right(1);
-                        slice[0] = Entry::occupied(hash, key, value);
+                        let hash_slice =
+                            unsafe { slice::from_raw_parts_mut(hashes_ptr.add(idx), len) };
+                        let entry_slice =
+                            unsafe { slice::from_raw_parts_mut(entries_ptr.add(idx), len) };
+                        hash_slice.rotate_right(1);
+                        entry_slice.rotate_right(1);
+                        hash_slice[0] = hash;
+                        entry_slice[0].occupy(key, value);
                         self.len += 1;
                         return None;
                     }
@@ -353,31 +402,36 @@ impl<K: Key, V: Value, H: Hasher + Default> PoMap<K, V, H> {
             return current_capacity;
         }
 
-        // allocate new vec
-        let new_slots: Vec<Entry<K, V>> = new_vec_fast(new_vec_capacity);
+        // allocate new slots and keep the old ones for re-distribution.
+        let mut old_slots = core::mem::replace(&mut self.slots, Slots::new(new_vec_capacity));
 
         // re-insert all existing elements into the new vec in the same order, with spaces
         // added based on hash prefix / the new meta
-        let old_slots = core::mem::replace(&mut self.slots, new_slots);
         let mut cursor = 0;
-        for slot in old_slots.into_iter() {
-            if slot.is_vacant() {
+        let hashes_ptr = old_slots.hashes_ptr();
+        let entries_ptr = old_slots.entries_ptr();
+        for idx in 0..current_capacity {
+            let hash = unsafe { *hashes_ptr.add(idx) };
+            if hash == VACANT_HASH {
                 cursor += 1;
                 continue;
             }
-            let hash = slot.hash;
 
-            // calculate ideal slot in the new layout
             let ideal_slot = new_meta.ideal_slot(hash);
-
-            // advance cursor to at least the ideal slot
             cursor = ideal_slot.max(cursor);
+
+            let entry = unsafe { &mut *entries_ptr.add(idx) };
+            let key = unsafe { entry.key.assume_init_read() };
+            let value = unsafe { entry.value.assume_init_read() };
+
+            // Prevent the old slot from dropping the moved value on destruction.
+            unsafe { old_slots.clear_slot(idx) };
 
             // insert the slot, we should be at or past the ideal slot now. Because the
             // previous layout was already valid and is strictly smaller than the new one, this
             // can never cause us to exceed the scan limit past the ideal slot because we are
             // always gaining more room.
-            self.slots[cursor] = slot;
+            unsafe { self.slots.write_slot(cursor, hash, key, value) };
 
             // advance cursor
             cursor += 1;
@@ -395,6 +449,34 @@ impl<K: Key, V: Value, H: Hasher + Default> PoMap<K, V, H> {
     }
 }
 
+impl<K: Key, V: Value, H: Hasher + Default> Clone for PoMap<K, V, H> {
+    fn clone(&self) -> Self {
+        let capacity = self.capacity();
+        let mut slots = Slots::new(capacity);
+
+        let hashes_ptr = self.slots.hashes_ptr();
+        let entries_ptr = self.slots.entries_ptr();
+
+        for idx in 0..capacity {
+            let hash = unsafe { *hashes_ptr.add(idx) };
+            if hash == VACANT_HASH {
+                continue;
+            }
+            let entry = unsafe { &*entries_ptr.add(idx) };
+            let key = unsafe { entry.key_ref().clone() };
+            let value = unsafe { entry.value_ref().clone() };
+            unsafe { slots.write_slot(idx, hash, key, value) };
+        }
+
+        Self {
+            len: self.len,
+            meta: self.meta,
+            slots,
+            _phantom: PhantomData,
+        }
+    }
+}
+
 impl Default for PoMap<(), ()> {
     #[inline(always)]
     fn default() -> Self {
@@ -408,9 +490,9 @@ impl Default for PoMap<(), ()> {
 ///
 ///   ideal_slot(hash) ∈ [0, ideal_range)
 ///   and you can safely scan `[ideal_slot, ideal_slot + max_scan)`
-///   inside a Vec of length `capacity = ideal_range + max_scan`.
+///   inside backing storage of length `capacity = ideal_range + max_scan`.
 ///
-/// The caller is responsible for using the returned `capacity` to size the backing Vec.
+/// The caller is responsible for using the returned `capacity` to size the backing allocation.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 struct PoMapMeta {
     /// Number of index bits m where `ideal_range = 1 << m`.
@@ -439,7 +521,7 @@ impl PoMapMeta {
     /// There are no panics; we just round up.
     ///
     /// Returns `(meta, capacity)`, where `capacity` is what you should use
-    /// for the backing `Vec<Entry<..>>`.
+    /// for the backing allocation.
     #[inline(always)]
     const fn new(requested: usize) -> (Self, usize) {
         let base = if requested > MIN_CAPACITY {
@@ -473,16 +555,6 @@ impl PoMapMeta {
     const fn ideal_slot(&self, hash: u64) -> usize {
         (hash >> self.index_shift) as usize
     }
-}
-
-#[inline(always)]
-fn new_vec_fast<K: Key, V: Value>(capacity: usize) -> Vec<Entry<K, V>> {
-    let mut slots: Vec<Entry<K, V>> = Vec::with_capacity(capacity);
-    unsafe {
-        slots.set_len(capacity);
-        core::ptr::write_bytes(slots.as_mut_ptr(), 0xFF, capacity);
-    }
-    slots
 }
 
 #[cfg(test)]
@@ -572,26 +644,30 @@ mod tests {
         assert_eq!(map.insert(higher, 1), None);
         assert_eq!(map.insert(lower, 2), None);
 
-        let first = &map.slots[slot];
-        let second = &map.slots[slot + 1];
+        let hashes_ptr = map.slots.hashes_ptr();
+        let entries_ptr = map.slots.entries_ptr();
+        let first_hash = unsafe { *hashes_ptr.add(slot) };
+        let second_hash = unsafe { *hashes_ptr.add(slot + 1) };
+        let first_entry = unsafe { &*entries_ptr.add(slot) };
+        let second_entry = unsafe { &*entries_ptr.add(slot + 1) };
 
-        assert!(!first.is_vacant());
-        assert!(!second.is_vacant());
+        assert_ne!(first_hash, VACANT_HASH);
+        assert_ne!(second_hash, VACANT_HASH);
 
         // Check hash order with encoded hashes
         let lower_h = encode_hash(lower);
         let higher_h = encode_hash(higher);
 
-        assert_eq!(first.hash, lower_h);
-        assert_eq!(second.hash, higher_h);
+        assert_eq!(first_hash, lower_h);
+        assert_eq!(second_hash, higher_h);
 
         // And make sure key/value order matches expectation
         assert_eq!(
-            unsafe { (*first.key_ref(), *first.value_ref()) },
+            unsafe { (*first_entry.key_ref(), *first_entry.value_ref(),) },
             (lower, 2),
         );
         assert_eq!(
-            unsafe { (*second.key_ref(), *second.value_ref()) },
+            unsafe { (*second_entry.key_ref(), *second_entry.value_ref(),) },
             (higher, 1),
         );
 
