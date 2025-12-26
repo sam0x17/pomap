@@ -3,21 +3,26 @@ use std::{collections::HashMap, hash::BuildHasherDefault, hint::black_box};
 use ahash::AHasher;
 use criterion::{Criterion, criterion_group, criterion_main};
 use pomap::pomap::PoMap;
+use rand::distr::{Distribution, StandardUniform};
 use rand::{Rng, SeedableRng, rngs::StdRng};
+
+/// Key/value types used throughout the benchmarks.
+type BenchKey = u64;
+type BenchValue = u64;
 
 /// Hasher configuration shared by PoMap and std::collections benchmarks.
 type BenchHasher = AHasher;
 type BenchHasherBuilder = BuildHasherDefault<BenchHasher>;
-type BenchPoMap<K, V> = PoMap<K, V, BenchHasher>;
-type BenchHashMap<K, V> = HashMap<K, V, BenchHasherBuilder>;
+type BenchPoMap = PoMap<BenchKey, BenchValue, BenchHasher>;
+type BenchHashMap = HashMap<BenchKey, BenchValue, BenchHasherBuilder>;
 
 #[inline]
-fn new_std_hashmap<K, V>() -> BenchHashMap<K, V> {
+fn new_std_hashmap() -> BenchHashMap {
     BenchHashMap::with_hasher(BenchHasherBuilder::default())
 }
 
 #[inline]
-fn std_hashmap_with_capacity<K, V>(capacity: usize) -> BenchHashMap<K, V> {
+fn std_hashmap_with_capacity(capacity: usize) -> BenchHashMap {
     BenchHashMap::with_capacity_and_hasher(capacity, BenchHasherBuilder::default())
 }
 
@@ -25,23 +30,26 @@ const INPUT_SIZE: usize = 1_000_000_usize.next_power_of_two();
 const HOT_SET: usize = (INPUT_SIZE.ilog2() as usize).next_power_of_two()
     * (INPUT_SIZE.ilog2() as usize).next_power_of_two();
 
-fn random_data(seed: u64, count: usize) -> Vec<u64> {
+fn random_data<T>(seed: u64, count: usize) -> Vec<T>
+where
+    StandardUniform: Distribution<T>,
+{
     let mut rng = StdRng::seed_from_u64(seed);
     (0..count).map(|_| rng.random()).collect()
 }
 
 fn bench_insert_allocate(c: &mut Criterion) {
-    let keys = random_data(0xA11CE, INPUT_SIZE);
-    let values = random_data(0xFACE, INPUT_SIZE);
+    let keys: Vec<BenchKey> = random_data(0xA11CE, INPUT_SIZE);
+    let values: Vec<BenchValue> = random_data(0xFACE, INPUT_SIZE);
     let combined = keys
         .into_iter()
         .zip(values.into_iter())
-        .collect::<Vec<(u64, u64)>>();
+        .collect::<Vec<(BenchKey, BenchValue)>>();
     let mut group = c.comparison_benchmark_group("insert_allocate");
 
     group.bench_function("pomap", |b| {
         b.iter(|| {
-            let mut map: BenchPoMap<u64, u64> = BenchPoMap::new();
+            let mut map: BenchPoMap = BenchPoMap::new();
             for &(key, val) in &combined {
                 black_box(map.insert(key, val));
             }
@@ -50,7 +58,7 @@ fn bench_insert_allocate(c: &mut Criterion) {
 
     group.bench_function("std_hashmap", |b| {
         b.iter(|| {
-            let mut map: BenchHashMap<u64, u64> = new_std_hashmap();
+            let mut map: BenchHashMap = new_std_hashmap();
             for &(key, val) in &combined {
                 black_box(map.insert(key, val));
             }
@@ -61,15 +69,15 @@ fn bench_insert_allocate(c: &mut Criterion) {
 }
 
 fn bench_insert_preallocated(c: &mut Criterion) {
-    let keys = random_data(0xBEEF, INPUT_SIZE);
-    let values = random_data(0xF00D, INPUT_SIZE);
+    let keys: Vec<BenchKey> = random_data(0xBEEF, INPUT_SIZE);
+    let values: Vec<BenchValue> = random_data(0xF00D, INPUT_SIZE);
     let combined = keys
         .into_iter()
         .zip(values.into_iter())
-        .collect::<Vec<(u64, u64)>>();
+        .collect::<Vec<(BenchKey, BenchValue)>>();
     let mut group = c.comparison_benchmark_group("insert_preallocated");
 
-    let mut map: BenchPoMap<u64, u64> = BenchPoMap::new();
+    let mut map: BenchPoMap = BenchPoMap::new();
     for &(key, val) in &combined {
         black_box(map.insert(key, val));
     }
@@ -80,7 +88,7 @@ fn bench_insert_preallocated(c: &mut Criterion) {
 
     group.bench_function("pomap", |b| {
         b.iter(|| {
-            let mut map: BenchPoMap<u64, u64> = BenchPoMap::with_capacity(initial_requested);
+            let mut map: BenchPoMap = BenchPoMap::with_capacity(initial_requested);
             // assert_eq!(map.capacity(), initial_cap);
             for &(key, val) in &combined {
                 black_box(map.insert(key, val));
@@ -93,7 +101,7 @@ fn bench_insert_preallocated(c: &mut Criterion) {
 
     group.bench_function("std_hashmap", |b| {
         b.iter(|| {
-            let mut map: BenchHashMap<u64, u64> = std_hashmap_with_capacity(INPUT_SIZE);
+            let mut map: BenchHashMap = std_hashmap_with_capacity(INPUT_SIZE);
             for &(key, val) in &combined {
                 black_box(map.insert(key, val));
             }
@@ -104,12 +112,12 @@ fn bench_insert_preallocated(c: &mut Criterion) {
 }
 
 fn bench_get_hits(c: &mut Criterion) {
-    let keys = random_data(0xFEED, INPUT_SIZE);
-    let values = random_data(0x1CEBEEF, INPUT_SIZE);
+    let keys: Vec<BenchKey> = random_data(0xFEED, INPUT_SIZE);
+    let values: Vec<BenchValue> = random_data(0x1CEBEEF, INPUT_SIZE);
     let mut cursor = 0;
     let mut group = c.comparison_benchmark_group("get_hits");
 
-    let mut map: BenchPoMap<u64, u64> = BenchPoMap::new();
+    let mut map: BenchPoMap = BenchPoMap::new();
     for &key in &keys {
         map.insert(key, values[cursor]);
         cursor = (cursor + 1) % INPUT_SIZE;
@@ -126,7 +134,7 @@ fn bench_get_hits(c: &mut Criterion) {
 
     cursor = 0;
 
-    let mut map: BenchHashMap<u64, u64> = new_std_hashmap();
+    let mut map: BenchHashMap = new_std_hashmap();
     for &key in &keys {
         map.insert(key, values[cursor]);
         cursor = (cursor + 1) % INPUT_SIZE;
@@ -145,13 +153,13 @@ fn bench_get_hits(c: &mut Criterion) {
 }
 
 fn bench_get_misses(c: &mut Criterion) {
-    let present_keys = random_data(0xABA1, INPUT_SIZE);
-    let present_values = random_data(0xCAB, INPUT_SIZE);
-    let miss_keys = random_data(0xBA5E, INPUT_SIZE);
+    let present_keys: Vec<BenchKey> = random_data(0xABA1, INPUT_SIZE);
+    let present_values: Vec<BenchValue> = random_data(0xCAB, INPUT_SIZE);
+    let miss_keys: Vec<BenchKey> = random_data(0xBA5E, INPUT_SIZE);
     let mut cursor = 0;
     let mut group = c.comparison_benchmark_group("get_misses");
 
-    let mut map = BenchPoMap::<u64, u64>::new();
+    let mut map = BenchPoMap::new();
     for &key in &present_keys {
         map.insert(key, present_values[cursor]);
         cursor = (cursor + 1) % INPUT_SIZE;
@@ -169,7 +177,7 @@ fn bench_get_misses(c: &mut Criterion) {
 
     cursor = 0;
 
-    let mut map: BenchHashMap<u64, u64> = new_std_hashmap();
+    let mut map: BenchHashMap = new_std_hashmap();
     for &key in &present_keys {
         map.insert(key, present_values[cursor]);
         cursor = (cursor + 1) % INPUT_SIZE;
@@ -189,13 +197,13 @@ fn bench_get_misses(c: &mut Criterion) {
 }
 
 fn bench_update(c: &mut Criterion) {
-    let keys = random_data(0xC0FFEE, INPUT_SIZE);
-    let initial_values = random_data(0xABC, INPUT_SIZE);
-    let update_values = random_data(0xDEF, INPUT_SIZE);
+    let keys: Vec<BenchKey> = random_data(0xC0FFEE, INPUT_SIZE);
+    let initial_values: Vec<BenchValue> = random_data(0xABC, INPUT_SIZE);
+    let update_values: Vec<BenchValue> = random_data(0xDEF, INPUT_SIZE);
     let mut cursor = 0usize;
     let mut group = c.comparison_benchmark_group("update_existing");
 
-    let mut map: BenchPoMap<u64, u64> = BenchPoMap::new();
+    let mut map: BenchPoMap = BenchPoMap::new();
     for &key in &keys {
         map.insert(key, initial_values[cursor]);
         cursor = (cursor + 1) % INPUT_SIZE;
@@ -214,7 +222,7 @@ fn bench_update(c: &mut Criterion) {
 
     cursor = 0;
 
-    let mut map: BenchHashMap<u64, u64> = new_std_hashmap();
+    let mut map: BenchHashMap = new_std_hashmap();
     for &key in &keys {
         map.insert(key, initial_values[cursor]);
         cursor = (cursor + 1) % INPUT_SIZE;
@@ -236,14 +244,14 @@ fn bench_update(c: &mut Criterion) {
 
 fn bench_hot_gets(c: &mut Criterion) {
     let mut rng = StdRng::seed_from_u64(0xDEC0DE);
-    let hot_keys: Vec<u64> = (0..HOT_SET).map(|_| rng.random()).collect();
-    let mut map_keys = hot_keys.clone();
-    map_keys.extend(random_data(0xD00D, INPUT_SIZE - HOT_SET));
-    let map_values = random_data(0xBADD, INPUT_SIZE);
+    let hot_keys: Vec<BenchKey> = (0..HOT_SET).map(|_| rng.random()).collect();
+    let mut map_keys: Vec<BenchKey> = hot_keys.clone();
+    map_keys.extend(random_data::<BenchKey>(0xD00D, INPUT_SIZE - HOT_SET));
+    let map_values: Vec<BenchValue> = random_data(0xBADD, INPUT_SIZE);
 
     let mut group = c.comparison_benchmark_group("get_hotset");
 
-    let mut map: BenchPoMap<u64, u64> = BenchPoMap::new();
+    let mut map: BenchPoMap = BenchPoMap::new();
     for (idx, &key) in map_keys.iter().enumerate() {
         map.insert(key, map_values[idx]);
     }
@@ -257,7 +265,7 @@ fn bench_hot_gets(c: &mut Criterion) {
         });
     });
 
-    let mut map: BenchHashMap<u64, u64> = new_std_hashmap();
+    let mut map: BenchHashMap = new_std_hashmap();
     for (idx, &key) in map_keys.iter().enumerate() {
         map.insert(key, map_values[idx]);
     }
