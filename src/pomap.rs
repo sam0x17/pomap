@@ -336,9 +336,8 @@ impl<K: Key, V: Value, H: Hasher + Default> PoMap<K, V, H> {
                             // fall through to shift
                         }
                     }
-                } else {
-                    // slot_hash > hash → fall through to shift
                 }
+                // slot_hash > hash → fall through to shift
 
                 // Here: (hash, key) should be inserted before this slot.
                 // Search for a Vacant in (idx, scan_end).
