@@ -7,8 +7,8 @@ use rand::distr::{Distribution, StandardUniform};
 use rand::{Rng, SeedableRng, rngs::StdRng};
 
 /// Key/value types used throughout the benchmarks.
-type BenchKey = u128;
-type BenchValue = u128;
+type BenchKey = u64;
+type BenchValue = u64;
 
 /// Hasher configuration shared by PoMap and std::collections benchmarks.
 type BenchHasher = AHasher;
