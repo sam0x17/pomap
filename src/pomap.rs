@@ -228,7 +228,7 @@ impl<K: Key, V: Value, H: Hasher + Default> PoMap<K, V, H> {
 
     /// Hot path for `get` that can be used when the caller already has the hash and doesn't
     /// want to recompute it.
-    #[inline]
+    #[inline(always)]
     pub fn get_with_hash(&self, hash: u64, key: &K) -> Option<&V> {
         let ideal_slot = self.meta.ideal_slot(hash);
         let scan_end = ideal_slot + self.meta.max_scan;
@@ -275,7 +275,7 @@ impl<K: Key, V: Value, H: Hasher + Default> PoMap<K, V, H> {
         self.insert_with_hash(hash, key, value)
     }
 
-    #[inline]
+    #[inline(always)]
     pub fn insert_with_hash(&mut self, hash: u64, key: K, value: V) -> Option<V> {
         loop {
             let ideal_slot = self.meta.ideal_slot(hash);
