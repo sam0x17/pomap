@@ -11,8 +11,6 @@ use std::{
     hash::DefaultHasher,
 };
 
-use wide::u64x2;
-
 /// Minimum capacity we will allow for PoMap
 const MIN_CAPACITY: usize = 4;
 
@@ -242,20 +240,14 @@ impl<K: Key, V: Value, H: Hasher + Default> PoMap<K, V, H> {
         for idx in ideal_slot..scan_end {
             let slot_hash = unsafe { *hashes_ptr.add(idx) };
 
-            if slot_hash < hash {
-                continue;
-            }
-
-            // we guarantee the slots are sorted by hash
-            if slot_hash > hash {
-                return None;
-            }
-
-            // SAFETY: we guard with VACANT_HASH above.
-            let slot_entry = unsafe { &*entries_ptr.add(idx) };
-            if unsafe { slot_entry.key_ref() } == key {
-                // SAFETY: slot is occupied.
-                return Some(unsafe { slot_entry.value_ref() });
+            if slot_hash == hash {
+                let slot_entry = unsafe { &*entries_ptr.add(idx) };
+                if unsafe { slot_entry.key_ref() } == key {
+                    return Some(unsafe { slot_entry.value_ref() });
+                }
+                // hash collision: keep scanning
+            } else if slot_hash > hash {
+                return None; // also catches VACANT_HASH if VACANT_HASH > any valid hash
             }
         }
         None
@@ -556,11 +548,6 @@ impl PoMapMeta {
     const fn ideal_slot(&self, hash: u64) -> usize {
         (hash >> self.index_shift) as usize
     }
-}
-
-#[inline(always)]
-const unsafe fn load_u64x2_unaligned(p: *const u8) -> u64x2 {
-    unsafe { core::ptr::read_unaligned(p as *const u64x2) }
 }
 
 #[cfg(test)]
