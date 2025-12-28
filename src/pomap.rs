@@ -1,5 +1,4 @@
 use core::{
-    cmp::Ordering,
     hash::{Hash, Hasher},
     marker::PhantomData,
     mem::MaybeUninit,
@@ -289,6 +288,30 @@ impl<K: Key, V: Value, H: Hasher + Default> PoMap<K, V, H> {
             while idx < scan_end {
                 let slot_hash = unsafe { *hashes_ptr.add(idx) };
 
+                if slot_hash == hash {
+                    let slot = unsafe { &mut *entries_ptr.add(idx) };
+                    let slot_key = unsafe { slot.key_ref() };
+                    if slot_key == &key {
+                        // Key already exists; replace value.
+                        let old_value = if core::mem::needs_drop::<V>() {
+                            core::mem::replace(unsafe { slot.value_mut() }, value)
+                        } else {
+                            // For POD values, avoid drop glue by doing a raw read+write.
+                            unsafe {
+                                let old = slot.value.assume_init_read();
+                                slot.value.write(value);
+                                old
+                            }
+                        };
+                        return Some(old_value);
+                    }
+                    if slot_key < &key {
+                        idx += 1;
+                        continue;
+                    }
+                    // slot_key > key → fall through to shift
+                }
+
                 if slot_hash == VACANT_HASH {
                     unsafe {
                         *hashes_ptr.add(idx) = hash;
@@ -304,33 +327,6 @@ impl<K: Key, V: Value, H: Hasher + Default> PoMap<K, V, H> {
                     continue;
                 }
 
-                // Existing hash == new hash → order by key for canonical layout.
-                if slot_hash == hash {
-                    let slot = unsafe { &mut *entries_ptr.add(idx) };
-                    let slot_key = unsafe { slot.key_ref() };
-                    match slot_key.cmp(&key) {
-                        Ordering::Equal => {
-                            let old_value = if core::mem::needs_drop::<V>() {
-                                core::mem::replace(unsafe { slot.value_mut() }, value)
-                            } else {
-                                // For POD values, avoid drop glue by doing a raw read+write.
-                                unsafe {
-                                    let old = slot.value.assume_init_read();
-                                    slot.value.write(value);
-                                    old
-                                }
-                            };
-                            return Some(old_value);
-                        }
-                        Ordering::Less => {
-                            idx += 1;
-                            continue;
-                        }
-                        Ordering::Greater => {
-                            // fall through to shift
-                        }
-                    }
-                }
                 // slot_hash > hash → fall through to shift
 
                 // Here: (hash, key) should be inserted before this slot.
