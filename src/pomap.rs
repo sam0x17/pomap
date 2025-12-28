@@ -11,6 +11,8 @@ use std::{
     hash::DefaultHasher,
 };
 
+use wide::u64x2;
+
 /// Minimum capacity we will allow for PoMap
 const MIN_CAPACITY: usize = 4;
 
@@ -76,9 +78,9 @@ impl<K: Key, V: Value> Entry<K, V> {
 
 struct Slots<K: Key, V: Value> {
     ptr: NonNull<u8>,
+    capacity: usize,
     hashes: *mut u64,
     entries: *mut Entry<K, V>,
-    capacity: usize,
     layout: Layout,
     _marker: PhantomData<Entry<K, V>>,
 }
@@ -554,6 +556,11 @@ impl PoMapMeta {
     const fn ideal_slot(&self, hash: u64) -> usize {
         (hash >> self.index_shift) as usize
     }
+}
+
+#[inline(always)]
+const unsafe fn load_u64x2_unaligned(p: *const u8) -> u64x2 {
+    unsafe { core::ptr::read_unaligned(p as *const u64x2) }
 }
 
 #[cfg(test)]
