@@ -567,7 +567,18 @@ const unsafe fn load_u64x2_unaligned(p: *const u8) -> u64x2 {
 mod tests {
     use super::*;
     use rand::{Rng, SeedableRng, rngs::StdRng};
-    use std::collections::HashMap;
+    use std::{cell::Cell, collections::HashMap, rc::Rc};
+
+    #[derive(Clone)]
+    struct DropCounter {
+        drops: Rc<Cell<usize>>,
+    }
+
+    impl Drop for DropCounter {
+        fn drop(&mut self) {
+            self.drops.set(self.drops.get() + 1);
+        }
+    }
 
     #[derive(Default)]
     struct IdentityHasher(u64);
@@ -705,5 +716,36 @@ mod tests {
         }
         assert_eq!(map.len(), expected.len());
         assert!(!map.is_empty());
+    }
+
+    #[test]
+    fn overwrite_drops_old_value() {
+        let drops = Rc::new(Cell::new(0));
+        let mut map: PoMap<u64, DropCounter, IdentityHasher> = PoMap::new();
+
+        assert!(
+            map.insert(
+                1,
+                DropCounter {
+                    drops: drops.clone()
+                }
+            )
+            .is_none()
+        );
+        let previous = map
+            .insert(
+                1,
+                DropCounter {
+                    drops: drops.clone(),
+                },
+            )
+            .expect("expected to replace an existing value");
+
+        assert_eq!(drops.get(), 0);
+        drop(previous);
+        assert_eq!(drops.get(), 1);
+
+        drop(map);
+        assert_eq!(drops.get(), 2);
     }
 }
