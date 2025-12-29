@@ -336,15 +336,22 @@ impl<K: Key, V: Value, H: Hasher + Default> PoMap<K, V, H> {
                     let cand_hash = unsafe { *hashes_ptr.add(search) };
                     if cand_hash == VACANT_HASH {
                         // Rotate [idx..=search] right by 1 and drop new element at idx.
-                        let len = search - idx + 1;
-                        let hash_slice =
-                            unsafe { slice::from_raw_parts_mut(hashes_ptr.add(idx), len) };
-                        let entry_slice =
-                            unsafe { slice::from_raw_parts_mut(entries_ptr.add(idx), len) };
-                        hash_slice.rotate_right(1);
-                        entry_slice.rotate_right(1);
-                        hash_slice[0] = hash;
-                        entry_slice[0].occupy(key, value);
+                        unsafe {
+                            // Shift [idx..search) right by 1 into the vacant at `search`.
+                            // Do it backwards to avoid overlap issues.
+                            let mut i = search;
+                            while i > idx {
+                                *hashes_ptr.add(i) = *hashes_ptr.add(i - 1);
+                                core::ptr::write(
+                                    entries_ptr.add(i),
+                                    core::ptr::read(entries_ptr.add(i - 1)),
+                                );
+                                i -= 1;
+                            }
+
+                            *hashes_ptr.add(idx) = hash;
+                            (*entries_ptr.add(idx)).occupy(key, value);
+                        }
                         self.len += 1;
                         return None;
                     }
