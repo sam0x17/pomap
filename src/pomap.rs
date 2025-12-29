@@ -106,8 +106,7 @@ impl<K: Key, V: Value> Slots<K, V> {
         unsafe {
             // Mark all hashes as vacant.
             ptr::write_bytes(hashes, 0xFF, capacity);
-            // Initialize entry backing memory so rotations can safely move them around.
-            ptr::write_bytes(entries, 0x00, capacity);
+            // SAFETY: ok to leave entries uninitialized
         }
 
         Self {
