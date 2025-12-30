@@ -287,6 +287,23 @@ impl<K: Key, V: Value, H: Hasher + Default> PoMap<K, V, H> {
             while idx < scan_end {
                 let slot_hash = unsafe { *hashes_ptr.add(idx) };
 
+                // Fast path: insert immediately into an empty slot.
+                if slot_hash == VACANT_HASH {
+                    unsafe {
+                        *hashes_ptr.add(idx) = hash;
+                        (*entries_ptr.add(idx)).occupy(key, value);
+                    }
+                    self.len += 1;
+                    return None;
+                }
+
+                // Common scan: skip hashes below the insertion point.
+                if slot_hash < hash {
+                    idx += 1;
+                    continue;
+                }
+
+                // Now slot_hash >= hash and occupied.
                 if slot_hash == hash {
                     let slot = unsafe { &mut *entries_ptr.add(idx) };
                     let slot_key = unsafe { slot.key_ref() };
@@ -311,22 +328,7 @@ impl<K: Key, V: Value, H: Hasher + Default> PoMap<K, V, H> {
                     // slot_key > key → fall through to shift
                 }
 
-                if slot_hash == VACANT_HASH {
-                    unsafe {
-                        *hashes_ptr.add(idx) = hash;
-                        (*entries_ptr.add(idx)).occupy(key, value);
-                    }
-                    self.len += 1;
-                    return None;
-                }
-
-                // Common case: existing hash < new hash → keep scanning forward.
-                if slot_hash < hash {
-                    idx += 1;
-                    continue;
-                }
-
-                // slot_hash > hash → fall through to shift
+                // slot_hash > hash or slot_key > key → fall through to shift
 
                 // Here: (hash, key) should be inserted before this slot.
                 // Search for a Vacant in (idx, scan_end).
