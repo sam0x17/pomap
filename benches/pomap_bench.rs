@@ -35,7 +35,7 @@ fn std_hashmap_with_capacity(capacity: usize) -> BenchHashMap {
 #[cfg(feature = "bench-string")]
 const INPUT_SIZE: usize = 250_000_usize.next_power_of_two();
 #[cfg(not(feature = "bench-string"))]
-const INPUT_SIZE: usize = 20_000_000_usize.next_power_of_two();
+const INPUT_SIZE: usize = 1_000_000_usize;
 const HOT_SET: usize = (INPUT_SIZE.ilog2() * INPUT_SIZE.ilog2() * INPUT_SIZE.ilog2()) as usize;
 
 #[cfg(feature = "bench-string")]
