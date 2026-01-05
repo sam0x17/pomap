@@ -11,7 +11,7 @@ use std::{
 };
 
 /// Minimum capacity we will allow for PoMap
-const MIN_CAPACITY: usize = 4;
+const MIN_CAPACITY: usize = 2;
 
 /// Number of bits in the hashcode
 const HASH_BITS: usize = 64; // we use a 64-bit hashcode
