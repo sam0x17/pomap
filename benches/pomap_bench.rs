@@ -40,8 +40,8 @@ const INSERT_INPUT_SIZE: usize = 50_000_usize;
 #[cfg(feature = "bench-string")]
 const MAX_INPUT_SIZE: usize = 250_000_usize;
 #[cfg(not(feature = "bench-string"))]
-const MAX_INPUT_SIZE: usize = 1_000_000_usize;
-const GETS_PER_ROUND: usize = 5_000_usize;
+const MAX_INPUT_SIZE: usize = 10_000_000_usize;
+const GETS_PER_ROUND: usize = 1000_usize;
 const NUM_INTERMEDIATE_ROUNDS: usize = 10_usize;
 const HOT_SET: usize = MAX_INPUT_SIZE.isqrt();
 
@@ -218,8 +218,10 @@ fn bench_get_hits(c: &mut Criterion) {
     group.bench_function("pomap", |b| {
         b.iter(|| {
             for &(size, ref map) in &pomap_maps {
-                for idx in 0..GETS_PER_ROUND {
-                    let key = &keys[idx % size];
+                let mut rng = StdRng::seed_from_u64(0xC01DBEEF ^ size as u64);
+                for _ in 0..GETS_PER_ROUND {
+                    let idx = rng.random_range(0..size);
+                    let key = &keys[idx];
                     black_box(map.get(key));
                 }
             }
@@ -232,8 +234,10 @@ fn bench_get_hits(c: &mut Criterion) {
     group.bench_function("std_hashmap", |b| {
         b.iter(|| {
             for &(size, ref map) in &std_maps {
-                for idx in 0..GETS_PER_ROUND {
-                    let key = &keys[idx % size];
+                let mut rng = StdRng::seed_from_u64(0xC01DBEEF ^ size as u64);
+                for _ in 0..GETS_PER_ROUND {
+                    let idx = rng.random_range(0..size);
+                    let key = &keys[idx];
                     black_box(map.get(key));
                 }
             }
@@ -269,8 +273,10 @@ fn bench_get_misses(c: &mut Criterion) {
     group.bench_function("pomap", |b| {
         b.iter(|| {
             for &(size, ref map) in &pomap_maps {
-                for idx in 0..GETS_PER_ROUND {
-                    let key = &miss_keys[idx % size];
+                let mut rng = StdRng::seed_from_u64(0xC0FFEE42 ^ size as u64);
+                for _ in 0..GETS_PER_ROUND {
+                    let idx = rng.random_range(0..size);
+                    let key = &miss_keys[idx];
                     black_box(map.get(key));
                 }
             }
@@ -283,8 +289,10 @@ fn bench_get_misses(c: &mut Criterion) {
     group.bench_function("std_hashmap", |b| {
         b.iter(|| {
             for &(size, ref map) in &std_maps {
-                for idx in 0..GETS_PER_ROUND {
-                    let key = &miss_keys[idx % size];
+                let mut rng = StdRng::seed_from_u64(0xC0FFEE42 ^ size as u64);
+                for _ in 0..GETS_PER_ROUND {
+                    let idx = rng.random_range(0..size);
+                    let key = &miss_keys[idx];
                     black_box(map.get(key));
                 }
             }
@@ -352,8 +360,10 @@ fn bench_hot_gets(c: &mut Criterion) {
     group.bench_function("pomap", |b| {
         b.iter(|| {
             for ((_, map), &hot_count) in pomap_maps.iter().zip(&hot_counts) {
-                for idx in 0..GETS_PER_ROUND {
-                    let key = &hot_keys[idx % hot_count];
+                let mut rng = StdRng::seed_from_u64(0xDEC0DE42 ^ hot_count as u64);
+                for _ in 0..GETS_PER_ROUND {
+                    let idx = rng.random_range(0..hot_count);
+                    let key = &hot_keys[idx];
                     black_box(map.get(key));
                 }
             }
@@ -366,8 +376,10 @@ fn bench_hot_gets(c: &mut Criterion) {
     group.bench_function("std_hashmap", |b| {
         b.iter(|| {
             for ((_, map), &hot_count) in std_maps.iter().zip(&hot_counts) {
-                for idx in 0..GETS_PER_ROUND {
-                    let key = &hot_keys[idx % hot_count];
+                let mut rng = StdRng::seed_from_u64(0xDEC0DE42 ^ hot_count as u64);
+                for _ in 0..GETS_PER_ROUND {
+                    let idx = rng.random_range(0..hot_count);
+                    let key = &hot_keys[idx];
                     black_box(map.get(key));
                 }
             }
