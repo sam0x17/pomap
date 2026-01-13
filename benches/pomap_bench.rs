@@ -36,11 +36,11 @@ fn std_hashmap_with_capacity(capacity: usize) -> BenchHashMap {
     BenchHashMap::with_capacity_and_hasher(capacity, BenchHasherBuilder::default())
 }
 
-const INSERT_INPUT_SIZE: usize = 50_000_usize;
+const INSERT_INPUT_SIZE: usize = 250_000_usize;
 #[cfg(feature = "bench-string")]
 const MAX_INPUT_SIZE: usize = 250_000_usize;
 #[cfg(not(feature = "bench-string"))]
-const MAX_INPUT_SIZE: usize = 10_000_000_usize;
+const MAX_INPUT_SIZE: usize = 1_000_000_usize;
 const GETS_PER_ROUND: usize = 1000_usize;
 const NUM_INTERMEDIATE_ROUNDS: usize = 10_usize;
 const HOT_SET: usize = MAX_INPUT_SIZE.isqrt();
@@ -136,28 +136,33 @@ fn build_std_maps_from_data(
 }
 
 fn bench_insert_allocate(c: &mut Criterion) {
-    let keys: Vec<BenchKey> = random_items(0xA11CE, INSERT_INPUT_SIZE);
-    let values: Vec<BenchValue> = random_items(0xFACE, INSERT_INPUT_SIZE);
-    let combined = keys
-        .into_iter()
-        .zip(values.into_iter())
-        .collect::<Vec<(BenchKey, BenchValue)>>();
+    let target_sizes = target_sizes();
+    let max_target_size = *target_sizes
+        .iter()
+        .max()
+        .expect("target sizes should not be empty");
+    let keys: Vec<BenchKey> = random_items(0xA11CE, max_target_size);
+    let values: Vec<BenchValue> = random_items(0xFACE, max_target_size);
     let mut group = c.comparison_benchmark_group("insert_allocate");
 
     group.bench_function("pomap", |b| {
         b.iter(|| {
-            let mut map: BenchPoMap = BenchPoMap::new();
-            for (key, val) in &combined {
-                black_box(map.insert(key.clone(), val.clone()));
+            for &size in &target_sizes {
+                let mut map: BenchPoMap = BenchPoMap::new();
+                for (key, val) in keys.iter().zip(values.iter()).take(size) {
+                    black_box(map.insert(key.clone(), val.clone()));
+                }
             }
         });
     });
 
     group.bench_function("std_hashmap", |b| {
         b.iter(|| {
-            let mut map: BenchHashMap = new_std_hashmap();
-            for (key, val) in &combined {
-                black_box(map.insert(key.clone(), val.clone()));
+            for &size in &target_sizes {
+                let mut map: BenchHashMap = new_std_hashmap();
+                for (key, val) in keys.iter().zip(values.iter()).take(size) {
+                    black_box(map.insert(key.clone(), val.clone()));
+                }
             }
         });
     });
