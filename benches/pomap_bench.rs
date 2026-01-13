@@ -41,7 +41,7 @@ const INSERT_INPUT_SIZE: usize = 250_000_usize;
 const MAX_INPUT_SIZE: usize = 250_000_usize;
 #[cfg(not(feature = "bench-string"))]
 const MAX_INPUT_SIZE: usize = 1_000_000_usize;
-const GETS_PER_ROUND: usize = 1000_usize;
+const GETS_PER_ROUND: usize = 1_000_usize;
 const NUM_INTERMEDIATE_ROUNDS: usize = 10_usize;
 const HOT_SET: usize = MAX_INPUT_SIZE.isqrt();
 
