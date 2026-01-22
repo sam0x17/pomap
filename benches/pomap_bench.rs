@@ -41,7 +41,8 @@ const INSERT_INPUT_SIZE: usize = 250_000_usize;
 const MAX_INPUT_SIZE: usize = 250_000_usize;
 #[cfg(not(feature = "bench-string"))]
 const MAX_INPUT_SIZE: usize = 1_000_000_usize;
-const GETS_PER_ROUND: usize = 1_000_usize;
+const MAX_INSERT_INPUT_SIZE: usize = 100_000_usize;
+const GETS_PER_ROUND: usize = 100_usize;
 const NUM_INTERMEDIATE_ROUNDS: usize = 10_usize;
 const HOT_SET: usize = MAX_INPUT_SIZE.isqrt();
 
@@ -71,7 +72,7 @@ fn random_items(seed: u64, count: usize) -> Vec<BenchType> {
     (0..count).map(|_| random_bench_item(&mut rng)).collect()
 }
 
-fn target_sizes() -> Vec<usize> {
+fn get_target_sizes() -> Vec<usize> {
     let mut power_targets = Vec::new();
     let mut current = 10usize;
 
@@ -96,6 +97,35 @@ fn target_sizes() -> Vec<usize> {
 
     if targets.is_empty() {
         targets.push(MAX_INPUT_SIZE);
+    }
+
+    targets
+}
+
+fn insert_target_sizes() -> Vec<usize> {
+    let mut power_targets = Vec::new();
+    let mut current = 10usize;
+
+    while current < MAX_INSERT_INPUT_SIZE {
+        power_targets.push(current);
+        current *= 10;
+    }
+    power_targets.push(MAX_INSERT_INPUT_SIZE);
+    let rounds = NUM_INTERMEDIATE_ROUNDS.max(2);
+    let mut targets = Vec::new();
+    for window in power_targets.windows(2) {
+        let start = window[0];
+        let end = window[1];
+        for step in 0..rounds {
+            let size = start + (end - start) * step / (rounds - 1);
+            if targets.last().copied() != Some(size) {
+                targets.push(size);
+            }
+        }
+    }
+
+    if targets.is_empty() {
+        targets.push(MAX_INSERT_INPUT_SIZE);
     }
 
     targets
@@ -136,7 +166,7 @@ fn build_std_maps_from_data(
 }
 
 fn bench_insert_allocate(c: &mut Criterion) {
-    let target_sizes = target_sizes();
+    let target_sizes = insert_target_sizes();
     let max_target_size = *target_sizes
         .iter()
         .max()
@@ -148,9 +178,13 @@ fn bench_insert_allocate(c: &mut Criterion) {
     group.bench_function("pomap", |b| {
         b.iter(|| {
             for &size in &target_sizes {
-                let mut map: BenchPoMap = BenchPoMap::new();
-                for (key, val) in keys.iter().zip(values.iter()).take(size) {
-                    black_box(map.insert(key.clone(), val.clone()));
+                let mut iterations = 0;
+                while iterations < max_target_size {
+                    let mut map: BenchPoMap = BenchPoMap::new();
+                    for (key, val) in keys.iter().zip(values.iter()).take(size) {
+                        black_box(map.insert(key.clone(), val.clone()));
+                    }
+                    iterations += size;
                 }
             }
         });
@@ -159,9 +193,13 @@ fn bench_insert_allocate(c: &mut Criterion) {
     group.bench_function("std_hashmap", |b| {
         b.iter(|| {
             for &size in &target_sizes {
-                let mut map: BenchHashMap = new_std_hashmap();
-                for (key, val) in keys.iter().zip(values.iter()).take(size) {
-                    black_box(map.insert(key.clone(), val.clone()));
+                let mut iterations = 0;
+                while iterations < max_target_size {
+                    let mut map: BenchHashMap = new_std_hashmap();
+                    for (key, val) in keys.iter().zip(values.iter()).take(size) {
+                        black_box(map.insert(key.clone(), val.clone()));
+                    }
+                    iterations += size;
                 }
             }
         });
@@ -214,7 +252,7 @@ fn bench_insert_preallocated(c: &mut Criterion) {
 }
 
 fn bench_get_hits(c: &mut Criterion) {
-    let target_sizes = target_sizes();
+    let target_sizes = get_target_sizes();
     let keys: Vec<BenchKey> = random_items(0xFEED, MAX_INPUT_SIZE);
     let values: Vec<BenchValue> = random_items(0x1CEBEEF, MAX_INPUT_SIZE);
     let pomap_maps = build_pomap_maps_from_data(&target_sizes, &keys, &values);
@@ -253,7 +291,7 @@ fn bench_get_hits(c: &mut Criterion) {
 }
 
 fn bench_get_misses(c: &mut Criterion) {
-    let target_sizes = target_sizes();
+    let target_sizes = get_target_sizes();
     let present_keys: Vec<BenchKey> = random_items(0xABA1, MAX_INPUT_SIZE);
     let present_values: Vec<BenchValue> = random_items(0xCAB, MAX_INPUT_SIZE);
 
@@ -308,7 +346,7 @@ fn bench_get_misses(c: &mut Criterion) {
 }
 
 fn bench_update(c: &mut Criterion) {
-    let target_sizes = target_sizes();
+    let target_sizes = get_target_sizes();
     let keys: Vec<BenchKey> = random_items(0xC0FFEE, MAX_INPUT_SIZE);
     let initial_values: Vec<BenchValue> = random_items(0xABC, MAX_INPUT_SIZE);
     let update_values: Vec<BenchValue> = random_items(0xDEF, MAX_INPUT_SIZE);
@@ -348,7 +386,7 @@ fn bench_update(c: &mut Criterion) {
 }
 
 fn bench_hot_gets(c: &mut Criterion) {
-    let target_sizes = target_sizes();
+    let target_sizes = get_target_sizes();
     let mut rng = StdRng::seed_from_u64(0xDEC0DE);
     let hot_keys: Vec<BenchKey> = (0..HOT_SET).map(|_| random_bench_item(&mut rng)).collect();
     let mut map_keys: Vec<BenchKey> = hot_keys.clone();
