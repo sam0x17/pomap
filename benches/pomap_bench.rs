@@ -38,7 +38,7 @@ fn std_hashmap_with_capacity(capacity: usize) -> BenchHashMap {
 
 const MAX_GET_INPUT_SIZE: usize = 1_000_000_usize;
 const MAX_INSERT_INPUT_SIZE: usize = 100_000_usize;
-const GETS_PER_ROUND: usize = 100_usize;
+const GETS_PER_ROUND: usize = 1_000_usize;
 const NUM_INTERMEDIATE_ROUNDS: usize = 5_usize;
 const HOT_SET: usize = MAX_GET_INPUT_SIZE.isqrt();
 
