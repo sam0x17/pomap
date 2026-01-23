@@ -37,7 +37,7 @@ struct Entry<K: Key, V: Value> {
 }
 
 #[inline(always)]
-fn encode_hash(h: u64) -> u64 {
+const fn encode_hash(h: u64) -> u64 {
     h.saturating_sub(1)
     //f h == VACANT_HASH { VACANT_HASH - 1 } else { h }
 }
