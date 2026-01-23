@@ -16,7 +16,7 @@ const MIN_CAPACITY: usize = 4;
 /// Number of bits in the hashcode
 const HASH_BITS: usize = 64; // we use a 64-bit hashcode
 
-const GROWTH_FACTOR: usize = 2;
+const GROWTH_FACTOR: usize = 4;
 const VACANT_HASH: u64 = u64::MAX;
 
 #[inline(always)]
