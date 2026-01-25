@@ -38,8 +38,10 @@ struct Entry<K: Key, V: Value> {
 
 #[inline(always)]
 const fn encode_hash(h: u64) -> u64 {
+    // Ensure we never produce VACANT_HASH as a valid hash by shifting down by 1. This will
+    // cause an astronomically tiny bias in the hash distribution with 0 colliding with 1, but
+    // this is perfectly acceptable for our purposes
     h.saturating_sub(1)
-    //f h == VACANT_HASH { VACANT_HASH - 1 } else { h }
 }
 
 impl<K: Key, V: Value> Entry<K, V> {
@@ -224,10 +226,26 @@ impl<K: Key, V: Value, H: Hasher + Default> PoMap<K, V, H> {
         self.len == 0
     }
 
+    /// Gets a reference to the value corresponding to the specified key, or `None` if not found.
+    ///
+    /// Calls [`Self::get_with_hash`] internally after computing the hash.
+    #[inline]
+    pub fn get(&self, key: &K) -> Option<&V> {
+        let mut hasher = H::default();
+        key.hash(&mut hasher);
+        let hash = encode_hash(hasher.finish());
+        self._get_with_hash(hash, key)
+    }
+
+    #[inline]
+    pub fn get_with_hash(&self, hash: u64, key: &K) -> Option<&V> {
+        self._get_with_hash(encode_hash(hash), key)
+    }
+
     /// Hot path for `get` that can be used when the caller already has the hash and doesn't
     /// want to recompute it.
     #[inline(always)]
-    pub fn get_with_hash(&self, hash: u64, key: &K) -> Option<&V> {
+    pub fn _get_with_hash(&self, hash: u64, key: &K) -> Option<&V> {
         let ideal_slot = self.meta.ideal_slot(hash);
         let scan_end = ideal_slot + self.meta.max_scan;
 
@@ -251,17 +269,6 @@ impl<K: Key, V: Value, H: Hasher + Default> PoMap<K, V, H> {
         None
     }
 
-    /// Gets a reference to the value corresponding to the specified key, or `None` if not found.
-    ///
-    /// Calls [`Self::get_with_hash`] internally after computing the hash.
-    #[inline]
-    pub fn get(&self, key: &K) -> Option<&V> {
-        let mut hasher = H::default();
-        key.hash(&mut hasher);
-        let hash = encode_hash(hasher.finish());
-        self.get_with_hash(hash, key)
-    }
-
     /// Inserts a key-value pair into the map, replacing any existing value.
     ///
     /// Computes the hash of the key and then delegates to [`Self::insert_with_hash`].
@@ -270,11 +277,16 @@ impl<K: Key, V: Value, H: Hasher + Default> PoMap<K, V, H> {
         let mut hasher = H::default();
         key.hash(&mut hasher);
         let hash = encode_hash(hasher.finish());
-        self.insert_with_hash(hash, key, value)
+        self._insert_with_hash(hash, key, value)
+    }
+
+    #[inline]
+    pub fn insert_with_hash(&mut self, hash: u64, key: K, value: V) -> Option<V> {
+        self._insert_with_hash(encode_hash(hash), key, value)
     }
 
     #[inline(always)]
-    pub fn insert_with_hash(&mut self, hash: u64, key: K, value: V) -> Option<V> {
+    fn _insert_with_hash(&mut self, hash: u64, key: K, value: V) -> Option<V> {
         loop {
             let ideal_slot = self.meta.ideal_slot(hash);
             let scan_end = ideal_slot + self.meta.max_scan;
