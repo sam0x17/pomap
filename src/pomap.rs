@@ -44,37 +44,6 @@ const fn encode_hash(h: u64) -> u64 {
     h.saturating_sub(1)
 }
 
-impl<K: Key, V: Value> Entry<K, V> {
-    #[inline(always)]
-    fn occupy(&mut self, key: K, value: V) {
-        self.key.write(key);
-        self.value.write(value);
-    }
-
-    #[inline(always)]
-    unsafe fn key_ref(&self) -> &K {
-        unsafe { self.key.assume_init_ref() }
-    }
-
-    #[inline(always)]
-    unsafe fn value_ref(&self) -> &V {
-        unsafe { self.value.assume_init_ref() }
-    }
-
-    #[inline(always)]
-    unsafe fn value_mut(&mut self) -> &mut V {
-        unsafe { self.value.assume_init_mut() }
-    }
-
-    #[inline(always)]
-    unsafe fn drop_contents(&mut self) {
-        unsafe {
-            self.key.assume_init_drop();
-            self.value.assume_init_drop();
-        }
-    }
-}
-
 struct Slots<K: Key, V: Value> {
     ptr: NonNull<u8>,
     capacity: usize,
@@ -152,7 +121,8 @@ impl<K: Key, V: Value> Slots<K, V> {
         unsafe {
             self.set_hash(idx, hash);
             let entry = &mut *self.entries.add(idx);
-            entry.occupy(key, value);
+            entry.key.write(key);
+            entry.value.write(value);
         }
     }
 }
@@ -164,7 +134,8 @@ impl<K: Key, V: Value> Drop for Slots<K, V> {
             for (idx, &hash) in hashes.iter().enumerate() {
                 if hash != VACANT_HASH {
                     let entry = &mut *self.entries.add(idx);
-                    entry.drop_contents();
+                    entry.key.assume_init_drop();
+                    entry.value.assume_init_drop();
                 }
             }
             dealloc(self.ptr.as_ptr(), self.layout);
@@ -258,8 +229,8 @@ impl<K: Key, V: Value, H: Hasher + Default> PoMap<K, V, H> {
 
             if slot_hash == hash {
                 let slot_entry = unsafe { &*entries_ptr.add(idx) };
-                if unsafe { slot_entry.key_ref() } == key {
-                    return Some(unsafe { slot_entry.value_ref() });
+                if unsafe { slot_entry.key.assume_init_ref() } == key {
+                    return Some(unsafe { slot_entry.value.assume_init_ref() });
                 }
                 // hash collision: keep scanning
             } else if slot_hash > hash {
@@ -303,7 +274,9 @@ impl<K: Key, V: Value, H: Hasher + Default> PoMap<K, V, H> {
                 if slot_hash == VACANT_HASH {
                     unsafe {
                         *hashes_ptr.add(idx) = hash;
-                        (*entries_ptr.add(idx)).occupy(key, value);
+                        let entry = &mut *entries_ptr.add(idx);
+                        entry.key.write(key);
+                        entry.value.write(value);
                     }
                     self.len += 1;
                     return None;
@@ -318,11 +291,11 @@ impl<K: Key, V: Value, H: Hasher + Default> PoMap<K, V, H> {
                 // Now slot_hash >= hash and occupied.
                 if slot_hash == hash {
                     let slot = unsafe { &mut *entries_ptr.add(idx) };
-                    let slot_key = unsafe { slot.key_ref() };
+                    let slot_key = unsafe { slot.key.assume_init_ref() };
                     if slot_key == &key {
                         // Key already exists; replace value.
                         let old_value = if core::mem::needs_drop::<V>() {
-                            core::mem::replace(unsafe { slot.value_mut() }, value)
+                            core::mem::replace(unsafe { slot.value.assume_init_mut() }, value)
                         } else {
                             // For POD values, avoid drop glue by doing a raw read+write.
                             unsafe {
@@ -363,7 +336,9 @@ impl<K: Key, V: Value, H: Hasher + Default> PoMap<K, V, H> {
                             }
 
                             *hashes_ptr.add(idx) = hash;
-                            (*entries_ptr.add(idx)).occupy(key, value);
+                            let entry = &mut *entries_ptr.add(idx);
+                            entry.key.write(key);
+                            entry.value.write(value);
                         }
                         self.len += 1;
                         return None;
@@ -472,8 +447,8 @@ impl<K: Key, V: Value, H: Hasher + Default> Clone for PoMap<K, V, H> {
                 continue;
             }
             let entry = unsafe { &*entries_ptr.add(idx) };
-            let key = unsafe { entry.key_ref().clone() };
-            let value = unsafe { entry.value_ref().clone() };
+            let key = unsafe { entry.key.assume_init_ref().clone() };
+            let value = unsafe { entry.value.assume_init_ref().clone() };
             unsafe { slots.write_slot(idx, hash, key, value) };
         }
 
@@ -683,11 +658,21 @@ mod tests {
 
         // And make sure key/value order matches expectation
         assert_eq!(
-            unsafe { (*first_entry.key_ref(), *first_entry.value_ref(),) },
+            unsafe {
+                (
+                    *first_entry.key.assume_init_ref(),
+                    *first_entry.value.assume_init_ref(),
+                )
+            },
             (lower, 2),
         );
         assert_eq!(
-            unsafe { (*second_entry.key_ref(), *second_entry.value_ref(),) },
+            unsafe {
+                (
+                    *second_entry.key.assume_init_ref(),
+                    *second_entry.value.assume_init_ref(),
+                )
+            },
             (higher, 1),
         );
 
