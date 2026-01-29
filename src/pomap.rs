@@ -453,6 +453,85 @@ impl<K: Key, V: Value, H: Hasher + Default> PoMap<K, V, H> {
         None
     }
 
+    /// Shrinks the map to at least `min_capacity` elements (logical capacity).
+    ///
+    /// If the target size cannot satisfy max-scan constraints, we retry once with the
+    /// next larger power-of-two ideal range. Returns the resulting capacity.
+    #[inline]
+    pub fn shrink_to(&mut self, min_capacity: usize) -> usize {
+        let requested = min_capacity.max(self.len).max(MIN_CAPACITY);
+        let (mut new_meta, mut new_capacity) = PoMapMeta::new(requested);
+        let current_capacity = self.slots.capacity();
+
+        if new_capacity >= current_capacity {
+            return current_capacity;
+        }
+
+        let hashes_ptr = self.slots.hashes_ptr();
+        let old_capacity = self.slots.capacity();
+
+        let can_pack = |meta: &PoMapMeta| -> bool {
+            let mut cursor = 0usize;
+            for idx in 0..old_capacity {
+                let hash = unsafe { *hashes_ptr.add(idx) };
+                if hash == VACANT_HASH {
+                    continue;
+                }
+                let ideal_slot = meta.ideal_slot(hash);
+                if cursor < ideal_slot {
+                    cursor = ideal_slot;
+                }
+                if cursor >= ideal_slot + meta.max_scan {
+                    return false;
+                }
+                cursor += 1;
+            }
+            true
+        };
+
+        if !can_pack(&new_meta) {
+            let ideal_range = 1usize << new_meta.index_bits;
+            let bumped_requested = ideal_range.saturating_add(1);
+            let (bumped_meta, bumped_capacity) = PoMapMeta::new(bumped_requested);
+            if bumped_capacity >= current_capacity || !can_pack(&bumped_meta) {
+                return current_capacity;
+            }
+            new_meta = bumped_meta;
+            new_capacity = bumped_capacity;
+        }
+
+        let mut old_slots = core::mem::replace(&mut self.slots, Slots::new(new_capacity));
+
+        let hashes_ptr = old_slots.hashes_ptr();
+        let entries_ptr = old_slots.entries_ptr();
+        let mut cursor = 0usize;
+
+        for idx in 0..old_capacity {
+            let hash = unsafe { *hashes_ptr.add(idx) };
+            if hash == VACANT_HASH {
+                continue;
+            }
+
+            let ideal_slot = new_meta.ideal_slot(hash);
+            if cursor < ideal_slot {
+                cursor = ideal_slot;
+            }
+            debug_assert!(cursor < ideal_slot + new_meta.max_scan);
+
+            let entry = unsafe { &mut *entries_ptr.add(idx) };
+            let key = unsafe { entry.key.assume_init_read() };
+            let value = unsafe { entry.value.assume_init_read() };
+
+            unsafe { old_slots.clear_slot(idx) };
+            unsafe { self.slots.write_slot(cursor, hash, key, value) };
+
+            cursor += 1;
+        }
+
+        self.meta = new_meta;
+        new_capacity
+    }
+
     /// Reserve capacity for at least `requested_capacity` elements if there is not enough
     /// capacity already.
     ///
@@ -1023,6 +1102,120 @@ mod tests {
 
         drop(key);
         assert_eq!(key_drops.get(), 2);
+    }
+
+    #[test]
+    fn shrink_to_reduces_capacity_and_preserves_entries() {
+        let mut map: PoMap<u64, u64, IdentityHasher> = PoMap::with_capacity(256);
+
+        for i in 0..8u64 {
+            let key = (i << 61) | i;
+            map.insert(key, i * 10);
+        }
+
+        let old_capacity = map.capacity();
+        let new_capacity = map.shrink_to(4);
+        let (_, expected_capacity) = PoMapMeta::new(8);
+
+        assert!(new_capacity < old_capacity);
+        assert_eq!(new_capacity, expected_capacity);
+        assert_eq!(map.len(), 8);
+
+        for i in 0..8u64 {
+            let key = (i << 61) | i;
+            assert_eq!(map.get(&key), Some(&(i * 10)));
+        }
+    }
+
+    #[test]
+    fn shrink_to_sizes_up_on_scan_overflow() {
+        let mut map: PoMap<u64, u64, IdentityHasher> = PoMap::with_capacity(64);
+        map.insert(1, 10);
+        map.insert(2, 20);
+        map.insert(3, 30);
+
+        let old_capacity = map.capacity();
+        let (base_meta, _) = PoMapMeta::new(4);
+        let bumped_requested = (1usize << base_meta.index_bits) + 1;
+        let (_, expected_capacity) = PoMapMeta::new(bumped_requested);
+
+        let new_capacity = map.shrink_to(4);
+        assert!(new_capacity < old_capacity);
+        assert_eq!(new_capacity, expected_capacity);
+
+        assert_eq!(map.get(&1), Some(&10));
+        assert_eq!(map.get(&2), Some(&20));
+        assert_eq!(map.get(&3), Some(&30));
+        assert_eq!(map.len(), 3);
+    }
+
+    #[test]
+    fn shrink_to_empty_is_min_capacity() {
+        let mut map: PoMap<u64, u64, IdentityHasher> = PoMap::with_capacity(128);
+        let old_capacity = map.capacity();
+        let (_, expected_capacity) = PoMapMeta::new(MIN_CAPACITY);
+
+        let new_capacity = map.shrink_to(0);
+
+        assert!(new_capacity < old_capacity);
+        assert_eq!(new_capacity, expected_capacity);
+        assert_eq!(map.len(), 0);
+        assert!(map.is_empty());
+    }
+
+    #[test]
+    fn shrink_to_honors_len_when_min_is_smaller() {
+        let mut map: PoMap<u64, u64, IdentityHasher> = PoMap::with_capacity(64);
+        let keys = [
+            1u64,
+            (1u64 << 61) + 1,
+            (2u64 << 61) + 1,
+            (3u64 << 61) + 1,
+            (4u64 << 61) + 1,
+            (5u64 << 61) + 1,
+        ];
+        for (i, &key) in keys.iter().enumerate() {
+            map.insert(key, i as u64);
+        }
+
+        let new_capacity = map.shrink_to(1);
+        let (_, expected_capacity) = PoMapMeta::new(6);
+        assert_eq!(new_capacity, expected_capacity);
+
+        for (i, &key) in keys.iter().enumerate() {
+            assert_eq!(map.get(&key), Some(&(i as u64)));
+        }
+    }
+
+    #[test]
+    fn shrink_to_noop_when_target_not_smaller() {
+        let mut map: PoMap<u64, u64, IdentityHasher> = PoMap::with_capacity(32);
+        for i in 0..4u64 {
+            map.insert(i << 60, i);
+        }
+        let old_capacity = map.capacity();
+
+        let new_capacity = map.shrink_to(old_capacity);
+
+        assert_eq!(new_capacity, old_capacity);
+        assert_eq!(map.len(), 4);
+    }
+
+    #[test]
+    fn shrink_to_returns_current_when_repack_still_overflows() {
+        let mut map: PoMap<CollisionKey, u64, IdentityHasher> = PoMap::with_capacity(16);
+        for i in 0..4u64 {
+            map.insert(CollisionKey(i), i * 10);
+        }
+
+        let old_capacity = map.capacity();
+        let new_capacity = map.shrink_to(4);
+
+        assert_eq!(new_capacity, old_capacity);
+        for i in 0..4u64 {
+            let key = CollisionKey(i);
+            assert_eq!(map.get(&key), Some(&(i * 10)));
+        }
     }
 
     #[test]
