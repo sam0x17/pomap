@@ -606,8 +606,7 @@ fn bench_shrink_to(c: &mut Criterion) {
         .expect("target sizes should not be empty");
     let keys: Vec<BenchKey> = random_items(0x5A11CE, max_target_size);
     let values: Vec<BenchValue> = random_items(0xC0FFEE55, max_target_size);
-    let pomap_maps =
-        build_pomap_maps_from_data_with_capacity(&target_sizes, &keys, &values, 8);
+    let pomap_maps = build_pomap_maps_from_data_with_capacity(&target_sizes, &keys, &values, 8);
     let mut group = c.comparison_benchmark_group("shrink_to");
 
     group.bench_function("pomap", |b| {
@@ -627,8 +626,7 @@ fn bench_shrink_to(c: &mut Criterion) {
         );
     });
 
-    let std_maps =
-        build_std_maps_from_data_with_capacity(&target_sizes, &keys, &values, 8);
+    let std_maps = build_std_maps_from_data_with_capacity(&target_sizes, &keys, &values, 8);
     group.bench_function("std_hashmap", |b| {
         b.iter_batched(
             || {

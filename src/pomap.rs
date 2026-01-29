@@ -151,6 +151,52 @@ pub struct PoMap<K: Key, V: Value, H: Hasher + Default = DefaultHasher> {
 }
 
 impl<K: Key, V: Value, H: Hasher + Default> PoMap<K, V, H> {
+    #[inline(always)]
+    fn pack_from_slots(
+        dst: &mut Slots<K, V>,
+        meta: &PoMapMeta,
+        cursor: &mut usize,
+        src: &mut Slots<K, V>,
+        start_idx: usize,
+    ) -> Result<(), usize> {
+        let dst_hashes = dst.hashes_ptr();
+        let dst_entries = dst.entries_ptr();
+        let src_hashes = src.hashes_ptr();
+        let src_entries = src.entries_ptr();
+        let src_capacity = src.capacity();
+        let max_scan = meta.max_scan;
+        let index_shift = meta.index_shift;
+
+        let mut idx = start_idx;
+        while idx < src_capacity {
+            let hash = unsafe { *src_hashes.add(idx) };
+            if hash != VACANT_HASH {
+                let ideal_slot = (hash >> index_shift) as usize;
+                if *cursor < ideal_slot {
+                    *cursor = ideal_slot;
+                }
+                if *cursor >= ideal_slot + max_scan {
+                    return Err(idx);
+                }
+                unsafe {
+                    let entry = &mut *src_entries.add(idx);
+                    let key = entry.key.assume_init_read();
+                    let value = entry.value.assume_init_read();
+                    *src_hashes.add(idx) = VACANT_HASH;
+
+                    *dst_hashes.add(*cursor) = hash;
+                    let dst_entry = &mut *dst_entries.add(*cursor);
+                    dst_entry.key.write(key);
+                    dst_entry.value.write(value);
+                }
+                *cursor += 1;
+            }
+            idx += 1;
+        }
+
+        Ok(())
+    }
+
     /// Create a new [`PoMap`] with _at least_ the given capacity.
     ///
     /// Note that the actual internal capacity will always be scaled up to the next power of
@@ -460,76 +506,138 @@ impl<K: Key, V: Value, H: Hasher + Default> PoMap<K, V, H> {
     #[inline]
     pub fn shrink_to(&mut self, min_capacity: usize) -> usize {
         let requested = min_capacity.max(self.len).max(MIN_CAPACITY);
-        let (mut new_meta, mut new_capacity) = PoMapMeta::new(requested);
+        let (new_meta, new_capacity) = PoMapMeta::new(requested);
         let current_capacity = self.slots.capacity();
+        let current_meta = self.meta;
 
         if new_capacity >= current_capacity {
             return current_capacity;
         }
 
-        let hashes_ptr = self.slots.hashes_ptr();
-        let old_capacity = self.slots.capacity();
-
-        let can_pack = |meta: &PoMapMeta| -> bool {
-            let mut cursor = 0usize;
-            for idx in 0..old_capacity {
-                let hash = unsafe { *hashes_ptr.add(idx) };
-                if hash == VACANT_HASH {
-                    continue;
-                }
-                let ideal_slot = meta.ideal_slot(hash);
-                if cursor < ideal_slot {
-                    cursor = ideal_slot;
-                }
-                if cursor >= ideal_slot + meta.max_scan {
-                    return false;
-                }
-                cursor += 1;
-            }
-            true
-        };
-
-        if !can_pack(&new_meta) {
-            let ideal_range = 1usize << new_meta.index_bits;
-            let bumped_requested = ideal_range.saturating_add(1);
-            let (bumped_meta, bumped_capacity) = PoMapMeta::new(bumped_requested);
-            if bumped_capacity >= current_capacity || !can_pack(&bumped_meta) {
-                return current_capacity;
-            }
-            new_meta = bumped_meta;
-            new_capacity = bumped_capacity;
-        }
-
         let mut old_slots = core::mem::replace(&mut self.slots, Slots::new(new_capacity));
 
-        let hashes_ptr = old_slots.hashes_ptr();
-        let entries_ptr = old_slots.entries_ptr();
         let mut cursor = 0usize;
-
-        for idx in 0..old_capacity {
-            let hash = unsafe { *hashes_ptr.add(idx) };
-            if hash == VACANT_HASH {
-                continue;
-            }
-
-            let ideal_slot = new_meta.ideal_slot(hash);
-            if cursor < ideal_slot {
-                cursor = ideal_slot;
-            }
-            debug_assert!(cursor < ideal_slot + new_meta.max_scan);
-
-            let entry = unsafe { &mut *entries_ptr.add(idx) };
-            let key = unsafe { entry.key.assume_init_read() };
-            let value = unsafe { entry.value.assume_init_read() };
-
-            unsafe { old_slots.clear_slot(idx) };
-            unsafe { self.slots.write_slot(cursor, hash, key, value) };
-
-            cursor += 1;
+        let first_attempt =
+            Self::pack_from_slots(&mut self.slots, &new_meta, &mut cursor, &mut old_slots, 0);
+        if first_attempt.is_ok() {
+            self.meta = new_meta;
+            return new_capacity;
         }
 
-        self.meta = new_meta;
-        new_capacity
+        let failed_idx = first_attempt.err().unwrap();
+
+        let ideal_range = 1usize << new_meta.index_bits;
+        let bumped_requested = ideal_range.saturating_add(1);
+        let (bumped_meta, bumped_capacity) = PoMapMeta::new(bumped_requested);
+
+        if bumped_capacity < current_capacity {
+            let mut bumped_slots = Slots::new(bumped_capacity);
+            let mut bump_cursor = 0usize;
+            let bump_prefix = Self::pack_from_slots(
+                &mut bumped_slots,
+                &bumped_meta,
+                &mut bump_cursor,
+                &mut self.slots,
+                0,
+            );
+
+            match bump_prefix {
+                Ok(()) => {
+                    let bump_old = Self::pack_from_slots(
+                        &mut bumped_slots,
+                        &bumped_meta,
+                        &mut bump_cursor,
+                        &mut old_slots,
+                        failed_idx,
+                    );
+
+                    if bump_old.is_ok() {
+                        self.slots = bumped_slots;
+                        self.meta = bumped_meta;
+                        return bumped_capacity;
+                    }
+
+                    let failed_old_idx = bump_old.err().unwrap();
+                    let mut final_slots = Slots::new(current_capacity);
+                    let mut final_cursor = 0usize;
+                    Self::pack_from_slots(
+                        &mut final_slots,
+                        &current_meta,
+                        &mut final_cursor,
+                        &mut bumped_slots,
+                        0,
+                    )
+                    .expect("repack into current capacity failed");
+                    Self::pack_from_slots(
+                        &mut final_slots,
+                        &current_meta,
+                        &mut final_cursor,
+                        &mut old_slots,
+                        failed_old_idx,
+                    )
+                    .expect("repack into current capacity failed");
+                    self.slots = final_slots;
+                    return current_capacity;
+                }
+                Err(failed_prefix_idx) => {
+                    let mut final_slots = Slots::new(current_capacity);
+                    let mut final_cursor = 0usize;
+                    Self::pack_from_slots(
+                        &mut final_slots,
+                        &current_meta,
+                        &mut final_cursor,
+                        &mut bumped_slots,
+                        0,
+                    )
+                    .expect("repack into current capacity failed");
+                    Self::pack_from_slots(
+                        &mut final_slots,
+                        &current_meta,
+                        &mut final_cursor,
+                        &mut self.slots,
+                        failed_prefix_idx,
+                    )
+                    .expect("repack into current capacity failed");
+                    Self::pack_from_slots(
+                        &mut final_slots,
+                        &current_meta,
+                        &mut final_cursor,
+                        &mut old_slots,
+                        failed_idx,
+                    )
+                    .expect("repack into current capacity failed");
+                    self.slots = final_slots;
+                    return current_capacity;
+                }
+            }
+        }
+
+        let mut final_slots = Slots::new(current_capacity);
+        let mut final_cursor = 0usize;
+        Self::pack_from_slots(
+            &mut final_slots,
+            &current_meta,
+            &mut final_cursor,
+            &mut self.slots,
+            0,
+        )
+        .expect("repack into current capacity failed");
+        Self::pack_from_slots(
+            &mut final_slots,
+            &current_meta,
+            &mut final_cursor,
+            &mut old_slots,
+            failed_idx,
+        )
+        .expect("repack into current capacity failed");
+        self.slots = final_slots;
+        current_capacity
+    }
+
+    /// Shrinks the map as much as possible based on the current length.
+    #[inline]
+    pub fn shrink_to_fit(&mut self) -> usize {
+        self.shrink_to(self.len)
     }
 
     /// Reserve capacity for at least `requested_capacity` elements if there is not enough
@@ -1199,6 +1307,23 @@ mod tests {
 
         assert_eq!(new_capacity, old_capacity);
         assert_eq!(map.len(), 4);
+    }
+
+    #[test]
+    fn shrink_to_fit_uses_len() {
+        let mut map: PoMap<u64, u64, IdentityHasher> = PoMap::with_capacity(128);
+        for i in 0..5u64 {
+            let key = (i << 61) | i;
+            map.insert(key, i);
+        }
+
+        let old_capacity = map.capacity();
+        let (_, expected_capacity) = PoMapMeta::new(5);
+        let new_capacity = map.shrink_to_fit();
+
+        assert!(new_capacity < old_capacity);
+        assert_eq!(new_capacity, expected_capacity);
+        assert_eq!(map.len(), 5);
     }
 
     #[test]
