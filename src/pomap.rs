@@ -369,6 +369,90 @@ impl<K: Key, V: Value, H: Hasher + Default> PoMap<K, V, H> {
         }
     }
 
+    /// Removes a key from the map, returning the value if it existed.
+    ///
+    /// Computes the hash of the key and then delegates to [`Self::remove_with_hash`].
+    #[inline]
+    pub fn remove(&mut self, key: &K) -> Option<V> {
+        let mut hasher = H::default();
+        key.hash(&mut hasher);
+        let hash = encode_hash(hasher.finish());
+        self._remove_with_hash(hash, key)
+    }
+
+    #[inline]
+    pub fn remove_with_hash(&mut self, hash: u64, key: &K) -> Option<V> {
+        self._remove_with_hash(encode_hash(hash), key)
+    }
+
+    /// Hot path for `remove` that can be used when the caller already has the hash and doesn't
+    /// want to recompute it.
+    #[inline(always)]
+    fn _remove_with_hash(&mut self, hash: u64, key: &K) -> Option<V> {
+        let ideal_slot = self.meta.ideal_slot(hash);
+        let scan_end = ideal_slot + self.meta.max_scan;
+
+        // SAFETY: ideal_slot..scan_end is always in-bounds for the backing allocation.
+        let hashes_ptr = self.slots.hashes_ptr();
+        let entries_ptr = self.slots.entries_ptr();
+        let capacity = self.slots.capacity();
+
+        let mut idx = ideal_slot;
+        while idx < scan_end {
+            let slot_hash = unsafe { *hashes_ptr.add(idx) };
+
+            if slot_hash == hash {
+                let slot_entry = unsafe { &mut *entries_ptr.add(idx) };
+                let slot_key = unsafe { slot_entry.key.assume_init_ref() };
+                if slot_key == key {
+                    // Found the entry. Extract the value and drop the key.
+                    let value = unsafe { slot_entry.value.assume_init_read() };
+                    unsafe { slot_entry.key.assume_init_drop() };
+
+                    // Backshift-delete: move subsequent entries left while they can
+                    // legally occupy the vacancy.
+                    let mut vacancy = idx;
+                    let mut scan = idx + 1;
+                    while scan < capacity {
+                        let next_hash = unsafe { *hashes_ptr.add(scan) };
+                        if next_hash == VACANT_HASH {
+                            break;
+                        }
+                        let next_ideal = self.meta.ideal_slot(next_hash);
+                        if next_ideal > vacancy {
+                            break;
+                        }
+                        vacancy += 1;
+                        scan += 1;
+                    }
+
+                    if scan > idx + 1 {
+                        let count = scan - (idx + 1);
+                        unsafe {
+                            ptr::copy(hashes_ptr.add(idx + 1), hashes_ptr.add(idx), count);
+                            ptr::copy(entries_ptr.add(idx + 1), entries_ptr.add(idx), count);
+                        }
+                    }
+
+                    unsafe { *hashes_ptr.add(vacancy) = VACANT_HASH };
+                    self.len -= 1;
+                    return Some(value);
+                }
+
+                // Hash collision, but key order lets us stop early.
+                if slot_key > key {
+                    return None;
+                }
+            } else if slot_hash > hash {
+                return None; // also catches VACANT_HASH if VACANT_HASH > any valid hash
+            }
+
+            idx += 1;
+        }
+
+        None
+    }
+
     /// Reserve capacity for at least `requested_capacity` elements if there is not enough
     /// capacity already.
     ///
@@ -545,7 +629,7 @@ impl PoMapMeta {
 mod tests {
     use super::*;
     use rand::{Rng, SeedableRng, rngs::StdRng};
-    use std::{cell::Cell, collections::HashMap, rc::Rc};
+    use std::{cell::Cell, cmp::Ordering, collections::HashMap, rc::Rc};
 
     #[derive(Clone)]
     struct DropCounter {
@@ -555,6 +639,55 @@ mod tests {
     impl Drop for DropCounter {
         fn drop(&mut self) {
             self.drops.set(self.drops.get() + 1);
+        }
+    }
+
+    #[derive(Clone)]
+    struct DropKey {
+        id: u64,
+        drops: Rc<Cell<usize>>,
+    }
+
+    impl Drop for DropKey {
+        fn drop(&mut self) {
+            self.drops.set(self.drops.get() + 1);
+        }
+    }
+
+    impl Hash for DropKey {
+        fn hash<H: Hasher>(&self, state: &mut H) {
+            self.id.hash(state);
+        }
+    }
+
+    impl PartialEq for DropKey {
+        fn eq(&self, other: &Self) -> bool {
+            self.id == other.id
+        }
+    }
+
+    impl Eq for DropKey {}
+
+    impl PartialOrd for DropKey {
+        fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+            Some(self.id.cmp(&other.id))
+        }
+    }
+
+    impl Ord for DropKey {
+        fn cmp(&self, other: &Self) -> Ordering {
+            self.id.cmp(&other.id)
+        }
+    }
+
+    #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+    struct CollisionKey(u64);
+
+    const COLLISION_HASH: u64 = 0xBAD5EED_u64;
+
+    impl Hash for CollisionKey {
+        fn hash<H: Hasher>(&self, state: &mut H) {
+            state.write_u64(COLLISION_HASH);
         }
     }
 
@@ -735,5 +868,188 @@ mod tests {
 
         drop(map);
         assert_eq!(drops.get(), 2);
+    }
+
+    #[test]
+    fn remove_returns_value_and_clears_slot() {
+        let mut map: PoMap<u64, u64, IdentityHasher> = PoMap::new();
+        assert_eq!(map.remove(&123), None);
+
+        assert_eq!(map.insert(42, 7), None);
+        assert_eq!(map.remove(&42), Some(7));
+        assert_eq!(map.get(&42), None);
+        assert_eq!(map.len(), 0);
+        assert!(map.is_empty());
+    }
+
+    #[test]
+    fn remove_backshifts_contiguous_run() {
+        let mut map: PoMap<u64, u64, IdentityHasher> = PoMap::with_capacity(8);
+        let base = 0b01u64 << 62;
+        let k1 = base | 1;
+        let k2 = base | 2;
+        let k3 = base | 3;
+
+        map.insert(k1, 10);
+        map.insert(k2, 20);
+        map.insert(k3, 30);
+
+        let slot = map.meta.ideal_slot(encode_hash(k1));
+        assert_eq!(map.remove(&k1), Some(10));
+
+        let hashes_ptr = map.slots.hashes_ptr();
+        let entries_ptr = map.slots.entries_ptr();
+        let first_hash = unsafe { *hashes_ptr.add(slot) };
+        let second_hash = unsafe { *hashes_ptr.add(slot + 1) };
+        let third_hash = unsafe { *hashes_ptr.add(slot + 2) };
+
+        assert_eq!(first_hash, encode_hash(k2));
+        assert_eq!(second_hash, encode_hash(k3));
+        assert_eq!(third_hash, VACANT_HASH);
+
+        let first_entry = unsafe { &*entries_ptr.add(slot) };
+        let second_entry = unsafe { &*entries_ptr.add(slot + 1) };
+        assert_eq!(unsafe { *first_entry.key.assume_init_ref() }, k2);
+        assert_eq!(unsafe { *second_entry.key.assume_init_ref() }, k3);
+
+        assert_eq!(map.len(), 2);
+        assert_eq!(map.get(&k2), Some(&20));
+        assert_eq!(map.get(&k3), Some(&30));
+    }
+
+    #[test]
+    fn remove_compacts_middle_of_run() {
+        let mut map: PoMap<u64, u64, IdentityHasher> = PoMap::with_capacity(8);
+        let base = 0b01u64 << 62;
+        let k1 = base | 1;
+        let k2 = base | 2;
+        let k3 = base | 3;
+
+        map.insert(k1, 10);
+        map.insert(k2, 20);
+        map.insert(k3, 30);
+
+        let slot = map.meta.ideal_slot(encode_hash(k1));
+        assert_eq!(map.remove(&k2), Some(20));
+
+        let hashes_ptr = map.slots.hashes_ptr();
+        let entries_ptr = map.slots.entries_ptr();
+        let first_hash = unsafe { *hashes_ptr.add(slot) };
+        let second_hash = unsafe { *hashes_ptr.add(slot + 1) };
+        let third_hash = unsafe { *hashes_ptr.add(slot + 2) };
+
+        assert_eq!(first_hash, encode_hash(k1));
+        assert_eq!(second_hash, encode_hash(k3));
+        assert_eq!(third_hash, VACANT_HASH);
+
+        let first_entry = unsafe { &*entries_ptr.add(slot) };
+        let second_entry = unsafe { &*entries_ptr.add(slot + 1) };
+        assert_eq!(unsafe { *first_entry.key.assume_init_ref() }, k1);
+        assert_eq!(unsafe { *second_entry.key.assume_init_ref() }, k3);
+
+        assert_eq!(map.len(), 2);
+        assert_eq!(map.get(&k1), Some(&10));
+        assert_eq!(map.get(&k3), Some(&30));
+    }
+
+    #[test]
+    fn remove_does_not_shift_higher_ideal_slot() {
+        let mut map: PoMap<u64, u64, IdentityHasher> = PoMap::with_capacity(8);
+        let k1 = (0b01u64 << 62) | 1;
+        let k2 = (0b10u64 << 62) | 1;
+
+        map.insert(k1, 10);
+        map.insert(k2, 20);
+
+        let slot1 = map.meta.ideal_slot(encode_hash(k1));
+        let slot2 = map.meta.ideal_slot(encode_hash(k2));
+        assert!(slot1 < slot2);
+
+        assert_eq!(map.remove(&k1), Some(10));
+
+        let hashes_ptr = map.slots.hashes_ptr();
+        assert_eq!(unsafe { *hashes_ptr.add(slot1) }, VACANT_HASH);
+        assert_eq!(unsafe { *hashes_ptr.add(slot2) }, encode_hash(k2));
+        assert_eq!(map.get(&k2), Some(&20));
+        assert_eq!(map.len(), 1);
+    }
+
+    #[test]
+    fn remove_with_hash_and_collisions() {
+        let mut map: PoMap<CollisionKey, u64, IdentityHasher> = PoMap::with_capacity(8);
+        let k1 = CollisionKey(1);
+        let k3 = CollisionKey(3);
+        let k5 = CollisionKey(5);
+
+        map.insert(k1.clone(), 10);
+        map.insert(k3.clone(), 30);
+        map.insert(k5.clone(), 50);
+
+        assert_eq!(map.remove(&CollisionKey(2)), None);
+        assert_eq!(map.len(), 3);
+
+        assert_eq!(map.remove_with_hash(COLLISION_HASH, &k3), Some(30));
+        assert_eq!(map.get(&k3), None);
+        assert_eq!(map.len(), 2);
+        assert_eq!(map.get(&k1), Some(&10));
+        assert_eq!(map.get(&k5), Some(&50));
+    }
+
+    #[test]
+    fn remove_drops_key_and_returns_value_without_drop() {
+        let key_drops = Rc::new(Cell::new(0));
+        let value_drops = Rc::new(Cell::new(0));
+        let key = DropKey {
+            id: 7,
+            drops: key_drops.clone(),
+        };
+        let value = DropCounter {
+            drops: value_drops.clone(),
+        };
+
+        let mut map: PoMap<DropKey, DropCounter, IdentityHasher> = PoMap::new();
+        map.insert(key.clone(), value);
+
+        let removed = map.remove(&key).expect("expected value to be removed");
+        assert_eq!(key_drops.get(), 1);
+        assert_eq!(value_drops.get(), 0);
+
+        drop(map);
+        assert_eq!(key_drops.get(), 1);
+        assert_eq!(value_drops.get(), 0);
+
+        drop(removed);
+        assert_eq!(value_drops.get(), 1);
+
+        drop(key);
+        assert_eq!(key_drops.get(), 2);
+    }
+
+    #[test]
+    fn mass_inserts_and_removes_match_hashmap() {
+        let total = 200_000usize;
+        let mut map: PoMap<u64, u64, IdentityHasher> = PoMap::new();
+        let mut expected: HashMap<u64, u64> = HashMap::new();
+
+        let mut rng = StdRng::seed_from_u64(0xFEEDBEEF);
+        for _ in 0..total {
+            let key: u64 = rng.random();
+            let val: u64 = rng.random();
+            expected.insert(key, val);
+            map.insert(key, val);
+        }
+
+        let mut remove_rng = StdRng::seed_from_u64(0xBADBEEF);
+        for _ in 0..total {
+            let key: u64 = remove_rng.random();
+            let expected_val = expected.remove(&key);
+            let actual_val = map.remove(&key);
+            assert_eq!(actual_val, expected_val);
+        }
+
+        assert_eq!(map.len(), expected.len());
+        for (key, val) in expected.iter() {
+            assert_eq!(map.get(key), Some(val));
+        }
     }
 }

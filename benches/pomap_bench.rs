@@ -5,7 +5,7 @@ use std::{
 };
 
 use ahash::AHasher;
-use criterion::{Criterion, criterion_group, criterion_main};
+use criterion::{BatchSize, Criterion, criterion_group, criterion_main};
 use pomap::pomap::PoMap;
 #[cfg(feature = "bench-string")]
 use rand::distr::Alphanumeric;
@@ -446,6 +446,120 @@ fn bench_hot_gets(c: &mut Criterion) {
     group.finish();
 }
 
+fn bench_remove_hits(c: &mut Criterion) {
+    let target_sizes = insert_target_sizes();
+    let max_target_size = *target_sizes
+        .iter()
+        .max()
+        .expect("target sizes should not be empty");
+    let keys: Vec<BenchKey> = random_items(0xD15EA5E, max_target_size);
+    let values: Vec<BenchValue> = random_items(0xBEEFC0DE, max_target_size);
+    let pomap_maps = build_pomap_maps_from_data(&target_sizes, &keys, &values);
+    let mut group = c.comparison_benchmark_group("remove_hits");
+
+    group.bench_function("pomap", |b| {
+        b.iter_batched(
+            || {
+                pomap_maps
+                    .iter()
+                    .map(|(size, map)| (*size, map.clone()))
+                    .collect::<Vec<(usize, BenchPoMap)>>()
+            },
+            |mut maps| {
+                for (size, map) in maps.iter_mut() {
+                    let removes = GETS_PER_ROUND.min(*size);
+                    for idx in 0..removes {
+                        let key = &keys[idx];
+                        black_box(map.remove(key));
+                    }
+                }
+            },
+            BatchSize::LargeInput,
+        );
+    });
+
+    let std_maps = build_std_maps_from_data(&target_sizes, &keys, &values);
+    group.bench_function("std_hashmap", |b| {
+        b.iter_batched(
+            || {
+                std_maps
+                    .iter()
+                    .map(|(size, map)| (*size, map.clone()))
+                    .collect::<Vec<(usize, BenchHashMap)>>()
+            },
+            |mut maps| {
+                for (size, map) in maps.iter_mut() {
+                    let removes = GETS_PER_ROUND.min(*size);
+                    for idx in 0..removes {
+                        let key = &keys[idx];
+                        black_box(map.remove(key));
+                    }
+                }
+            },
+            BatchSize::LargeInput,
+        );
+    });
+
+    group.finish();
+}
+
+fn bench_remove_misses(c: &mut Criterion) {
+    let target_sizes = insert_target_sizes();
+    let max_target_size = *target_sizes
+        .iter()
+        .max()
+        .expect("target sizes should not be empty");
+    let present_keys: Vec<BenchKey> = random_items(0xC0FFEE, max_target_size);
+    let present_values: Vec<BenchValue> = random_items(0xBADF00D, max_target_size);
+
+    let mut present_set: HashSet<BenchKey, BenchHasherBuilder> =
+        HashSet::with_capacity_and_hasher(present_keys.len(), BenchHasherBuilder::default());
+    for key in &present_keys {
+        present_set.insert(key.clone());
+    }
+
+    let mut miss_rng = StdRng::seed_from_u64(0xF00DFACE);
+    let mut miss_keys: Vec<BenchKey> = Vec::with_capacity(max_target_size);
+    while miss_keys.len() < max_target_size {
+        let candidate = random_bench_item(&mut miss_rng);
+        if !present_set.contains(&candidate) {
+            miss_keys.push(candidate);
+        }
+    }
+
+    let mut pomap_maps = build_pomap_maps_from_data(&target_sizes, &present_keys, &present_values);
+    let mut group = c.comparison_benchmark_group("remove_misses");
+
+    group.bench_function("pomap", |b| {
+        b.iter(|| {
+            for (size, map) in pomap_maps.iter_mut() {
+                let removes = GETS_PER_ROUND.min(*size);
+                for idx in 0..removes {
+                    let key = &miss_keys[idx];
+                    black_box(map.remove(key));
+                }
+            }
+        });
+    });
+
+    drop(pomap_maps);
+    let mut std_maps = build_std_maps_from_data(&target_sizes, &present_keys, &present_values);
+
+    group.bench_function("std_hashmap", |b| {
+        b.iter(|| {
+            for (size, map) in std_maps.iter_mut() {
+                let removes = GETS_PER_ROUND.min(*size);
+                for idx in 0..removes {
+                    let key = &miss_keys[idx];
+                    black_box(map.remove(key));
+                }
+            }
+        });
+    });
+
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench_insert_allocate,
@@ -453,6 +567,8 @@ criterion_group!(
     bench_get_hits,
     bench_get_misses,
     bench_update,
-    bench_hot_gets
+    bench_hot_gets,
+    bench_remove_hits,
+    bench_remove_misses
 );
 criterion_main!(benches);
