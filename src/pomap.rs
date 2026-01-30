@@ -194,7 +194,7 @@ impl<K: Key, V: Value, H: Hasher + Default> PoMap<K, V, H> {
     /// Create a new [`PoMap`] with _at least_ the given capacity.
     ///
     /// Note that the actual internal capacity will always be scaled up to the next power of
-    /// two (if not already a power of two) plus `max_scan_for_capacity(ideal_range)`.
+    /// two (if not already a power of two) plus `index_bits` (the max-scan window).
     ///
     /// Also note that the minimum capacity is [`MIN_CAPACITY`].
     #[inline]
@@ -521,8 +521,10 @@ impl<K: Key, V: Value, H: Hasher + Default> PoMap<K, V, H> {
         let failed_idx = first_attempt.err().unwrap();
 
         let ideal_range = 1usize << new_meta.index_bits;
-        let bumped_requested = ideal_range.saturating_add(1);
-        let (bumped_meta, bumped_capacity) = PoMapMeta::new(bumped_requested);
+        let Some(bumped_ideal_range) = ideal_range.checked_mul(2) else {
+            return current_capacity;
+        };
+        let (bumped_meta, bumped_capacity) = PoMapMeta::new(bumped_ideal_range);
 
         if bumped_capacity < current_capacity {
             let mut bumped_slots = Slots::new(bumped_capacity);
@@ -642,7 +644,7 @@ impl<K: Key, V: Value, H: Hasher + Default> PoMap<K, V, H> {
     pub fn reserve(&mut self, requested_capacity: usize) -> usize {
         // generate new meta
         let current_capacity = self.slots.capacity();
-        let (new_meta, new_vec_capacity) = PoMapMeta::new(requested_capacity);
+        let (new_meta, new_vec_capacity) = PoMapMeta::new(requested_capacity.next_power_of_two());
         if new_vec_capacity <= current_capacity {
             /*println!(
                 "PoMap::reserve requested={} resulting_capacity={}",
@@ -753,18 +755,15 @@ struct PoMapMeta {
 }
 
 impl PoMapMeta {
-    /// Build meta from a *requested* logical capacity (or element count).
+    /// Build meta from a *requested* ideal range (power of two).
     ///
     /// We choose:
-    ///   base        = max(requested, MIN_CAPACITY)
-    ///   ideal_range = base.next_power_of_two()
-    ///   max_scan    = max_scan_for_capacity(ideal_range)
+    ///   ideal_range = max(requested, MIN_CAPACITY)
+    ///   index_bits  = log2(ideal_range)
     ///
     /// This means:
     ///   - `ideal_range` is a power of two
-    ///   - full Vec capacity should be `ideal_range + max_scan`
-    ///
-    /// There are no panics; we just round up.
+    ///   - full Vec capacity should be `ideal_range + index_bits`
     ///
     /// Returns `(meta, capacity)`, where `capacity` is what you should use
     /// for the backing allocation.
@@ -776,6 +775,7 @@ impl PoMapMeta {
             MIN_CAPACITY
         };
 
+        debug_assert!(ideal_range.is_power_of_two());
         let index_bits = ideal_range.trailing_zeros() as usize; // m
         debug_assert!(index_bits <= HASH_BITS);
         let index_shift: usize = HASH_BITS - index_bits; // use top-m bits of the u64 hash
@@ -1232,8 +1232,8 @@ mod tests {
 
         let old_capacity = map.capacity();
         let (base_meta, _) = PoMapMeta::new(4);
-        let bumped_requested = (1usize << base_meta.index_bits) + 1;
-        let (_, expected_capacity) = PoMapMeta::new(bumped_requested);
+        let bumped_ideal_range = (1usize << base_meta.index_bits) * 2;
+        let (_, expected_capacity) = PoMapMeta::new(bumped_ideal_range);
 
         let new_capacity = map.shrink_to(4);
         assert!(new_capacity < old_capacity);
@@ -1275,7 +1275,7 @@ mod tests {
         }
 
         let new_capacity = map.shrink_to(1);
-        let (_, expected_capacity) = PoMapMeta::new(6);
+        let (_, expected_capacity) = PoMapMeta::new(6usize.next_power_of_two());
         assert_eq!(new_capacity, expected_capacity);
 
         for (i, &key) in keys.iter().enumerate() {
@@ -1306,7 +1306,7 @@ mod tests {
         }
 
         let old_capacity = map.capacity();
-        let (_, expected_capacity) = PoMapMeta::new(5);
+        let (_, expected_capacity) = PoMapMeta::new(5usize.next_power_of_two());
         let new_capacity = map.shrink_to_fit();
 
         assert!(new_capacity < old_capacity);
