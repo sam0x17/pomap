@@ -21,8 +21,7 @@ const VACANT_HASH: u64 = u64::MAX;
 
 #[inline(always)]
 const fn max_scan_for_capacity(capacity: usize) -> usize {
-    // log2 rounded down; capacity is always >= MIN_CAPACITY (non-zero).
-    capacity.next_power_of_two().trailing_zeros() as usize
+    capacity.trailing_zeros() as usize
 }
 
 pub trait Key: Hash + Eq + Clone + Ord {}
