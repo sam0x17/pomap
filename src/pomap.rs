@@ -19,11 +19,6 @@ const HASH_BITS: usize = 64; // we use a 64-bit hashcode
 const GROWTH_FACTOR: usize = 4;
 const VACANT_HASH: u64 = u64::MAX;
 
-#[inline(always)]
-const fn max_scan_for_capacity(capacity: usize) -> usize {
-    capacity.trailing_zeros() as usize
-}
-
 pub trait Key: Hash + Eq + Clone + Ord {}
 impl<K: Hash + Eq + Clone + Ord> Key for K {}
 
@@ -163,7 +158,7 @@ impl<K: Key, V: Value, H: Hasher + Default> PoMap<K, V, H> {
         let src_hashes = src.hashes_ptr();
         let src_entries = src.entries_ptr();
         let src_capacity = src.capacity();
-        let max_scan = meta.max_scan;
+        let max_scan = meta.index_bits;
         let index_shift = meta.index_shift;
 
         let mut idx = start_idx;
@@ -204,7 +199,7 @@ impl<K: Key, V: Value, H: Hasher + Default> PoMap<K, V, H> {
     /// Also note that the minimum capacity is [`MIN_CAPACITY`].
     #[inline]
     pub fn with_capacity(capacity: usize) -> Self {
-        let (meta, vec_capacity) = PoMapMeta::new(capacity);
+        let (meta, vec_capacity) = PoMapMeta::new(capacity.next_power_of_two());
         let slots = Slots::new(vec_capacity);
         Self {
             len: 0,
@@ -227,7 +222,7 @@ impl<K: Key, V: Value, H: Hasher + Default> PoMap<K, V, H> {
 
     #[inline(always)]
     pub const fn max_scan(&self) -> usize {
-        self.meta.max_scan
+        self.meta.index_bits
     }
 
     /// Current number of occupied entries.
@@ -263,7 +258,7 @@ impl<K: Key, V: Value, H: Hasher + Default> PoMap<K, V, H> {
     #[inline(always)]
     pub fn _get_with_hash(&self, hash: u64, key: &K) -> Option<&V> {
         let ideal_slot = self.meta.ideal_slot(hash);
-        let scan_end = ideal_slot + self.meta.max_scan;
+        let scan_end = ideal_slot + self.meta.index_bits;
 
         // SAFETY: ideal_slot..scan_end is always in-bounds for the backing allocation.
         let hashes_ptr = self.slots.hashes_ptr();
@@ -305,7 +300,7 @@ impl<K: Key, V: Value, H: Hasher + Default> PoMap<K, V, H> {
     fn _insert_with_hash(&mut self, hash: u64, key: K, value: V) -> Option<V> {
         loop {
             let ideal_slot = self.meta.ideal_slot(hash);
-            let scan_end = ideal_slot + self.meta.max_scan;
+            let scan_end = ideal_slot + self.meta.index_bits;
 
             // SAFETY: ideal_slot..scan_end is always in-bounds for the backing allocation.
             let hashes_ptr = self.slots.hashes_ptr();
@@ -401,7 +396,7 @@ impl<K: Key, V: Value, H: Hasher + Default> PoMap<K, V, H> {
             let old_cap = self.slots.capacity();
             #[cfg(feature = "resize-logging")]
             let load_factor = self.len as f64 / old_cap as f64;
-            self.reserve((self.slots.capacity() - self.meta.max_scan) * GROWTH_FACTOR);
+            self.reserve((self.slots.capacity() - self.meta.index_bits) * GROWTH_FACTOR);
             #[cfg(feature = "resize-logging")]
             let new_cap = self.slots.capacity();
             #[cfg(feature = "resize-logging")]
@@ -435,7 +430,7 @@ impl<K: Key, V: Value, H: Hasher + Default> PoMap<K, V, H> {
     #[inline(always)]
     fn _remove_with_hash(&mut self, hash: u64, key: &K) -> Option<V> {
         let ideal_slot = self.meta.ideal_slot(hash);
-        let scan_end = ideal_slot + self.meta.max_scan;
+        let scan_end = ideal_slot + self.meta.index_bits;
 
         // SAFETY: ideal_slot..scan_end is always in-bounds for the backing allocation.
         let hashes_ptr = self.slots.hashes_ptr();
@@ -505,7 +500,7 @@ impl<K: Key, V: Value, H: Hasher + Default> PoMap<K, V, H> {
     #[inline]
     pub fn shrink_to(&mut self, min_capacity: usize) -> usize {
         let requested = min_capacity.max(self.len).max(MIN_CAPACITY);
-        let (new_meta, new_capacity) = PoMapMeta::new(requested);
+        let (new_meta, new_capacity) = PoMapMeta::new(requested.next_power_of_two());
         let current_capacity = self.slots.capacity();
         let current_meta = self.meta;
 
@@ -749,15 +744,12 @@ impl Default for PoMap<(), ()> {
 /// The caller is responsible for using the returned `capacity` to size the backing allocation.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 struct PoMapMeta {
-    /// Number of index bits m where `ideal_range = 1 << m`.
+    /// Number of index bits m where `ideal_range = 1 << m`, also equal to max_scan for this capacity.
     index_bits: usize,
 
     /// Shift to extract the top-m bits from the 64-bit hash:
     ///   ideal_slot = (hash >> index_shift)
     index_shift: usize,
-
-    /// Maximum scan distance for this capacity.
-    max_scan: usize,
 }
 
 impl PoMapMeta {
@@ -778,15 +770,13 @@ impl PoMapMeta {
     /// for the backing allocation.
     #[inline(always)]
     const fn new(requested: usize) -> (Self, usize) {
-        let base = if requested > MIN_CAPACITY {
+        let ideal_range = if requested > MIN_CAPACITY {
             requested
         } else {
             MIN_CAPACITY
         };
-        let ideal_range = base.next_power_of_two();
-        let max_scan = max_scan_for_capacity(ideal_range);
 
-        let index_bits: usize = ideal_range.trailing_zeros() as usize; // m
+        let index_bits = ideal_range.trailing_zeros() as usize; // m
         debug_assert!(index_bits <= HASH_BITS);
         let index_shift: usize = HASH_BITS - index_bits; // use top-m bits of the u64 hash
 
@@ -794,9 +784,8 @@ impl PoMapMeta {
             Self {
                 index_bits,
                 index_shift,
-                max_scan,
             },
-            ideal_range + max_scan,
+            ideal_range + index_bits,
         )
     }
 
