@@ -552,8 +552,7 @@ fn bench_update(c: &mut Criterion) {
     });
 
     drop(std_maps);
-    let mut hashbrown_maps =
-        build_hashbrown_maps_from_data(&target_sizes, &keys, &initial_values);
+    let mut hashbrown_maps = build_hashbrown_maps_from_data(&target_sizes, &keys, &initial_values);
 
     group.bench_function("hashbrown", |b| {
         b.iter(|| {
