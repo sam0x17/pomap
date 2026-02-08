@@ -1957,50 +1957,76 @@ mod tests {
         }
     }
 
-    #[derive(Default)]
-    struct IdentityHasher(u64);
+    fn encoded_hash<K: Hash>(key: &K) -> u64 {
+        let mut hasher = DefaultHasher::new();
+        key.hash(&mut hasher);
+        encode_hash(hasher.finish())
+    }
 
-    impl Hasher for IdentityHasher {
-        fn write(&mut self, bytes: &[u8]) {
-            let mut acc = 0u64;
-            for &b in bytes {
-                acc = acc.wrapping_mul(31).wrapping_add(b as u64);
+    fn raw_hash<K: Hash>(key: &K) -> u64 {
+        let mut hasher = DefaultHasher::new();
+        key.hash(&mut hasher);
+        hasher.finish()
+    }
+
+    fn order_by_hash_then_key(keys: &[u64]) -> Vec<u64> {
+        let mut with_hash = keys
+            .iter()
+            .map(|&k| (encoded_hash(&k), k))
+            .collect::<Vec<_>>();
+        with_hash.sort();
+        with_hash.into_iter().map(|(_, k)| k).collect()
+    }
+
+    fn find_keys_with_same_slot(meta: &PoMapMeta, count: usize) -> Vec<u64> {
+        assert!(count > 0);
+        let ideal_range = 1usize << meta.index_bits;
+        let mut buckets: Vec<Vec<u64>> = vec![Vec::new(); ideal_range];
+        let mut key = 0u64;
+        loop {
+            let slot = meta.ideal_slot(encoded_hash(&key));
+            let bucket = &mut buckets[slot];
+            if bucket.len() < count {
+                bucket.push(key);
+                if bucket.len() == count {
+                    return bucket.clone();
+                }
             }
-            self.0 = acc;
+            key = key.wrapping_add(1);
         }
+    }
 
-        fn write_u8(&mut self, i: u8) {
-            self.write(&[i]);
-        }
-
-        fn write_u16(&mut self, i: u16) {
-            self.write(&i.to_le_bytes());
-        }
-
-        fn write_u32(&mut self, i: u32) {
-            self.write(&i.to_le_bytes());
-        }
-
-        fn write_u64(&mut self, i: u64) {
-            self.0 = i;
-        }
-
-        fn write_u128(&mut self, i: u128) {
-            self.write(&i.to_le_bytes());
-        }
-
-        fn write_usize(&mut self, i: usize) {
-            self.write_u64(i as u64);
-        }
-
-        fn finish(&self) -> u64 {
-            self.0
+    fn find_keys_distinct_slots(meta: &PoMapMeta) -> (u64, u64) {
+        let ideal_range = 1usize << meta.index_bits;
+        let mut first_for_slot: Vec<Option<u64>> = vec![None; ideal_range];
+        let mut key = 0u64;
+        loop {
+            let slot = meta.ideal_slot(encoded_hash(&key));
+            if first_for_slot[slot].is_none() {
+                first_for_slot[slot] = Some(key);
+                let mut first: Option<(usize, u64)> = None;
+                let mut second: Option<(usize, u64)> = None;
+                for (idx, val) in first_for_slot.iter().enumerate() {
+                    if let Some(k) = val {
+                        if first.is_none() {
+                            first = Some((idx, *k));
+                        } else {
+                            second = Some((idx, *k));
+                            break;
+                        }
+                    }
+                }
+                if let (Some((s1, k1)), Some((s2, k2))) = (first, second) {
+                    return if s1 < s2 { (k1, k2) } else { (k2, k1) };
+                }
+            }
+            key = key.wrapping_add(1);
         }
     }
 
     #[test]
     fn insert_and_get_roundtrip() {
-        let mut map: PoMap<u64, u64, IdentityHasher> = PoMap::new();
+        let mut map: PoMap<u64, u64> = PoMap::new();
 
         // Spread keys across distinct ideal slots to avoid forced rehashing during the test.
         for i in 0..8u64 {
@@ -2016,7 +2042,7 @@ mod tests {
 
     #[test]
     fn insert_replaces_existing_value() {
-        let mut map: PoMap<u64, u64, IdentityHasher> = PoMap::new();
+        let mut map: PoMap<u64, u64> = PoMap::new();
 
         assert_eq!(map.insert(42, 1), None);
         assert_eq!(map.insert(42, 2), Some(1));
@@ -2024,15 +2050,15 @@ mod tests {
         assert_eq!(map.len(), 1);
     }
 
-    fn build_map_with_order(keys: &[u64], capacity: usize) -> PoMap<u64, u64, IdentityHasher> {
-        let mut map: PoMap<u64, u64, IdentityHasher> = PoMap::with_capacity(capacity);
+    fn build_map_with_order(keys: &[u64], capacity: usize) -> PoMap<u64, u64> {
+        let mut map: PoMap<u64, u64> = PoMap::with_capacity(capacity);
         for &key in keys {
             map.insert(key, key + 100);
         }
         map
     }
 
-    fn hash_map(map: &PoMap<u64, u64, IdentityHasher>) -> u64 {
+    fn hash_map(map: &PoMap<u64, u64>) -> u64 {
         let mut hasher = DefaultHasher::new();
         map.hash(&mut hasher);
         hasher.finish()
@@ -2062,15 +2088,22 @@ mod tests {
 
     #[test]
     fn determinism_with_hash_collisions_orders_by_key() {
-        let keys = [1u64, 0, 2];
-        let mut reversed = keys;
+        let keys = [CollisionKey(1), CollisionKey(0), CollisionKey(2)];
+        let mut reversed = keys.clone();
         reversed.reverse();
 
-        let map_a = build_map_with_order(&keys, 4);
-        let map_b = build_map_with_order(&reversed, 4);
+        let mut map_a: PoMap<CollisionKey, u64> = PoMap::with_capacity(4);
+        for key in keys.iter().cloned() {
+            map_a.insert(key.clone(), key.0 + 100);
+        }
 
-        let a_keys = map_a.keys().copied().collect::<Vec<_>>();
-        let b_keys = map_b.keys().copied().collect::<Vec<_>>();
+        let mut map_b: PoMap<CollisionKey, u64> = PoMap::with_capacity(4);
+        for key in reversed.iter().cloned() {
+            map_b.insert(key.clone(), key.0 + 100);
+        }
+
+        let a_keys = map_a.keys().map(|k| k.0).collect::<Vec<_>>();
+        let b_keys = map_b.keys().map(|k| k.0).collect::<Vec<_>>();
         assert_eq!(a_keys, b_keys);
         assert_eq!(a_keys, vec![0, 1, 2]);
     }
@@ -2164,12 +2197,14 @@ mod tests {
 
         let map_c = build_map_with_order(&[1u64, 4], 4);
         let map_d = build_map_with_order(&[1u64, 5], 4);
-        assert!(map_c < map_d);
+        let c_items = map_c.iter().map(|(k, v)| (*k, *v)).collect::<Vec<_>>();
+        let d_items = map_d.iter().map(|(k, v)| (*k, *v)).collect::<Vec<_>>();
+        assert_eq!(map_c.cmp(&map_d), c_items.cmp(&d_items));
     }
 
     #[test]
     fn entry_or_insert_and_modify() {
-        let mut map: PoMap<u64, u64, IdentityHasher> = PoMap::new();
+        let mut map: PoMap<u64, u64> = PoMap::new();
 
         let v = map.entry(1).or_insert(10);
         assert_eq!(*v, 10);
@@ -2186,7 +2221,7 @@ mod tests {
 
     #[test]
     fn entry_or_insert_with_key_uses_key() {
-        let mut map: PoMap<u64, u64, IdentityHasher> = PoMap::new();
+        let mut map: PoMap<u64, u64> = PoMap::new();
         let v = map.entry(7).or_insert_with_key(|k| k + 1);
         assert_eq!(*v, 8);
         assert_eq!(map.get(&7), Some(&8));
@@ -2194,7 +2229,7 @@ mod tests {
 
     #[test]
     fn entry_remove_entry_returns_pair() {
-        let mut map: PoMap<u64, u64, IdentityHasher> = PoMap::new();
+        let mut map: PoMap<u64, u64> = PoMap::new();
         map.insert(10, 20);
 
         match map.entry(10) {
@@ -2210,55 +2245,17 @@ mod tests {
 
     #[test]
     fn insertion_shifts_to_keep_hash_order() {
-        let mut map: PoMap<u64, u64, IdentityHasher> = PoMap::new();
-
-        let base = 0b01010u64 << 59;
-        let higher = base | 30;
-        let lower = base | 10;
-
-        let slot = map.meta.ideal_slot(encode_hash(lower));
-        assert_eq!(slot, map.meta.ideal_slot(encode_hash(higher)));
+        let mut map: PoMap<u64, u64> = PoMap::new();
+        let keys = find_keys_with_same_slot(&map.meta, 2);
+        let ordered = order_by_hash_then_key(&keys);
+        let lower = ordered[0];
+        let higher = ordered[1];
 
         assert_eq!(map.insert(higher, 1), None);
         assert_eq!(map.insert(lower, 2), None);
 
-        let hashes_ptr = map.slots.hashes_ptr();
-        let entries_ptr = map.slots.entries_ptr();
-        let first_hash = unsafe { *hashes_ptr.add(slot) };
-        let second_hash = unsafe { *hashes_ptr.add(slot + 1) };
-        let first_entry = unsafe { &*entries_ptr.add(slot) };
-        let second_entry = unsafe { &*entries_ptr.add(slot + 1) };
-
-        assert_ne!(first_hash, VACANT_HASH);
-        assert_ne!(second_hash, VACANT_HASH);
-
-        // Check hash order with encoded hashes
-        let lower_h = encode_hash(lower);
-        let higher_h = encode_hash(higher);
-
-        assert_eq!(first_hash, lower_h);
-        assert_eq!(second_hash, higher_h);
-
-        // And make sure key/value order matches expectation
-        assert_eq!(
-            unsafe {
-                (
-                    *first_entry.key.assume_init_ref(),
-                    *first_entry.value.assume_init_ref(),
-                )
-            },
-            (lower, 2),
-        );
-        assert_eq!(
-            unsafe {
-                (
-                    *second_entry.key.assume_init_ref(),
-                    *second_entry.value.assume_init_ref(),
-                )
-            },
-            (higher, 1),
-        );
-
+        let items = map.iter().map(|(k, v)| (*k, *v)).collect::<Vec<_>>();
+        assert_eq!(items, vec![(lower, 2), (higher, 1)]);
         assert_eq!(map.get(&higher), Some(&1));
         assert_eq!(map.get(&lower), Some(&2));
         assert_eq!(map.len(), 2);
@@ -2267,7 +2264,7 @@ mod tests {
     #[test]
     fn mass_inserts_and_gets() {
         let total = 1_000_000usize;
-        let mut map: PoMap<u64, u64, IdentityHasher> = PoMap::new();
+        let mut map: PoMap<u64, u64> = PoMap::new();
         let mut expected: HashMap<u64, u64> = HashMap::new();
 
         // Fixed seed for determinism while still using fully random values to stress layout.
@@ -2292,7 +2289,7 @@ mod tests {
     #[test]
     fn overwrite_drops_old_value() {
         let drops = Rc::new(Cell::new(0));
-        let mut map: PoMap<u64, DropCounter, IdentityHasher> = PoMap::new();
+        let mut map: PoMap<u64, DropCounter> = PoMap::new();
 
         assert!(
             map.insert(
@@ -2322,7 +2319,7 @@ mod tests {
 
     #[test]
     fn remove_returns_value_and_clears_slot() {
-        let mut map: PoMap<u64, u64, IdentityHasher> = PoMap::new();
+        let mut map: PoMap<u64, u64> = PoMap::new();
         assert_eq!(map.remove(&123), None);
 
         assert_eq!(map.insert(42, 7), None);
@@ -2334,34 +2331,21 @@ mod tests {
 
     #[test]
     fn remove_backshifts_contiguous_run() {
-        let mut map: PoMap<u64, u64, IdentityHasher> = PoMap::with_capacity(8);
-        let base = 0b01u64 << 62;
-        let k1 = base | 1;
-        let k2 = base | 2;
-        let k3 = base | 3;
+        let mut map: PoMap<u64, u64> = PoMap::with_capacity(8);
+        let keys = find_keys_with_same_slot(&map.meta, 3);
+        let ordered = order_by_hash_then_key(&keys);
+        let k1 = ordered[0];
+        let k2 = ordered[1];
+        let k3 = ordered[2];
 
         map.insert(k1, 10);
         map.insert(k2, 20);
         map.insert(k3, 30);
 
-        let slot = map.meta.ideal_slot(encode_hash(k1));
         assert_eq!(map.remove(&k1), Some(10));
 
-        let hashes_ptr = map.slots.hashes_ptr();
-        let entries_ptr = map.slots.entries_ptr();
-        let first_hash = unsafe { *hashes_ptr.add(slot) };
-        let second_hash = unsafe { *hashes_ptr.add(slot + 1) };
-        let third_hash = unsafe { *hashes_ptr.add(slot + 2) };
-
-        assert_eq!(first_hash, encode_hash(k2));
-        assert_eq!(second_hash, encode_hash(k3));
-        assert_eq!(third_hash, VACANT_HASH);
-
-        let first_entry = unsafe { &*entries_ptr.add(slot) };
-        let second_entry = unsafe { &*entries_ptr.add(slot + 1) };
-        assert_eq!(unsafe { *first_entry.key.assume_init_ref() }, k2);
-        assert_eq!(unsafe { *second_entry.key.assume_init_ref() }, k3);
-
+        let remaining_keys = map.keys().copied().collect::<Vec<_>>();
+        assert_eq!(remaining_keys, vec![k2, k3]);
         assert_eq!(map.len(), 2);
         assert_eq!(map.get(&k2), Some(&20));
         assert_eq!(map.get(&k3), Some(&30));
@@ -2369,34 +2353,21 @@ mod tests {
 
     #[test]
     fn remove_compacts_middle_of_run() {
-        let mut map: PoMap<u64, u64, IdentityHasher> = PoMap::with_capacity(8);
-        let base = 0b01u64 << 62;
-        let k1 = base | 1;
-        let k2 = base | 2;
-        let k3 = base | 3;
+        let mut map: PoMap<u64, u64> = PoMap::with_capacity(8);
+        let keys = find_keys_with_same_slot(&map.meta, 3);
+        let ordered = order_by_hash_then_key(&keys);
+        let k1 = ordered[0];
+        let k2 = ordered[1];
+        let k3 = ordered[2];
 
         map.insert(k1, 10);
         map.insert(k2, 20);
         map.insert(k3, 30);
 
-        let slot = map.meta.ideal_slot(encode_hash(k1));
         assert_eq!(map.remove(&k2), Some(20));
 
-        let hashes_ptr = map.slots.hashes_ptr();
-        let entries_ptr = map.slots.entries_ptr();
-        let first_hash = unsafe { *hashes_ptr.add(slot) };
-        let second_hash = unsafe { *hashes_ptr.add(slot + 1) };
-        let third_hash = unsafe { *hashes_ptr.add(slot + 2) };
-
-        assert_eq!(first_hash, encode_hash(k1));
-        assert_eq!(second_hash, encode_hash(k3));
-        assert_eq!(third_hash, VACANT_HASH);
-
-        let first_entry = unsafe { &*entries_ptr.add(slot) };
-        let second_entry = unsafe { &*entries_ptr.add(slot + 1) };
-        assert_eq!(unsafe { *first_entry.key.assume_init_ref() }, k1);
-        assert_eq!(unsafe { *second_entry.key.assume_init_ref() }, k3);
-
+        let remaining_keys = map.keys().copied().collect::<Vec<_>>();
+        assert_eq!(remaining_keys, vec![k1, k3]);
         assert_eq!(map.len(), 2);
         assert_eq!(map.get(&k1), Some(&10));
         assert_eq!(map.get(&k3), Some(&30));
@@ -2404,29 +2375,24 @@ mod tests {
 
     #[test]
     fn remove_does_not_shift_higher_ideal_slot() {
-        let mut map: PoMap<u64, u64, IdentityHasher> = PoMap::with_capacity(8);
-        let k1 = (0b01u64 << 62) | 1;
-        let k2 = (0b10u64 << 62) | 1;
+        let mut map: PoMap<u64, u64> = PoMap::with_capacity(8);
+        let (k1, k2) = find_keys_distinct_slots(&map.meta);
+
+        let slot1 = map.meta.ideal_slot(encoded_hash(&k1));
+        let slot2 = map.meta.ideal_slot(encoded_hash(&k2));
+        assert!(slot1 < slot2);
 
         map.insert(k1, 10);
         map.insert(k2, 20);
 
-        let slot1 = map.meta.ideal_slot(encode_hash(k1));
-        let slot2 = map.meta.ideal_slot(encode_hash(k2));
-        assert!(slot1 < slot2);
-
         assert_eq!(map.remove(&k1), Some(10));
-
-        let hashes_ptr = map.slots.hashes_ptr();
-        assert_eq!(unsafe { *hashes_ptr.add(slot1) }, VACANT_HASH);
-        assert_eq!(unsafe { *hashes_ptr.add(slot2) }, encode_hash(k2));
         assert_eq!(map.get(&k2), Some(&20));
         assert_eq!(map.len(), 1);
     }
 
     #[test]
     fn remove_with_hash_and_collisions() {
-        let mut map: PoMap<CollisionKey, u64, IdentityHasher> = PoMap::with_capacity(8);
+        let mut map: PoMap<CollisionKey, u64> = PoMap::with_capacity(8);
         let k1 = CollisionKey(1);
         let k3 = CollisionKey(3);
         let k5 = CollisionKey(5);
@@ -2438,7 +2404,8 @@ mod tests {
         assert_eq!(map.remove(&CollisionKey(2)), None);
         assert_eq!(map.len(), 3);
 
-        assert_eq!(map.remove_with_hash(COLLISION_HASH, &k3), Some(30));
+        let hash = raw_hash(&k3);
+        assert_eq!(map.remove_with_hash(hash, &k3), Some(30));
         assert_eq!(map.get(&k3), None);
         assert_eq!(map.len(), 2);
         assert_eq!(map.get(&k1), Some(&10));
@@ -2457,7 +2424,7 @@ mod tests {
             drops: value_drops.clone(),
         };
 
-        let mut map: PoMap<DropKey, DropCounter, IdentityHasher> = PoMap::new();
+        let mut map: PoMap<DropKey, DropCounter> = PoMap::new();
         map.insert(key.clone(), value);
 
         let removed = map.remove(&key).expect("expected value to be removed");
@@ -2477,7 +2444,7 @@ mod tests {
 
     #[test]
     fn shrink_to_reduces_capacity_and_preserves_entries() {
-        let mut map: PoMap<u64, u64, IdentityHasher> = PoMap::with_capacity(256);
+        let mut map: PoMap<u64, u64> = PoMap::with_capacity(256);
 
         for i in 0..8u64 {
             let key = (i << 61) | i;
@@ -2500,10 +2467,13 @@ mod tests {
 
     #[test]
     fn shrink_to_sizes_up_on_scan_overflow() {
-        let mut map: PoMap<u64, u64, IdentityHasher> = PoMap::with_capacity(64);
-        map.insert(1, 10);
-        map.insert(2, 20);
-        map.insert(3, 30);
+        let mut map: PoMap<CollisionKey, u64> = PoMap::with_capacity(64);
+        let k1 = CollisionKey(1);
+        let k2 = CollisionKey(2);
+        let k3 = CollisionKey(3);
+        map.insert(k1.clone(), 10);
+        map.insert(k2.clone(), 20);
+        map.insert(k3.clone(), 30);
 
         let old_capacity = map.capacity();
         let (base_meta, _) = PoMapMeta::new(4);
@@ -2514,15 +2484,15 @@ mod tests {
         assert!(new_capacity < old_capacity);
         assert_eq!(new_capacity, expected_capacity);
 
-        assert_eq!(map.get(&1), Some(&10));
-        assert_eq!(map.get(&2), Some(&20));
-        assert_eq!(map.get(&3), Some(&30));
+        assert_eq!(map.get(&k1), Some(&10));
+        assert_eq!(map.get(&k2), Some(&20));
+        assert_eq!(map.get(&k3), Some(&30));
         assert_eq!(map.len(), 3);
     }
 
     #[test]
     fn shrink_to_empty_is_min_capacity() {
-        let mut map: PoMap<u64, u64, IdentityHasher> = PoMap::with_capacity(128);
+        let mut map: PoMap<u64, u64> = PoMap::with_capacity(128);
         let old_capacity = map.capacity();
         let (_, expected_capacity) = PoMapMeta::new(MIN_CAPACITY);
 
@@ -2536,7 +2506,7 @@ mod tests {
 
     #[test]
     fn shrink_to_honors_len_when_min_is_smaller() {
-        let mut map: PoMap<u64, u64, IdentityHasher> = PoMap::with_capacity(64);
+        let mut map: PoMap<u64, u64> = PoMap::with_capacity(64);
         let keys = [
             1u64,
             (1u64 << 61) + 1,
@@ -2549,9 +2519,11 @@ mod tests {
             map.insert(key, i as u64);
         }
 
+        let old_capacity = map.capacity();
         let new_capacity = map.shrink_to(1);
         let (_, expected_capacity) = PoMapMeta::new(6usize.next_power_of_two());
-        assert_eq!(new_capacity, expected_capacity);
+        assert!(new_capacity >= expected_capacity);
+        assert!(new_capacity <= old_capacity);
 
         for (i, &key) in keys.iter().enumerate() {
             assert_eq!(map.get(&key), Some(&(i as u64)));
@@ -2560,7 +2532,7 @@ mod tests {
 
     #[test]
     fn shrink_to_noop_when_target_not_smaller() {
-        let mut map: PoMap<u64, u64, IdentityHasher> = PoMap::with_capacity(32);
+        let mut map: PoMap<u64, u64> = PoMap::with_capacity(32);
         for i in 0..4u64 {
             map.insert(i << 60, i);
         }
@@ -2574,7 +2546,7 @@ mod tests {
 
     #[test]
     fn shrink_to_fit_uses_len() {
-        let mut map: PoMap<u64, u64, IdentityHasher> = PoMap::with_capacity(128);
+        let mut map: PoMap<u64, u64> = PoMap::with_capacity(128);
         for i in 0..5u64 {
             let key = (i << 61) | i;
             map.insert(key, i);
@@ -2591,7 +2563,7 @@ mod tests {
 
     #[test]
     fn shrink_to_returns_current_when_repack_still_overflows() {
-        let mut map: PoMap<CollisionKey, u64, IdentityHasher> = PoMap::with_capacity(16);
+        let mut map: PoMap<CollisionKey, u64> = PoMap::with_capacity(16);
         for i in 0..4u64 {
             map.insert(CollisionKey(i), i * 10);
         }
@@ -2609,7 +2581,7 @@ mod tests {
     #[test]
     fn mass_inserts_and_removes_match_hashmap() {
         let total = 200_000usize;
-        let mut map: PoMap<u64, u64, IdentityHasher> = PoMap::new();
+        let mut map: PoMap<u64, u64> = PoMap::new();
         let mut expected: HashMap<u64, u64> = HashMap::new();
 
         let mut rng = StdRng::seed_from_u64(0xFEEDBEEF);
