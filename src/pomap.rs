@@ -19,13 +19,15 @@ const HASH_BITS: usize = 64; // we use a 64-bit hashcode
 const GROWTH_FACTOR: usize = 4;
 const VACANT_HASH: u64 = u64::MAX;
 
+/// Marker trait for keys stored in a [`PoMap`].
 pub trait Key: Hash + Eq + Clone + Ord {}
 impl<K: Hash + Eq + Clone + Ord> Key for K {}
 
+/// Marker trait for values stored in a [`PoMap`].
 pub trait Value: Clone {}
 impl<V: Clone> Value for V {}
 
-struct Entry<K: Key, V: Value> {
+struct SlotEntry<K: Key, V: Value> {
     key: MaybeUninit<K>,
     value: MaybeUninit<V>,
 }
@@ -42,9 +44,9 @@ struct Slots<K: Key, V: Value> {
     ptr: NonNull<u8>,
     capacity: usize,
     hashes: *mut u64,
-    entries: *mut Entry<K, V>,
+    entries: *mut SlotEntry<K, V>,
     layout: Layout,
-    _marker: PhantomData<Entry<K, V>>,
+    _marker: PhantomData<SlotEntry<K, V>>,
 }
 
 impl<K: Key, V: Value> Slots<K, V> {
@@ -52,7 +54,7 @@ impl<K: Key, V: Value> Slots<K, V> {
     fn new(capacity: usize) -> Self {
         let hashes_layout =
             Layout::array::<u64>(capacity).expect("PoMap hash layout overflow on creation");
-        let entries_layout = Layout::array::<Entry<K, V>>(capacity)
+        let entries_layout = Layout::array::<SlotEntry<K, V>>(capacity)
             .expect("PoMap entry layout overflow on creation");
         let (layout, entries_offset) = hashes_layout
             .extend(entries_layout)
@@ -66,7 +68,7 @@ impl<K: Key, V: Value> Slots<K, V> {
         };
 
         let hashes = ptr.as_ptr() as *mut u64;
-        let entries = unsafe { ptr.as_ptr().add(entries_offset) as *mut Entry<K, V> };
+        let entries = unsafe { ptr.as_ptr().add(entries_offset) as *mut SlotEntry<K, V> };
 
         unsafe {
             // Mark all hashes as vacant.
@@ -95,7 +97,7 @@ impl<K: Key, V: Value> Slots<K, V> {
     }
 
     #[inline(always)]
-    fn entries_ptr(&self) -> *mut Entry<K, V> {
+    fn entries_ptr(&self) -> *mut SlotEntry<K, V> {
         self.entries
     }
 
@@ -137,6 +139,7 @@ impl<K: Key, V: Value> Drop for Slots<K, V> {
     }
 }
 
+/// Prefix-ordered hash map with a fixed max-scan window.
 pub struct PoMap<K: Key, V: Value, H: Hasher + Default = DefaultHasher> {
     len: usize,
     meta: PoMapMeta,
@@ -216,11 +219,13 @@ impl<K: Key, V: Value, H: Hasher + Default> PoMap<K, V, H> {
     }
 
     #[inline(always)]
+    /// Returns the total backing capacity (including the max-scan window).
     pub const fn capacity(&self) -> usize {
         self.slots.capacity()
     }
 
     #[inline(always)]
+    /// Returns the max-scan window length for the current capacity.
     pub const fn max_scan(&self) -> usize {
         self.meta.index_bits
     }
@@ -249,6 +254,7 @@ impl<K: Key, V: Value, H: Hasher + Default> PoMap<K, V, H> {
     }
 
     #[inline]
+    /// Gets a reference to the value corresponding to the specified key using a precomputed hash.
     pub fn get_with_hash(&self, hash: u64, key: &K) -> Option<&V> {
         self._get_with_hash(encode_hash(hash), key)
     }
@@ -280,6 +286,142 @@ impl<K: Key, V: Value, H: Hasher + Default> PoMap<K, V, H> {
         None
     }
 
+    /// Gets a mutable reference to the value corresponding to the specified key, or `None` if not found.
+    ///
+    /// Calls [`Self::get_mut_with_hash`] internally after computing the hash.
+    #[inline]
+    pub fn get_mut(&mut self, key: &K) -> Option<&mut V> {
+        let mut hasher = H::default();
+        key.hash(&mut hasher);
+        let hash = encode_hash(hasher.finish());
+        self._get_mut_with_hash(hash, key)
+    }
+
+    #[inline]
+    /// Gets a mutable reference to the value corresponding to the specified key using a precomputed hash.
+    pub fn get_mut_with_hash(&mut self, hash: u64, key: &K) -> Option<&mut V> {
+        self._get_mut_with_hash(encode_hash(hash), key)
+    }
+
+    /// Hot path for `get_mut` that can be used when the caller already has the hash and doesn't
+    /// want to recompute it.
+    #[inline(always)]
+    fn _get_mut_with_hash(&mut self, hash: u64, key: &K) -> Option<&mut V> {
+        let ideal_slot = self.meta.ideal_slot(hash);
+        let scan_end = ideal_slot + self.meta.index_bits;
+
+        // SAFETY: ideal_slot..scan_end is always in-bounds for the backing allocation.
+        let hashes_ptr = self.slots.hashes_ptr();
+        let entries_ptr = self.slots.entries_ptr();
+
+        for idx in ideal_slot..scan_end {
+            let slot_hash = unsafe { *hashes_ptr.add(idx) };
+
+            if slot_hash == hash {
+                let slot_entry = unsafe { &mut *entries_ptr.add(idx) };
+                if unsafe { slot_entry.key.assume_init_ref() } == key {
+                    return Some(unsafe { slot_entry.value.assume_init_mut() });
+                }
+                // hash collision: keep scanning
+            } else if slot_hash > hash {
+                return None; // also catches VACANT_HASH if VACANT_HASH > any valid hash
+            }
+        }
+        None
+    }
+
+    /// Gets the given key's corresponding entry in the map for in-place manipulation.
+    #[inline]
+    pub fn entry(&mut self, key: K) -> Entry<'_, K, V, H> {
+        let mut hasher = H::default();
+        key.hash(&mut hasher);
+        let hash = encode_hash(hasher.finish());
+        self._entry_with_hash(hash, key)
+    }
+
+    #[inline]
+    /// Gets the entry for a key using a precomputed hash.
+    pub fn entry_with_hash(&mut self, hash: u64, key: K) -> Entry<'_, K, V, H> {
+        self._entry_with_hash(encode_hash(hash), key)
+    }
+
+    #[inline(always)]
+    fn find_entry_location(&self, hash: u64, key: &K) -> EntryLocation {
+        let ideal_slot = self.meta.ideal_slot(hash);
+        let scan_end = ideal_slot + self.meta.index_bits;
+
+        // SAFETY: ideal_slot..scan_end is always in-bounds for the backing allocation.
+        let hashes_ptr = self.slots.hashes_ptr();
+        let entries_ptr = self.slots.entries_ptr();
+
+        let mut idx = ideal_slot;
+        while idx < scan_end {
+            let slot_hash = unsafe { *hashes_ptr.add(idx) };
+
+            if slot_hash == VACANT_HASH {
+                return EntryLocation::Vacant {
+                    insert: VacantInsert::Direct { index: idx },
+                };
+            }
+
+            if slot_hash < hash {
+                idx += 1;
+                continue;
+            }
+
+            if slot_hash == hash {
+                let slot_entry = unsafe { &*entries_ptr.add(idx) };
+                let slot_key = unsafe { slot_entry.key.assume_init_ref() };
+                if slot_key == key {
+                    return EntryLocation::Occupied { index: idx };
+                }
+                if slot_key < key {
+                    idx += 1;
+                    continue;
+                }
+                // slot_key > key → fall through to shift
+            }
+
+            // slot_hash > hash or slot_key > key → search for a vacant slot to shift into.
+            let mut search = idx + 1;
+            while search < scan_end {
+                let cand_hash = unsafe { *hashes_ptr.add(search) };
+                if cand_hash == VACANT_HASH {
+                    return EntryLocation::Vacant {
+                        insert: VacantInsert::Shift {
+                            insert_index: idx,
+                            vacant_index: search,
+                        },
+                    };
+                }
+                search += 1;
+            }
+
+            return EntryLocation::Vacant {
+                insert: VacantInsert::NeedsGrow,
+            };
+        }
+
+        EntryLocation::Vacant {
+            insert: VacantInsert::NeedsGrow,
+        }
+    }
+
+    #[inline(always)]
+    fn _entry_with_hash(&mut self, hash: u64, key: K) -> Entry<'_, K, V, H> {
+        match self.find_entry_location(hash, &key) {
+            EntryLocation::Occupied { index } => {
+                Entry::Occupied(OccupiedEntry { map: self, index })
+            }
+            EntryLocation::Vacant { insert } => Entry::Vacant(VacantEntry {
+                map: self,
+                hash,
+                key,
+                insert,
+            }),
+        }
+    }
+
     /// Inserts a key-value pair into the map, replacing any existing value.
     ///
     /// Computes the hash of the key and then delegates to [`Self::insert_with_hash`].
@@ -292,12 +434,21 @@ impl<K: Key, V: Value, H: Hasher + Default> PoMap<K, V, H> {
     }
 
     #[inline]
+    /// Inserts a key-value pair into the map using a precomputed hash, replacing any existing value.
     pub fn insert_with_hash(&mut self, hash: u64, key: K, value: V) -> Option<V> {
         self._insert_with_hash(encode_hash(hash), key, value)
     }
 
     #[inline(always)]
     fn _insert_with_hash(&mut self, hash: u64, key: K, value: V) -> Option<V> {
+        match self._insert_entry_with_hash(hash, key, value) {
+            InsertResult::Inserted { .. } => None,
+            InsertResult::Replaced { old, .. } => Some(old),
+        }
+    }
+
+    #[inline(always)]
+    fn _insert_entry_with_hash(&mut self, hash: u64, key: K, value: V) -> InsertResult<V> {
         loop {
             let ideal_slot = self.meta.ideal_slot(hash);
             let scan_end = ideal_slot + self.meta.index_bits;
@@ -319,7 +470,7 @@ impl<K: Key, V: Value, H: Hasher + Default> PoMap<K, V, H> {
                         entry.value.write(value);
                     }
                     self.len += 1;
-                    return None;
+                    return InsertResult::Inserted { index: idx };
                 }
 
                 // Common scan: skip hashes below the insertion point.
@@ -344,7 +495,10 @@ impl<K: Key, V: Value, H: Hasher + Default> PoMap<K, V, H> {
                                 old
                             }
                         };
-                        return Some(old_value);
+                        return InsertResult::Replaced {
+                            index: idx,
+                            old: old_value,
+                        };
                     }
                     if slot_key < &key {
                         idx += 1;
@@ -381,7 +535,7 @@ impl<K: Key, V: Value, H: Hasher + Default> PoMap<K, V, H> {
                             entry.value.write(value);
                         }
                         self.len += 1;
-                        return None;
+                        return InsertResult::Inserted { index: idx };
                     }
                     search += 1;
                 }
@@ -421,6 +575,7 @@ impl<K: Key, V: Value, H: Hasher + Default> PoMap<K, V, H> {
     }
 
     #[inline]
+    /// Removes a key from the map using a precomputed hash, returning the value if it existed.
     pub fn remove_with_hash(&mut self, hash: u64, key: &K) -> Option<V> {
         self._remove_with_hash(encode_hash(hash), key)
     }
@@ -491,6 +646,48 @@ impl<K: Key, V: Value, H: Hasher + Default> PoMap<K, V, H> {
         }
 
         None
+    }
+
+    #[inline(always)]
+    fn remove_entry_at(&mut self, idx: usize) -> (K, V) {
+        // SAFETY: idx is a valid occupied slot when called.
+        let hashes_ptr = self.slots.hashes_ptr();
+        let entries_ptr = self.slots.entries_ptr();
+        let capacity = self.slots.capacity();
+
+        let entry = unsafe { &mut *entries_ptr.add(idx) };
+        let key = unsafe { entry.key.assume_init_read() };
+        let value = unsafe { entry.value.assume_init_read() };
+
+        // Backshift-delete: move subsequent entries left while they can
+        // legally occupy the vacancy.
+        let mut vacancy = idx;
+        let mut scan = idx + 1;
+        while scan < capacity {
+            let next_hash = unsafe { *hashes_ptr.add(scan) };
+            if next_hash == VACANT_HASH {
+                break;
+            }
+            let next_ideal = self.meta.ideal_slot(next_hash);
+            if next_ideal > vacancy {
+                break;
+            }
+            vacancy += 1;
+            scan += 1;
+        }
+
+        if scan > idx + 1 {
+            let count = scan - (idx + 1);
+            unsafe {
+                ptr::copy(hashes_ptr.add(idx + 1), hashes_ptr.add(idx), count);
+                ptr::copy(entries_ptr.add(idx + 1), entries_ptr.add(idx), count);
+            }
+        }
+
+        unsafe { *hashes_ptr.add(vacancy) = VACANT_HASH };
+        self.len -= 1;
+
+        (key, value)
     }
 
     /// Shrinks the map to at least `min_capacity` elements (logical capacity).
@@ -700,6 +897,259 @@ impl<K: Key, V: Value, H: Hasher + Default> PoMap<K, V, H> {
     }
 }
 
+enum InsertResult<V> {
+    Inserted { index: usize },
+    Replaced { index: usize, old: V },
+}
+
+enum VacantInsert {
+    Direct {
+        index: usize,
+    },
+    Shift {
+        insert_index: usize,
+        vacant_index: usize,
+    },
+    NeedsGrow,
+}
+
+enum EntryLocation {
+    Occupied { index: usize },
+    Vacant { insert: VacantInsert },
+}
+
+/// A view into a single entry in a [`PoMap`], similar to `std::collections::hash_map::Entry`.
+#[must_use]
+pub enum Entry<'a, K: Key, V: Value, H: Hasher + Default> {
+    /// An occupied entry.
+    Occupied(OccupiedEntry<'a, K, V, H>),
+    /// A vacant entry.
+    Vacant(VacantEntry<'a, K, V, H>),
+}
+
+/// A view into an occupied entry in a [`PoMap`].
+pub struct OccupiedEntry<'a, K: Key, V: Value, H: Hasher + Default> {
+    map: &'a mut PoMap<K, V, H>,
+    index: usize,
+}
+
+/// A view into a vacant entry in a [`PoMap`].
+pub struct VacantEntry<'a, K: Key, V: Value, H: Hasher + Default> {
+    map: &'a mut PoMap<K, V, H>,
+    hash: u64,
+    key: K,
+    insert: VacantInsert,
+}
+
+impl<'a, K: Key, V: Value, H: Hasher + Default> Entry<'a, K, V, H> {
+    #[inline]
+    /// Ensures a value is in the entry by inserting the default if vacant.
+    pub fn or_insert(self, default: V) -> &'a mut V {
+        match self {
+            Entry::Occupied(entry) => entry.into_mut(),
+            Entry::Vacant(entry) => entry.insert(default),
+        }
+    }
+
+    #[inline]
+    /// Ensures a value is in the entry by inserting the result of the function if vacant.
+    pub fn or_insert_with<F: FnOnce() -> V>(self, default: F) -> &'a mut V {
+        match self {
+            Entry::Occupied(entry) => entry.into_mut(),
+            Entry::Vacant(entry) => entry.insert(default()),
+        }
+    }
+
+    #[inline]
+    /// Ensures a value is in the entry by inserting the result of the function if vacant.
+    /// The function receives a reference to the entry's key.
+    pub fn or_insert_with_key<F: FnOnce(&K) -> V>(self, default: F) -> &'a mut V {
+        match self {
+            Entry::Occupied(entry) => entry.into_mut(),
+            Entry::Vacant(entry) => {
+                let value = default(entry.key());
+                entry.insert(value)
+            }
+        }
+    }
+
+    #[inline]
+    /// Ensures a value is in the entry by inserting `V::default()` if vacant.
+    pub fn or_default(self) -> &'a mut V
+    where
+        V: Default,
+    {
+        match self {
+            Entry::Occupied(entry) => entry.into_mut(),
+            Entry::Vacant(entry) => entry.insert(V::default()),
+        }
+    }
+
+    #[inline]
+    /// Applies a function to the value if the entry is occupied.
+    pub fn and_modify<F: FnOnce(&mut V)>(self, f: F) -> Entry<'a, K, V, H> {
+        match self {
+            Entry::Occupied(mut entry) => {
+                f(entry.get_mut());
+                Entry::Occupied(entry)
+            }
+            Entry::Vacant(entry) => Entry::Vacant(entry),
+        }
+    }
+
+    #[inline]
+    /// Returns a reference to the entry's key.
+    pub fn key(&self) -> &K {
+        match self {
+            Entry::Occupied(entry) => entry.key(),
+            Entry::Vacant(entry) => entry.key(),
+        }
+    }
+}
+
+impl<'a, K: Key, V: Value, H: Hasher + Default> OccupiedEntry<'a, K, V, H> {
+    #[inline]
+    /// Returns a reference to the entry's key.
+    pub fn key(&self) -> &K {
+        let entries_ptr = self.map.slots.entries_ptr();
+        let entry = unsafe { &*entries_ptr.add(self.index) };
+        unsafe { entry.key.assume_init_ref() }
+    }
+
+    #[inline]
+    /// Gets a reference to the value in the entry.
+    pub fn get(&self) -> &V {
+        let entries_ptr = self.map.slots.entries_ptr();
+        let entry = unsafe { &*entries_ptr.add(self.index) };
+        unsafe { entry.value.assume_init_ref() }
+    }
+
+    #[inline]
+    /// Gets a mutable reference to the value in the entry.
+    pub fn get_mut(&mut self) -> &mut V {
+        let entries_ptr = self.map.slots.entries_ptr();
+        let entry = unsafe { &mut *entries_ptr.add(self.index) };
+        unsafe { entry.value.assume_init_mut() }
+    }
+
+    #[inline]
+    /// Converts the entry into a mutable reference to the value.
+    pub fn into_mut(self) -> &'a mut V {
+        let entries_ptr = self.map.slots.entries_ptr();
+        let entry = unsafe { &mut *entries_ptr.add(self.index) };
+        unsafe { entry.value.assume_init_mut() }
+    }
+
+    #[inline]
+    /// Replaces the entry's value, returning the old value.
+    pub fn insert(&mut self, value: V) -> V {
+        let entries_ptr = self.map.slots.entries_ptr();
+        let entry = unsafe { &mut *entries_ptr.add(self.index) };
+        if core::mem::needs_drop::<V>() {
+            core::mem::replace(unsafe { entry.value.assume_init_mut() }, value)
+        } else {
+            unsafe {
+                let old = entry.value.assume_init_read();
+                entry.value.write(value);
+                old
+            }
+        }
+    }
+
+    #[inline]
+    /// Removes the entry from the map and returns the stored value.
+    pub fn remove(self) -> V {
+        let (key, value) = self.remove_entry();
+        drop(key);
+        value
+    }
+
+    #[inline]
+    /// Removes the entry from the map and returns the stored key and value.
+    pub fn remove_entry(self) -> (K, V) {
+        let index = self.index;
+        self.map.remove_entry_at(index)
+    }
+}
+
+impl<'a, K: Key, V: Value, H: Hasher + Default> VacantEntry<'a, K, V, H> {
+    #[inline]
+    /// Returns a reference to the key that would be inserted.
+    pub const fn key(&self) -> &K {
+        &self.key
+    }
+
+    #[inline]
+    /// Takes ownership of the key.
+    pub fn into_key(self) -> K {
+        self.key
+    }
+
+    #[inline]
+    /// Inserts the value for this vacant entry and returns a mutable reference to it.
+    pub fn insert(self, value: V) -> &'a mut V {
+        let hash = self.hash;
+        let key = self.key;
+        let map = self.map;
+        let insert = self.insert;
+
+        let index = match insert {
+            VacantInsert::Direct { index } => {
+                let hashes_ptr = map.slots.hashes_ptr();
+                let entries_ptr = map.slots.entries_ptr();
+                unsafe {
+                    *hashes_ptr.add(index) = hash;
+                    let entry = &mut *entries_ptr.add(index);
+                    entry.key.write(key);
+                    entry.value.write(value);
+                }
+                map.len += 1;
+                index
+            }
+            VacantInsert::Shift {
+                insert_index,
+                vacant_index,
+            } => {
+                let hashes_ptr = map.slots.hashes_ptr();
+                let entries_ptr = map.slots.entries_ptr();
+                unsafe {
+                    let mut i = vacant_index;
+                    while i > insert_index {
+                        *hashes_ptr.add(i) = *hashes_ptr.add(i - 1);
+                        core::ptr::write(
+                            entries_ptr.add(i),
+                            core::ptr::read(entries_ptr.add(i - 1)),
+                        );
+                        i -= 1;
+                    }
+
+                    *hashes_ptr.add(insert_index) = hash;
+                    let entry = &mut *entries_ptr.add(insert_index);
+                    entry.key.write(key);
+                    entry.value.write(value);
+                }
+                map.len += 1;
+                insert_index
+            }
+            VacantInsert::NeedsGrow => {
+                let result = map._insert_entry_with_hash(hash, key, value);
+                match result {
+                    InsertResult::Inserted { index } => index,
+                    InsertResult::Replaced { index, old } => {
+                        debug_assert!(false, "VacantEntry::insert replaced an existing value");
+                        drop(old);
+                        index
+                    }
+                }
+            }
+        };
+
+        let entries_ptr = map.slots.entries_ptr();
+        let entry = unsafe { &mut *entries_ptr.add(index) };
+        unsafe { entry.value.assume_init_mut() }
+    }
+}
+
 impl<K: Key, V: Value, H: Hasher + Default> Clone for PoMap<K, V, H> {
     fn clone(&self) -> Self {
         let capacity = self.capacity();
@@ -730,6 +1180,7 @@ impl<K: Key, V: Value, H: Hasher + Default> Clone for PoMap<K, V, H> {
 
 impl Default for PoMap<(), ()> {
     #[inline(always)]
+    /// Creates an empty map using [`PoMap::new`].
     fn default() -> Self {
         Self::new()
     }
@@ -931,6 +1382,47 @@ mod tests {
         assert_eq!(map.insert(42, 2), Some(1));
         assert_eq!(map.get(&42), Some(&2));
         assert_eq!(map.len(), 1);
+    }
+
+    #[test]
+    fn entry_or_insert_and_modify() {
+        let mut map: PoMap<u64, u64, IdentityHasher> = PoMap::new();
+
+        let v = map.entry(1).or_insert(10);
+        assert_eq!(*v, 10);
+        *v = 11;
+
+        let v = map.entry(1).or_insert(99);
+        assert_eq!(*v, 11);
+        assert_eq!(map.len(), 1);
+
+        let v = map.entry(1).and_modify(|val| *val += 1).or_insert(0);
+        assert_eq!(*v, 12);
+        assert_eq!(map.get(&1), Some(&12));
+    }
+
+    #[test]
+    fn entry_or_insert_with_key_uses_key() {
+        let mut map: PoMap<u64, u64, IdentityHasher> = PoMap::new();
+        let v = map.entry(7).or_insert_with_key(|k| k + 1);
+        assert_eq!(*v, 8);
+        assert_eq!(map.get(&7), Some(&8));
+    }
+
+    #[test]
+    fn entry_remove_entry_returns_pair() {
+        let mut map: PoMap<u64, u64, IdentityHasher> = PoMap::new();
+        map.insert(10, 20);
+
+        match map.entry(10) {
+            Entry::Occupied(entry) => {
+                let (k, v) = entry.remove_entry();
+                assert_eq!((k, v), (10, 20));
+            }
+            Entry::Vacant(_) => panic!("expected occupied entry"),
+        }
+
+        assert!(map.is_empty());
     }
 
     #[test]
