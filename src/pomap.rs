@@ -1889,7 +1889,13 @@ impl PoMapMeta {
 mod tests {
     use super::*;
     use rand::{Rng, SeedableRng, rngs::StdRng};
-    use std::{cell::Cell, cmp::Ordering, collections::HashMap, rc::Rc};
+    use std::{
+        cell::Cell,
+        cmp::Ordering,
+        collections::HashMap,
+        hash::DefaultHasher,
+        rc::Rc,
+    };
 
     #[derive(Clone)]
     struct DropCounter {
@@ -2016,6 +2022,149 @@ mod tests {
         assert_eq!(map.insert(42, 2), Some(1));
         assert_eq!(map.get(&42), Some(&2));
         assert_eq!(map.len(), 1);
+    }
+
+    fn build_map_with_order(keys: &[u64], capacity: usize) -> PoMap<u64, u64, IdentityHasher> {
+        let mut map: PoMap<u64, u64, IdentityHasher> = PoMap::with_capacity(capacity);
+        for &key in keys {
+            map.insert(key, key + 100);
+        }
+        map
+    }
+
+    fn hash_map(map: &PoMap<u64, u64, IdentityHasher>) -> u64 {
+        let mut hasher = DefaultHasher::new();
+        map.hash(&mut hasher);
+        hasher.finish()
+    }
+
+    #[test]
+    fn determinism_across_insertion_order_and_capacity() {
+        let keys = [10u64, 3, 7, 1, 9, 4, 2, 8, 6, 5];
+        let mut reversed = keys;
+        reversed.reverse();
+
+        let map_a = build_map_with_order(&keys, 4);
+        let map_b = build_map_with_order(&reversed, 128);
+
+        let a_items = map_a.iter().map(|(k, v)| (*k, *v)).collect::<Vec<_>>();
+        let b_items = map_b.iter().map(|(k, v)| (*k, *v)).collect::<Vec<_>>();
+        assert_eq!(a_items, b_items);
+
+        let a_keys = map_a.keys().copied().collect::<Vec<_>>();
+        let b_keys = map_b.keys().copied().collect::<Vec<_>>();
+        assert_eq!(a_keys, b_keys);
+
+        let a_values = map_a.values().copied().collect::<Vec<_>>();
+        let b_values = map_b.values().copied().collect::<Vec<_>>();
+        assert_eq!(a_values, b_values);
+    }
+
+    #[test]
+    fn determinism_with_hash_collisions_orders_by_key() {
+        let keys = [1u64, 0, 2];
+        let mut reversed = keys;
+        reversed.reverse();
+
+        let map_a = build_map_with_order(&keys, 4);
+        let map_b = build_map_with_order(&reversed, 4);
+
+        let a_keys = map_a.keys().copied().collect::<Vec<_>>();
+        let b_keys = map_b.keys().copied().collect::<Vec<_>>();
+        assert_eq!(a_keys, b_keys);
+        assert_eq!(a_keys, vec![0, 1, 2]);
+    }
+
+    #[test]
+    fn iter_mut_and_values_mut_update_values() {
+        let keys = [5u64, 1, 3];
+        let mut map = build_map_with_order(&keys, 8);
+
+        let mut seen = Vec::new();
+        for (k, v) in map.iter_mut() {
+            seen.push(*k);
+            *v += 1;
+        }
+        assert_eq!(seen, map.keys().copied().collect::<Vec<_>>());
+        for (k, v) in map.iter() {
+            assert_eq!(*v, *k + 101);
+        }
+
+        for v in map.values_mut() {
+            *v += 1;
+        }
+        for (k, v) in map.iter() {
+            assert_eq!(*v, *k + 102);
+        }
+    }
+
+    #[test]
+    fn into_iter_and_into_keys_values_are_deterministic() {
+        let keys = [4u64, 2, 6, 1];
+        let map = build_map_with_order(&keys, 8);
+        let expected = map.iter().map(|(k, v)| (*k, *v)).collect::<Vec<_>>();
+
+        let into_items = map.clone().into_iter().collect::<Vec<_>>();
+        assert_eq!(into_items, expected);
+
+        let into_keys = map.clone().into_keys().collect::<Vec<_>>();
+        assert_eq!(into_keys, expected.iter().map(|(k, _)| *k).collect::<Vec<_>>());
+
+        let into_values = map.into_values().collect::<Vec<_>>();
+        assert_eq!(
+            into_values,
+            expected.iter().map(|(_, v)| *v).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn contains_get_key_value_and_index_work() {
+        let map = build_map_with_order(&[7u64, 1, 9], 4);
+        assert!(map.contains_key(&7));
+        assert!(!map.contains_key(&8));
+
+        let (k, v) = map.get_key_value(&7).expect("expected key");
+        assert_eq!((*k, *v), (7, 107));
+
+        assert_eq!(map[&1], 101);
+    }
+
+    #[test]
+    #[should_panic(expected = "key not found")]
+    fn index_panics_on_missing_key() {
+        let map = build_map_with_order(&[1u64], 4);
+        let _ = map[&2];
+    }
+
+    #[test]
+    fn remove_entry_and_clear_work() {
+        let mut map = build_map_with_order(&[2u64, 5, 1], 4);
+        let removed = map.remove_entry(&5).expect("expected removal");
+        assert_eq!(removed, (5, 105));
+        assert!(!map.contains_key(&5));
+
+        map.clear();
+        assert!(map.is_empty());
+        assert_eq!(map.iter().next(), None);
+    }
+
+    #[test]
+    fn deterministic_eq_ord_hash_and_debug() {
+        let keys = [9u64, 3, 6, 1];
+        let mut reversed = keys;
+        reversed.reverse();
+
+        let map_a = build_map_with_order(&keys, 4);
+        let map_b = build_map_with_order(&reversed, 64);
+
+        assert_eq!(map_a, map_b);
+        assert_eq!(map_a.cmp(&map_b), Ordering::Equal);
+        assert_eq!(hash_map(&map_a), hash_map(&map_b));
+        assert_eq!(format!("{:?}", map_a), format!("{:?}", map_b));
+
+        let map_c = build_map_with_order(&[1u64, 4], 4);
+        let map_d = build_map_with_order(&[1u64, 5], 4);
+        assert!(map_c < map_d);
     }
 
     #[test]
