@@ -1,4 +1,8 @@
+//! A prefix-ordered hash map with deterministic iteration order.
+//!
+//! The crate is `no_std` + `alloc` compatible when the `std` feature is disabled.
 #![cfg_attr(not(feature = "std"), no_std)]
+#![deny(missing_docs)]
 
 extern crate alloc;
 
@@ -6,4 +10,6 @@ extern crate alloc;
 extern crate std;
 
 //pub mod auth;
-pub mod pomap;
+
+mod pomap;
+pub use pomap::*;

@@ -41,7 +41,10 @@ pub enum TryReserveError {
     /// Error due to the computed capacity exceeding the collection's maximum.
     CapacityOverflow,
     /// The memory allocator returned an error.
-    AllocError { layout: Layout },
+    AllocError {
+        /// The layout of the allocation request that failed.
+        layout: Layout,
+    },
 }
 
 /// Marker trait for keys stored in a [`PoMap`].

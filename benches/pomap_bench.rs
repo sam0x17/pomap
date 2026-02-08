@@ -6,7 +6,7 @@ use std::{
 
 use ahash::AHasher;
 use criterion::{BatchSize, Criterion, criterion_group, criterion_main};
-use pomap::pomap::PoMap;
+use pomap::PoMap;
 #[cfg(feature = "bench-string")]
 use rand::distr::Alphanumeric;
 use rand::{Rng, SeedableRng, rngs::StdRng};
