@@ -337,9 +337,9 @@ impl<K: Key, V: Value, H: BuildHasher> PoMap<K, V, H> {
     /// Calls [`Self::get_with_hash`] internally after computing the hash.
     #[inline]
     pub fn get(&self, key: &K) -> Option<&V> {
-        let mut hasher = self.hash_builder.build_hasher();
-        key.hash(&mut hasher);
-        let hash = encode_hash(hasher.finish());
+        
+        
+        let hash = encode_hash(self.hash_builder.hash_one(&key));
         self._get_with_hash(hash, key)
     }
 
@@ -358,9 +358,9 @@ impl<K: Key, V: Value, H: BuildHasher> PoMap<K, V, H> {
     /// Returns the key-value pair corresponding to the supplied key.
     #[inline]
     pub fn get_key_value(&self, key: &K) -> Option<(&K, &V)> {
-        let mut hasher = self.hash_builder.build_hasher();
-        key.hash(&mut hasher);
-        let hash = encode_hash(hasher.finish());
+        
+        
+        let hash = encode_hash(self.hash_builder.hash_one(&key));
         self._get_key_value_with_hash(hash, key)
     }
 
@@ -447,9 +447,9 @@ impl<K: Key, V: Value, H: BuildHasher> PoMap<K, V, H> {
     fn get_many_indices<const N: usize>(&self, keys: [&K; N]) -> Option<[usize; N]> {
         let mut indices = [0usize; N];
         for (i, key) in keys.iter().enumerate() {
-            let mut hasher = self.hash_builder.build_hasher();
-            key.hash(&mut hasher);
-            let hash = encode_hash(hasher.finish());
+            
+            
+            let hash = encode_hash(self.hash_builder.hash_one(&key));
             let idx = self._find_index_by_hash(hash, |k| k == *key)?;
             indices[i] = idx;
         }
@@ -470,9 +470,9 @@ impl<K: Key, V: Value, H: BuildHasher> PoMap<K, V, H> {
     /// Calls [`Self::get_mut_with_hash`] internally after computing the hash.
     #[inline]
     pub fn get_mut(&mut self, key: &K) -> Option<&mut V> {
-        let mut hasher = self.hash_builder.build_hasher();
-        key.hash(&mut hasher);
-        let hash = encode_hash(hasher.finish());
+        
+        
+        let hash = encode_hash(self.hash_builder.hash_one(&key));
         self._get_mut_with_hash(hash, key)
     }
 
@@ -549,9 +549,9 @@ impl<K: Key, V: Value, H: BuildHasher> PoMap<K, V, H> {
     /// Gets the given key's corresponding entry in the map for in-place manipulation.
     #[inline]
     pub fn entry(&mut self, key: K) -> Entry<'_, K, V, H> {
-        let mut hasher = self.hash_builder.build_hasher();
-        key.hash(&mut hasher);
-        let hash = encode_hash(hasher.finish());
+        
+        
+        let hash = encode_hash(self.hash_builder.hash_one(&key));
         self._entry_with_hash(hash, key)
     }
 
@@ -717,9 +717,9 @@ impl<K: Key, V: Value, H: BuildHasher> PoMap<K, V, H> {
     /// Computes the hash of the key and then delegates to [`Self::insert_with_hash`].
     #[inline]
     pub fn insert(&mut self, key: K, value: V) -> Option<V> {
-        let mut hasher = self.hash_builder.build_hasher();
-        key.hash(&mut hasher);
-        let hash = encode_hash(hasher.finish());
+        
+        
+        let hash = encode_hash(self.hash_builder.hash_one(&key));
         self._insert_with_hash(hash, key, value)
     }
 
@@ -860,9 +860,9 @@ impl<K: Key, V: Value, H: BuildHasher> PoMap<K, V, H> {
     /// Computes the hash of the key and then delegates to [`Self::remove_with_hash`].
     #[inline]
     pub fn remove(&mut self, key: &K) -> Option<V> {
-        let mut hasher = self.hash_builder.build_hasher();
-        key.hash(&mut hasher);
-        let hash = encode_hash(hasher.finish());
+        
+        
+        let hash = encode_hash(self.hash_builder.hash_one(&key));
         self._remove_with_hash(hash, key)
     }
 
@@ -875,9 +875,9 @@ impl<K: Key, V: Value, H: BuildHasher> PoMap<K, V, H> {
     /// Removes a key from the map, returning the key and value if it existed.
     #[inline]
     pub fn remove_entry(&mut self, key: &K) -> Option<(K, V)> {
-        let mut hasher = self.hash_builder.build_hasher();
-        key.hash(&mut hasher);
-        let hash = encode_hash(hasher.finish());
+        
+        
+        let hash = encode_hash(self.hash_builder.hash_one(&key));
         self._remove_entry_with_hash(hash, key)
     }
 
@@ -2204,9 +2204,9 @@ impl<'a, K: Key, V: Value, H: BuildHasher> RawEntryBuilderMut<'a, K, V, H> {
     #[inline]
     #[allow(clippy::wrong_self_convention)]
     pub fn from_key(self, key: &K) -> RawEntryMut<'a, K, V, H> {
-        let mut hasher = self.map.hash_builder.build_hasher();
-        key.hash(&mut hasher);
-        let hash = hasher.finish();
+        
+        
+        let hash = self.map.hash_builder.hash_one(&key);
         self.from_key_hashed_nocheck(hash, key)
     }
 
@@ -2253,9 +2253,9 @@ impl<'a, K: Key, V: Value, H: BuildHasher> RawEntryBuilder<'a, K, V, H> {
     #[inline]
     #[allow(clippy::wrong_self_convention)]
     pub fn from_key(self, key: &K) -> Option<(&'a K, &'a V)> {
-        let mut hasher = self.map.hash_builder.build_hasher();
-        key.hash(&mut hasher);
-        let hash = encode_hash(hasher.finish());
+        
+        
+        let hash = encode_hash(self.map.hash_builder.hash_one(&key));
         self.map._get_key_value_with_hash(hash, key)
     }
 
