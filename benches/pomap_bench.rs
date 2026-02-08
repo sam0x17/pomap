@@ -23,7 +23,7 @@ type BenchValue = BenchType;
 /// Hasher configuration shared by PoMap and std::collections benchmarks.
 type BenchHasher = AHasher;
 type BenchHasherBuilder = BuildHasherDefault<BenchHasher>;
-type BenchPoMap = PoMap<BenchKey, BenchValue, BenchHasher>;
+type BenchPoMap = PoMap<BenchKey, BenchValue, BenchHasherBuilder>;
 type BenchHashMap = HashMap<BenchKey, BenchValue, BenchHasherBuilder>;
 
 #[inline]
@@ -135,7 +135,8 @@ fn build_pomap_maps_from_data(
     target_sizes
         .iter()
         .map(|&size| {
-            let mut map: BenchPoMap = BenchPoMap::with_capacity(size);
+            let mut map: BenchPoMap =
+                BenchPoMap::with_capacity_and_hasher(size, BenchHasherBuilder::default());
             for idx in 0..size {
                 map.insert(keys[idx].clone(), values[idx].clone());
             }
@@ -154,7 +155,8 @@ fn build_pomap_maps_from_data_with_capacity(
         .iter()
         .map(|&size| {
             let capacity = size.saturating_mul(capacity_multiplier).max(size);
-            let mut map: BenchPoMap = BenchPoMap::with_capacity(capacity);
+            let mut map: BenchPoMap =
+                BenchPoMap::with_capacity_and_hasher(capacity, BenchHasherBuilder::default());
             for idx in 0..size {
                 map.insert(keys[idx].clone(), values[idx].clone());
             }
@@ -214,7 +216,8 @@ fn bench_insert_allocate(c: &mut Criterion) {
             for &size in &target_sizes {
                 let mut iterations = 0;
                 while iterations < max_target_size {
-                    let mut map: BenchPoMap = BenchPoMap::new();
+                    let mut map: BenchPoMap =
+                        BenchPoMap::with_hasher(BenchHasherBuilder::default());
                     for (key, val) in keys.iter().zip(values.iter()).take(size) {
                         black_box(map.insert(key.clone(), val.clone()));
                     }
@@ -257,7 +260,7 @@ fn bench_insert_preallocated(c: &mut Criterion) {
     let required_capacities = target_sizes
         .iter()
         .map(|&size| {
-            let mut map: BenchPoMap = BenchPoMap::new();
+            let mut map: BenchPoMap = BenchPoMap::with_hasher(BenchHasherBuilder::default());
             for (key, val) in combined.iter().take(size) {
                 map.insert(key.clone(), val.clone());
             }
@@ -274,7 +277,10 @@ fn bench_insert_preallocated(c: &mut Criterion) {
             for (i, &size) in target_sizes.iter().enumerate() {
                 let mut iterations = 0;
                 while iterations < max_target_size {
-                    let mut map: BenchPoMap = BenchPoMap::with_capacity(required_capacities[i]);
+                    let mut map: BenchPoMap = BenchPoMap::with_capacity_and_hasher(
+                        required_capacities[i],
+                        BenchHasherBuilder::default(),
+                    );
 
                     for (key, val) in combined.iter().take(size) {
                         black_box(map.insert(key.clone(), val.clone()));

@@ -280,6 +280,31 @@ impl<K: Key, V: Value, H: BuildHasher> PoMap<K, V, H> {
         &self.hash_builder
     }
 
+    /// Clones the map using a raw memory copy of slots.
+    ///
+    /// This is only available when keys and values are [`Copy`].
+    #[inline]
+    pub fn clone_copy(&self) -> Self
+    where
+        K: Copy,
+        V: Copy,
+        H: Clone,
+    {
+        let capacity = self.capacity();
+        let slots = Slots::new(capacity);
+        unsafe {
+            ptr::copy_nonoverlapping(self.slots.hashes_ptr(), slots.hashes_ptr(), capacity);
+            ptr::copy_nonoverlapping(self.slots.entries_ptr(), slots.entries_ptr(), capacity);
+        }
+
+        Self {
+            len: self.len,
+            meta: self.meta,
+            slots,
+            hash_builder: self.hash_builder.clone(),
+        }
+    }
+
     #[inline(always)]
     /// Returns the total backing capacity (including the max-scan window).
     pub const fn capacity(&self) -> usize {
@@ -2903,6 +2928,15 @@ mod tests {
             into_values,
             expected.iter().map(|(_, v)| *v).collect::<Vec<_>>()
         );
+    }
+
+    #[test]
+    fn clone_copy_matches_clone() {
+        let map = build_map_with_order(&[9u64, 1, 7, 3], 8);
+        let clone_copy = map.clone_copy();
+        let clone_std = map.clone();
+        assert_eq!(clone_copy, clone_std);
+        assert_eq!(clone_copy.capacity(), map.capacity());
     }
 
     #[test]
