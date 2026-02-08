@@ -4,7 +4,7 @@ use core::{
     alloc::Layout,
     cmp::Ordering,
     fmt,
-    hash::{Hash, Hasher},
+    hash::{BuildHasher, Hash, Hasher},
     iter::FusedIterator,
     marker::PhantomData,
     mem::MaybeUninit,
@@ -21,6 +21,28 @@ const HASH_BITS: usize = 64; // we use a 64-bit hashcode
 
 const GROWTH_FACTOR: usize = 4;
 const VACANT_HASH: u64 = u64::MAX;
+
+/// Default build hasher for [`PoMap`], backed by [`AHasher`].
+#[derive(Clone, Default)]
+pub struct PoMapBuildHasher;
+
+impl BuildHasher for PoMapBuildHasher {
+    type Hasher = AHasher;
+
+    #[inline]
+    fn build_hasher(&self) -> Self::Hasher {
+        AHasher::default()
+    }
+}
+
+/// The error type returned by [`PoMap::try_reserve`] and [`PoMap::try_reserve_exact`].
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub enum TryReserveError {
+    /// Error due to the computed capacity exceeding the collection's maximum.
+    CapacityOverflow,
+    /// The memory allocator returned an error.
+    AllocError { layout: Layout },
+}
 
 /// Marker trait for keys stored in a [`PoMap`].
 pub trait Key: Hash + Eq + Clone + Ord {}
@@ -89,6 +111,37 @@ impl<K: Key, V: Value> Slots<K, V> {
         }
     }
 
+    #[inline]
+    fn try_new(capacity: usize) -> Result<Self, TryReserveError> {
+        let hashes_layout =
+            Layout::array::<u64>(capacity).map_err(|_| TryReserveError::CapacityOverflow)?;
+        let entries_layout = Layout::array::<SlotEntry<K, V>>(capacity)
+            .map_err(|_| TryReserveError::CapacityOverflow)?;
+        let (layout, entries_offset) = hashes_layout
+            .extend(entries_layout)
+            .map_err(|_| TryReserveError::CapacityOverflow)?;
+        let layout = layout.pad_to_align();
+
+        let ptr = unsafe { alloc(layout) };
+        let ptr = NonNull::new(ptr).ok_or(TryReserveError::AllocError { layout })?;
+
+        let hashes = ptr.as_ptr() as *mut u64;
+        let entries = unsafe { ptr.as_ptr().add(entries_offset) as *mut SlotEntry<K, V> };
+
+        unsafe {
+            ptr::write_bytes(hashes, 0xFF, capacity);
+        }
+
+        Ok(Self {
+            ptr,
+            hashes,
+            entries,
+            capacity,
+            layout,
+            _marker: PhantomData,
+        })
+    }
+
     #[inline(always)]
     const fn capacity(&self) -> usize {
         self.capacity
@@ -143,14 +196,14 @@ impl<K: Key, V: Value> Drop for Slots<K, V> {
 }
 
 /// Prefix-ordered hash map with a fixed max-scan window.
-pub struct PoMap<K: Key, V: Value, H: Hasher + Default = AHasher> {
+pub struct PoMap<K: Key, V: Value, H: BuildHasher = PoMapBuildHasher> {
     len: usize,
     meta: PoMapMeta,
     slots: Slots<K, V>,
-    _phantom: PhantomData<H>,
+    hash_builder: H,
 }
 
-impl<K: Key, V: Value, H: Hasher + Default> PoMap<K, V, H> {
+impl<K: Key, V: Value, H: BuildHasher> PoMap<K, V, H> {
     #[inline(always)]
     fn pack_from_slots(
         dst: &mut Slots<K, V>,
@@ -197,28 +250,34 @@ impl<K: Key, V: Value, H: Hasher + Default> PoMap<K, V, H> {
         Ok(())
     }
 
-    /// Create a new [`PoMap`] with _at least_ the given capacity.
+    /// Creates a [`PoMap`] with the given hasher.
+    #[inline]
+    pub fn with_hasher(hash_builder: H) -> Self {
+        Self::with_capacity_and_hasher(MIN_CAPACITY, hash_builder)
+    }
+
+    /// Creates a [`PoMap`] with _at least_ the given capacity and hasher.
     ///
     /// Note that the actual internal capacity will always be scaled up to the next power of
     /// two (if not already a power of two) plus `index_bits` (the max-scan window).
     ///
     /// Also note that the minimum capacity is [`MIN_CAPACITY`].
     #[inline]
-    pub fn with_capacity(capacity: usize) -> Self {
+    pub fn with_capacity_and_hasher(capacity: usize, hash_builder: H) -> Self {
         let (meta, vec_capacity) = PoMapMeta::new(capacity.next_power_of_two());
         let slots = Slots::new(vec_capacity);
         Self {
             len: 0,
             meta,
             slots,
-            _phantom: PhantomData,
+            hash_builder,
         }
     }
 
-    /// Create a new [`PoMap`] with [`MIN_CAPACITY`] + max-scan internal capacity.
-    #[inline(always)]
-    pub fn new() -> Self {
-        Self::with_capacity(MIN_CAPACITY)
+    /// Returns a reference to the map's hasher.
+    #[inline]
+    pub const fn hasher(&self) -> &H {
+        &self.hash_builder
     }
 
     #[inline(always)]
@@ -250,7 +309,7 @@ impl<K: Key, V: Value, H: Hasher + Default> PoMap<K, V, H> {
     /// Calls [`Self::get_with_hash`] internally after computing the hash.
     #[inline]
     pub fn get(&self, key: &K) -> Option<&V> {
-        let mut hasher = H::default();
+        let mut hasher = self.hash_builder.build_hasher();
         key.hash(&mut hasher);
         let hash = encode_hash(hasher.finish());
         self._get_with_hash(hash, key)
@@ -271,7 +330,7 @@ impl<K: Key, V: Value, H: Hasher + Default> PoMap<K, V, H> {
     /// Returns the key-value pair corresponding to the supplied key.
     #[inline]
     pub fn get_key_value(&self, key: &K) -> Option<(&K, &V)> {
-        let mut hasher = H::default();
+        let mut hasher = self.hash_builder.build_hasher();
         key.hash(&mut hasher);
         let hash = encode_hash(hasher.finish());
         self._get_key_value_with_hash(hash, key)
@@ -356,12 +415,34 @@ impl<K: Key, V: Value, H: Hasher + Default> PoMap<K, V, H> {
         None
     }
 
+    #[inline]
+    fn get_many_indices<const N: usize>(&self, keys: [&K; N]) -> Option<[usize; N]> {
+        let mut indices = [0usize; N];
+        for (i, key) in keys.iter().enumerate() {
+            let mut hasher = self.hash_builder.build_hasher();
+            key.hash(&mut hasher);
+            let hash = encode_hash(hasher.finish());
+            let idx = self._find_index_by_hash(hash, |k| k == *key)?;
+            indices[i] = idx;
+        }
+
+        for i in 0..N {
+            for j in 0..i {
+                if indices[i] == indices[j] {
+                    panic!("duplicate key passed to get_many_mut");
+                }
+            }
+        }
+
+        Some(indices)
+    }
+
     /// Gets a mutable reference to the value corresponding to the specified key, or `None` if not found.
     ///
     /// Calls [`Self::get_mut_with_hash`] internally after computing the hash.
     #[inline]
     pub fn get_mut(&mut self, key: &K) -> Option<&mut V> {
-        let mut hasher = H::default();
+        let mut hasher = self.hash_builder.build_hasher();
         key.hash(&mut hasher);
         let hash = encode_hash(hasher.finish());
         self._get_mut_with_hash(hash, key)
@@ -371,6 +452,43 @@ impl<K: Key, V: Value, H: Hasher + Default> PoMap<K, V, H> {
     /// Gets a mutable reference to the value corresponding to the specified key using a precomputed hash.
     pub fn get_mut_with_hash(&mut self, hash: u64, key: &K) -> Option<&mut V> {
         self._get_mut_with_hash(encode_hash(hash), key)
+    }
+
+    /// Gets mutable references to multiple values corresponding to the supplied keys.
+    ///
+    /// Returns `None` if any key is missing, and panics if duplicate keys are supplied.
+    #[inline]
+    pub fn get_many_mut<const N: usize>(&mut self, keys: [&K; N]) -> Option<[&mut V; N]> {
+        let indices = self.get_many_indices(keys)?;
+        let entries_ptr = self.slots.entries_ptr();
+        let mut ptrs = [core::ptr::null_mut(); N];
+        for (i, idx) in indices.iter().enumerate() {
+            let entry = unsafe { &mut *entries_ptr.add(*idx) };
+            ptrs[i] = unsafe { entry.value.assume_init_mut() as *mut V };
+        }
+        Some(core::array::from_fn(|i| unsafe { &mut *ptrs[i] }))
+    }
+
+    /// Gets mutable references to key-value pairs corresponding to the supplied keys.
+    ///
+    /// Returns `None` if any key is missing, and panics if duplicate keys are supplied.
+    #[inline]
+    pub fn get_many_key_value_mut<const N: usize>(
+        &mut self,
+        keys: [&K; N],
+    ) -> Option<[(&K, &mut V); N]> {
+        let indices = self.get_many_indices(keys)?;
+        let entries_ptr = self.slots.entries_ptr();
+        let mut ptrs = [(core::ptr::null(), core::ptr::null_mut()); N];
+        for (i, idx) in indices.iter().enumerate() {
+            let entry = unsafe { &mut *entries_ptr.add(*idx) };
+            let key = unsafe { entry.key.assume_init_ref() as *const K };
+            let value = unsafe { entry.value.assume_init_mut() as *mut V };
+            ptrs[i] = (key, value);
+        }
+        Some(core::array::from_fn(|i| unsafe {
+            (&*ptrs[i].0, &mut *ptrs[i].1)
+        }))
     }
 
     /// Hot path for `get_mut` that can be used when the caller already has the hash and doesn't
@@ -403,7 +521,7 @@ impl<K: Key, V: Value, H: Hasher + Default> PoMap<K, V, H> {
     /// Gets the given key's corresponding entry in the map for in-place manipulation.
     #[inline]
     pub fn entry(&mut self, key: K) -> Entry<'_, K, V, H> {
-        let mut hasher = H::default();
+        let mut hasher = self.hash_builder.build_hasher();
         key.hash(&mut hasher);
         let hash = encode_hash(hasher.finish());
         self._entry_with_hash(hash, key)
@@ -571,7 +689,7 @@ impl<K: Key, V: Value, H: Hasher + Default> PoMap<K, V, H> {
     /// Computes the hash of the key and then delegates to [`Self::insert_with_hash`].
     #[inline]
     pub fn insert(&mut self, key: K, value: V) -> Option<V> {
-        let mut hasher = H::default();
+        let mut hasher = self.hash_builder.build_hasher();
         key.hash(&mut hasher);
         let hash = encode_hash(hasher.finish());
         self._insert_with_hash(hash, key, value)
@@ -694,7 +812,9 @@ impl<K: Key, V: Value, H: Hasher + Default> PoMap<K, V, H> {
             let old_cap = self.slots.capacity();
             #[cfg(feature = "resize-logging")]
             let load_factor = self.len as f64 / old_cap as f64;
-            self.reserve((self.slots.capacity() - self.meta.index_bits) * GROWTH_FACTOR);
+            let ideal_range = self.slots.capacity() - self.meta.index_bits;
+            let target_capacity = ideal_range.saturating_mul(GROWTH_FACTOR);
+            self.reserve_for_capacity(target_capacity);
             #[cfg(feature = "resize-logging")]
             let new_cap = self.slots.capacity();
             #[cfg(feature = "resize-logging")]
@@ -712,7 +832,7 @@ impl<K: Key, V: Value, H: Hasher + Default> PoMap<K, V, H> {
     /// Computes the hash of the key and then delegates to [`Self::remove_with_hash`].
     #[inline]
     pub fn remove(&mut self, key: &K) -> Option<V> {
-        let mut hasher = H::default();
+        let mut hasher = self.hash_builder.build_hasher();
         key.hash(&mut hasher);
         let hash = encode_hash(hasher.finish());
         self._remove_with_hash(hash, key)
@@ -727,7 +847,7 @@ impl<K: Key, V: Value, H: Hasher + Default> PoMap<K, V, H> {
     /// Removes a key from the map, returning the key and value if it existed.
     #[inline]
     pub fn remove_entry(&mut self, key: &K) -> Option<(K, V)> {
-        let mut hasher = H::default();
+        let mut hasher = self.hash_builder.build_hasher();
         key.hash(&mut hasher);
         let hash = encode_hash(hasher.finish());
         self._remove_entry_with_hash(hash, key)
@@ -795,6 +915,19 @@ impl<K: Key, V: Value, H: Hasher + Default> PoMap<K, V, H> {
             } else {
                 self.remove_entry_at(idx);
             }
+        }
+    }
+
+    /// Removes all entries for which the predicate returns `true`, yielding them as an iterator.
+    #[inline]
+    pub fn extract_if<F>(&mut self, f: F) -> ExtractIf<'_, K, V, F, H>
+    where
+        F: FnMut(&K, &mut V) -> bool,
+    {
+        ExtractIf {
+            map: self,
+            index: 0,
+            predicate: f,
         }
     }
 
@@ -1101,12 +1234,45 @@ impl<K: Key, V: Value, H: Hasher + Default> PoMap<K, V, H> {
         self.shrink_to(self.len)
     }
 
-    /// Reserve capacity for at least `requested_capacity` elements if there is not enough
-    /// capacity already.
-    ///
-    /// Returns the new capacity.
+    /// Reserve capacity for at least `additional` more elements.
+    #[inline]
+    pub fn reserve(&mut self, additional: usize) {
+        if additional == 0 {
+            return;
+        }
+        let requested = self.len.saturating_add(additional);
+        self.reserve_for_capacity(requested);
+    }
+
+    /// Reserve capacity for at least `additional` more elements, using the same growth
+    /// strategy as [`reserve`].
+    #[inline]
+    pub fn reserve_exact(&mut self, additional: usize) {
+        self.reserve(additional);
+    }
+
+    /// Try to reserve capacity for at least `additional` more elements.
+    #[inline]
+    pub fn try_reserve(&mut self, additional: usize) -> Result<(), TryReserveError> {
+        if additional == 0 {
+            return Ok(());
+        }
+        let requested = self
+            .len
+            .checked_add(additional)
+            .ok_or(TryReserveError::CapacityOverflow)?;
+        self.try_reserve_for_capacity(requested).map(|_| ())
+    }
+
+    /// Try to reserve capacity for at least `additional` more elements, using the same growth
+    /// strategy as [`try_reserve`].
+    #[inline]
+    pub fn try_reserve_exact(&mut self, additional: usize) -> Result<(), TryReserveError> {
+        self.try_reserve(additional)
+    }
+
     #[cold]
-    pub fn reserve(&mut self, requested_capacity: usize) -> usize {
+    fn reserve_for_capacity(&mut self, requested_capacity: usize) -> usize {
         // generate new meta
         let current_capacity = self.slots.capacity();
         let (new_meta, new_vec_capacity) = PoMapMeta::new(requested_capacity.next_power_of_two());
@@ -1162,6 +1328,67 @@ impl<K: Key, V: Value, H: Hasher + Default> PoMap<K, V, H> {
         );*/
 
         new_vec_capacity
+    }
+
+    #[cold]
+    fn try_reserve_for_capacity(
+        &mut self,
+        requested_capacity: usize,
+    ) -> Result<usize, TryReserveError> {
+        let current_capacity = self.slots.capacity();
+        let requested_power = requested_capacity
+            .checked_next_power_of_two()
+            .ok_or(TryReserveError::CapacityOverflow)?;
+        let (new_meta, new_vec_capacity) = PoMapMeta::new(requested_power);
+        if new_vec_capacity <= current_capacity {
+            return Ok(current_capacity);
+        }
+
+        let mut old_slots = core::mem::replace(&mut self.slots, Slots::try_new(new_vec_capacity)?);
+
+        let mut cursor = 0;
+        let hashes_ptr = old_slots.hashes_ptr();
+        let entries_ptr = old_slots.entries_ptr();
+        for idx in 0..current_capacity {
+            let hash = unsafe { *hashes_ptr.add(idx) };
+            if hash == VACANT_HASH {
+                cursor += 1;
+                continue;
+            }
+
+            let ideal_slot = new_meta.ideal_slot(hash);
+            cursor = ideal_slot.max(cursor);
+
+            let entry = unsafe { &mut *entries_ptr.add(idx) };
+            let key = unsafe { entry.key.assume_init_read() };
+            let value = unsafe { entry.value.assume_init_read() };
+
+            unsafe { old_slots.clear_slot(idx) };
+            unsafe { self.slots.write_slot(cursor, hash, key, value) };
+            cursor += 1;
+        }
+
+        self.meta = new_meta;
+        Ok(new_vec_capacity)
+    }
+}
+
+impl<K: Key, V: Value, H: BuildHasher + Default> PoMap<K, V, H> {
+    /// Create a new [`PoMap`] with _at least_ the given capacity.
+    ///
+    /// Note that the actual internal capacity will always be scaled up to the next power of
+    /// two (if not already a power of two) plus `index_bits` (the max-scan window).
+    ///
+    /// Also note that the minimum capacity is [`MIN_CAPACITY`].
+    #[inline]
+    pub fn with_capacity(capacity: usize) -> Self {
+        Self::with_capacity_and_hasher(capacity, H::default())
+    }
+
+    /// Create a new [`PoMap`] with [`MIN_CAPACITY`] + max-scan internal capacity.
+    #[inline(always)]
+    pub fn new() -> Self {
+        Self::with_capacity(MIN_CAPACITY)
     }
 }
 
@@ -1495,6 +1722,60 @@ impl<'a, K: Key, V: Value> Drop for Drain<'a, K, V> {
     }
 }
 
+/// Iterator that removes entries matching a predicate.
+#[must_use]
+pub struct ExtractIf<'a, K: Key, V: Value, F, H: BuildHasher> {
+    map: &'a mut PoMap<K, V, H>,
+    index: usize,
+    predicate: F,
+}
+
+impl<'a, K: Key, V: Value, F, H: BuildHasher> Iterator for ExtractIf<'a, K, V, F, H>
+where
+    F: FnMut(&K, &mut V) -> bool,
+{
+    type Item = (K, V);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let capacity = self.map.slots.capacity();
+        let hashes_ptr = self.map.slots.hashes_ptr();
+        let entries_ptr = self.map.slots.entries_ptr();
+
+        while self.index < capacity {
+            let idx = self.index;
+            let hash = unsafe { *hashes_ptr.add(idx) };
+            if hash == VACANT_HASH {
+                self.index += 1;
+                continue;
+            }
+
+            let should_remove = {
+                let entry = unsafe { &mut *entries_ptr.add(idx) };
+                let key = unsafe { entry.key.assume_init_ref() };
+                let value = unsafe { entry.value.assume_init_mut() };
+                (self.predicate)(key, value)
+            };
+
+            if should_remove {
+                return Some(self.map.remove_entry_at(idx));
+            }
+
+            self.index += 1;
+        }
+
+        None
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        (0, Some(self.map.len()))
+    }
+}
+
+impl<'a, K: Key, V: Value, F, H: BuildHasher> FusedIterator for ExtractIf<'a, K, V, F, H> where
+    F: FnMut(&K, &mut V) -> bool
+{
+}
+
 /// Owning iterator over keys in deterministic order.
 #[must_use]
 pub struct IntoKeys<K: Key, V: Value> {
@@ -1553,7 +1834,7 @@ impl<K: Key, V: Value> ExactSizeIterator for IntoValues<K, V> {
 
 impl<K: Key, V: Value> FusedIterator for IntoValues<K, V> {}
 
-impl<'a, K: Key, V: Value, H: Hasher + Default> IntoIterator for &'a PoMap<K, V, H> {
+impl<'a, K: Key, V: Value, H: BuildHasher> IntoIterator for &'a PoMap<K, V, H> {
     type Item = (&'a K, &'a V);
     type IntoIter = Iter<'a, K, V>;
 
@@ -1563,7 +1844,7 @@ impl<'a, K: Key, V: Value, H: Hasher + Default> IntoIterator for &'a PoMap<K, V,
     }
 }
 
-impl<'a, K: Key, V: Value, H: Hasher + Default> IntoIterator for &'a mut PoMap<K, V, H> {
+impl<'a, K: Key, V: Value, H: BuildHasher> IntoIterator for &'a mut PoMap<K, V, H> {
     type Item = (&'a K, &'a mut V);
     type IntoIter = IterMut<'a, K, V>;
 
@@ -1573,7 +1854,7 @@ impl<'a, K: Key, V: Value, H: Hasher + Default> IntoIterator for &'a mut PoMap<K
     }
 }
 
-impl<K: Key, V: Value, H: Hasher + Default> IntoIterator for PoMap<K, V, H> {
+impl<K: Key, V: Value, H: BuildHasher> IntoIterator for PoMap<K, V, H> {
     type Item = (K, V);
     type IntoIter = IntoIter<K, V>;
 
@@ -1612,7 +1893,7 @@ enum EntryLocation {
 
 /// A view into a single entry in a [`PoMap`], similar to `std::collections::hash_map::Entry`.
 #[must_use]
-pub enum Entry<'a, K: Key, V: Value, H: Hasher + Default> {
+pub enum Entry<'a, K: Key, V: Value, H: BuildHasher> {
     /// An occupied entry.
     Occupied(OccupiedEntry<'a, K, V, H>),
     /// A vacant entry.
@@ -1620,20 +1901,32 @@ pub enum Entry<'a, K: Key, V: Value, H: Hasher + Default> {
 }
 
 /// A view into an occupied entry in a [`PoMap`].
-pub struct OccupiedEntry<'a, K: Key, V: Value, H: Hasher + Default> {
+pub struct OccupiedEntry<'a, K: Key, V: Value, H: BuildHasher> {
     map: &'a mut PoMap<K, V, H>,
     index: usize,
 }
 
 /// A view into a vacant entry in a [`PoMap`].
-pub struct VacantEntry<'a, K: Key, V: Value, H: Hasher + Default> {
+pub struct VacantEntry<'a, K: Key, V: Value, H: BuildHasher> {
     map: &'a mut PoMap<K, V, H>,
     hash: u64,
     key: K,
     insert: VacantInsert,
 }
 
-impl<'a, K: Key, V: Value, H: Hasher + Default> Entry<'a, K, V, H> {
+impl<'a, K: Key, V: Value, H: BuildHasher> Entry<'a, K, V, H> {
+    /// Inserts a value into the entry, returning an occupied view.
+    #[inline]
+    pub fn insert(self, value: V) -> OccupiedEntry<'a, K, V, H> {
+        match self {
+            Entry::Occupied(mut entry) => {
+                entry.insert(value);
+                entry
+            }
+            Entry::Vacant(entry) => entry.insert_entry(value),
+        }
+    }
+
     #[inline]
     /// Ensures a value is in the entry by inserting the default if vacant.
     pub fn or_insert(self, default: V) -> &'a mut V {
@@ -1699,7 +1992,7 @@ impl<'a, K: Key, V: Value, H: Hasher + Default> Entry<'a, K, V, H> {
     }
 }
 
-impl<'a, K: Key, V: Value, H: Hasher + Default> OccupiedEntry<'a, K, V, H> {
+impl<'a, K: Key, V: Value, H: BuildHasher> OccupiedEntry<'a, K, V, H> {
     #[inline]
     /// Returns a reference to the entry's key.
     pub fn key(&self) -> &K {
@@ -1764,7 +2057,7 @@ impl<'a, K: Key, V: Value, H: Hasher + Default> OccupiedEntry<'a, K, V, H> {
     }
 }
 
-impl<'a, K: Key, V: Value, H: Hasher + Default> VacantEntry<'a, K, V, H> {
+impl<'a, K: Key, V: Value, H: BuildHasher> VacantEntry<'a, K, V, H> {
     #[inline]
     /// Returns a reference to the key that would be inserted.
     pub const fn key(&self) -> &K {
@@ -1780,6 +2073,11 @@ impl<'a, K: Key, V: Value, H: Hasher + Default> VacantEntry<'a, K, V, H> {
     #[inline]
     /// Inserts the value for this vacant entry and returns a mutable reference to it.
     pub fn insert(self, value: V) -> &'a mut V {
+        self.insert_entry(value).into_mut()
+    }
+
+    #[inline]
+    fn insert_entry(self, value: V) -> OccupiedEntry<'a, K, V, H> {
         let hash = self.hash;
         let key = self.key;
         let map = self.map;
@@ -1836,27 +2134,25 @@ impl<'a, K: Key, V: Value, H: Hasher + Default> VacantEntry<'a, K, V, H> {
             }
         };
 
-        let entries_ptr = map.slots.entries_ptr();
-        let entry = unsafe { &mut *entries_ptr.add(index) };
-        unsafe { entry.value.assume_init_mut() }
+        OccupiedEntry { map, index }
     }
 }
 
 /// A builder for computing where in a [`PoMap`] a key-value pair would be stored.
 #[must_use]
-pub struct RawEntryBuilderMut<'a, K: Key, V: Value, H: Hasher + Default> {
+pub struct RawEntryBuilderMut<'a, K: Key, V: Value, H: BuildHasher> {
     map: &'a mut PoMap<K, V, H>,
 }
 
 /// A builder for computing where in a [`PoMap`] a key-value pair would be stored.
 #[must_use]
-pub struct RawEntryBuilder<'a, K: Key, V: Value, H: Hasher + Default> {
+pub struct RawEntryBuilder<'a, K: Key, V: Value, H: BuildHasher> {
     map: &'a PoMap<K, V, H>,
 }
 
 /// A view into a single raw entry in a [`PoMap`].
 #[must_use]
-pub enum RawEntryMut<'a, K: Key, V: Value, H: Hasher + Default> {
+pub enum RawEntryMut<'a, K: Key, V: Value, H: BuildHasher> {
     /// An occupied entry.
     Occupied(RawOccupiedEntryMut<'a, K, V, H>),
     /// A vacant entry.
@@ -1864,23 +2160,23 @@ pub enum RawEntryMut<'a, K: Key, V: Value, H: Hasher + Default> {
 }
 
 /// A view into an occupied raw entry in a [`PoMap`].
-pub struct RawOccupiedEntryMut<'a, K: Key, V: Value, H: Hasher + Default> {
+pub struct RawOccupiedEntryMut<'a, K: Key, V: Value, H: BuildHasher> {
     map: &'a mut PoMap<K, V, H>,
     index: usize,
 }
 
 /// A view into a vacant raw entry in a [`PoMap`].
-pub struct RawVacantEntryMut<'a, K: Key, V: Value, H: Hasher + Default> {
+pub struct RawVacantEntryMut<'a, K: Key, V: Value, H: BuildHasher> {
     map: &'a mut PoMap<K, V, H>,
     hash: u64,
 }
 
-impl<'a, K: Key, V: Value, H: Hasher + Default> RawEntryBuilderMut<'a, K, V, H> {
+impl<'a, K: Key, V: Value, H: BuildHasher> RawEntryBuilderMut<'a, K, V, H> {
     /// Creates a [`RawEntryMut`] from the given key.
     #[inline]
     #[allow(clippy::wrong_self_convention)]
     pub fn from_key(self, key: &K) -> RawEntryMut<'a, K, V, H> {
-        let mut hasher = H::default();
+        let mut hasher = self.map.hash_builder.build_hasher();
         key.hash(&mut hasher);
         let hash = hasher.finish();
         self.from_key_hashed_nocheck(hash, key)
@@ -1924,12 +2220,12 @@ impl<'a, K: Key, V: Value, H: Hasher + Default> RawEntryBuilderMut<'a, K, V, H> 
     }
 }
 
-impl<'a, K: Key, V: Value, H: Hasher + Default> RawEntryBuilder<'a, K, V, H> {
+impl<'a, K: Key, V: Value, H: BuildHasher> RawEntryBuilder<'a, K, V, H> {
     /// Accesses an immutable entry by key.
     #[inline]
     #[allow(clippy::wrong_self_convention)]
     pub fn from_key(self, key: &K) -> Option<(&'a K, &'a V)> {
-        let mut hasher = H::default();
+        let mut hasher = self.map.hash_builder.build_hasher();
         key.hash(&mut hasher);
         let hash = encode_hash(hasher.finish());
         self.map._get_key_value_with_hash(hash, key)
@@ -1960,7 +2256,7 @@ impl<'a, K: Key, V: Value, H: Hasher + Default> RawEntryBuilder<'a, K, V, H> {
     }
 }
 
-impl<'a, K: Key, V: Value, H: Hasher + Default> RawEntryMut<'a, K, V, H> {
+impl<'a, K: Key, V: Value, H: BuildHasher> RawEntryMut<'a, K, V, H> {
     /// Inserts a key-value pair into the entry, returning an occupied entry view.
     #[inline]
     pub fn insert(self, key: K, value: V) -> RawOccupiedEntryMut<'a, K, V, H> {
@@ -2017,7 +2313,7 @@ impl<'a, K: Key, V: Value, H: Hasher + Default> RawEntryMut<'a, K, V, H> {
     }
 }
 
-impl<'a, K: Key, V: Value, H: Hasher + Default> RawOccupiedEntryMut<'a, K, V, H> {
+impl<'a, K: Key, V: Value, H: BuildHasher> RawOccupiedEntryMut<'a, K, V, H> {
     /// Returns a reference to the entry's key.
     #[inline]
     pub fn key(&self) -> &K {
@@ -2112,7 +2408,7 @@ impl<'a, K: Key, V: Value, H: Hasher + Default> RawOccupiedEntryMut<'a, K, V, H>
     }
 }
 
-impl<'a, K: Key, V: Value, H: Hasher + Default> RawVacantEntryMut<'a, K, V, H> {
+impl<'a, K: Key, V: Value, H: BuildHasher> RawVacantEntryMut<'a, K, V, H> {
     /// Inserts the key and value, returning a reference to the key and a mutable reference to the value.
     ///
     /// The hash supplied to the raw entry must correspond to the key.
@@ -2140,7 +2436,7 @@ impl<'a, K: Key, V: Value, H: Hasher + Default> RawVacantEntryMut<'a, K, V, H> {
     }
 }
 
-impl<K: Key, V: Value, H: Hasher + Default> Clone for PoMap<K, V, H> {
+impl<K: Key, V: Value, H: BuildHasher + Clone> Clone for PoMap<K, V, H> {
     fn clone(&self) -> Self {
         let capacity = self.capacity();
         let mut slots = Slots::new(capacity);
@@ -2163,12 +2459,12 @@ impl<K: Key, V: Value, H: Hasher + Default> Clone for PoMap<K, V, H> {
             len: self.len,
             meta: self.meta,
             slots,
-            _phantom: PhantomData,
+            hash_builder: self.hash_builder.clone(),
         }
     }
 }
 
-impl<K: Key, V: Value, H: Hasher + Default> Default for PoMap<K, V, H> {
+impl<K: Key, V: Value, H: BuildHasher + Default> Default for PoMap<K, V, H> {
     #[inline(always)]
     /// Creates an empty map using [`PoMap::new`].
     fn default() -> Self {
@@ -2176,7 +2472,7 @@ impl<K: Key, V: Value, H: Hasher + Default> Default for PoMap<K, V, H> {
     }
 }
 
-impl<K: Key, V: Value, H: Hasher + Default> fmt::Debug for PoMap<K, V, H>
+impl<K: Key, V: Value, H: BuildHasher> fmt::Debug for PoMap<K, V, H>
 where
     K: fmt::Debug,
     V: fmt::Debug,
@@ -2191,30 +2487,30 @@ where
     }
 }
 
-impl<K: Key, V: Value + PartialEq, H: Hasher + Default> PartialEq for PoMap<K, V, H> {
+impl<K: Key, V: Value + PartialEq, H: BuildHasher> PartialEq for PoMap<K, V, H> {
     #[inline]
     fn eq(&self, other: &Self) -> bool {
         self.len == other.len && self.iter().eq(other.iter())
     }
 }
 
-impl<K: Key, V: Value + Eq, H: Hasher + Default> Eq for PoMap<K, V, H> {}
+impl<K: Key, V: Value + Eq, H: BuildHasher> Eq for PoMap<K, V, H> {}
 
-impl<K: Key, V: Value + PartialOrd, H: Hasher + Default> PartialOrd for PoMap<K, V, H> {
+impl<K: Key, V: Value + PartialOrd, H: BuildHasher> PartialOrd for PoMap<K, V, H> {
     #[inline]
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         self.iter().partial_cmp(other.iter())
     }
 }
 
-impl<K: Key, V: Value + Ord, H: Hasher + Default> Ord for PoMap<K, V, H> {
+impl<K: Key, V: Value + Ord, H: BuildHasher> Ord for PoMap<K, V, H> {
     #[inline]
     fn cmp(&self, other: &Self) -> Ordering {
         self.iter().cmp(other.iter())
     }
 }
 
-impl<K: Key, V: Value + Hash, H: Hasher + Default> Hash for PoMap<K, V, H> {
+impl<K: Key, V: Value + Hash, H: BuildHasher> Hash for PoMap<K, V, H> {
     #[inline]
     fn hash<S: Hasher>(&self, state: &mut S) {
         self.len.hash(state);
@@ -2225,7 +2521,7 @@ impl<K: Key, V: Value + Hash, H: Hasher + Default> Hash for PoMap<K, V, H> {
     }
 }
 
-impl<K: Key, V: Value, H: Hasher + Default> Extend<(K, V)> for PoMap<K, V, H> {
+impl<K: Key, V: Value, H: BuildHasher> Extend<(K, V)> for PoMap<K, V, H> {
     #[inline]
     fn extend<T: IntoIterator<Item = (K, V)>>(&mut self, iter: T) {
         for (key, value) in iter {
@@ -2234,9 +2530,7 @@ impl<K: Key, V: Value, H: Hasher + Default> Extend<(K, V)> for PoMap<K, V, H> {
     }
 }
 
-impl<'a, K: Key + 'a, V: Value + 'a, H: Hasher + Default> Extend<(&'a K, &'a V)>
-    for PoMap<K, V, H>
-{
+impl<'a, K: Key + 'a, V: Value + 'a, H: BuildHasher> Extend<(&'a K, &'a V)> for PoMap<K, V, H> {
     #[inline]
     fn extend<T: IntoIterator<Item = (&'a K, &'a V)>>(&mut self, iter: T) {
         for (key, value) in iter {
@@ -2245,7 +2539,7 @@ impl<'a, K: Key + 'a, V: Value + 'a, H: Hasher + Default> Extend<(&'a K, &'a V)>
     }
 }
 
-impl<K: Key, V: Value, H: Hasher + Default> FromIterator<(K, V)> for PoMap<K, V, H> {
+impl<K: Key, V: Value, H: BuildHasher + Default> FromIterator<(K, V)> for PoMap<K, V, H> {
     #[inline]
     fn from_iter<T: IntoIterator<Item = (K, V)>>(iter: T) -> Self {
         let iter = iter.into_iter();
@@ -2256,7 +2550,7 @@ impl<K: Key, V: Value, H: Hasher + Default> FromIterator<(K, V)> for PoMap<K, V,
     }
 }
 
-impl<'a, K: Key + 'a, V: Value + 'a, H: Hasher + Default> FromIterator<(&'a K, &'a V)>
+impl<'a, K: Key + 'a, V: Value + 'a, H: BuildHasher + Default> FromIterator<(&'a K, &'a V)>
     for PoMap<K, V, H>
 {
     #[inline]
@@ -2269,7 +2563,7 @@ impl<'a, K: Key + 'a, V: Value + 'a, H: Hasher + Default> FromIterator<(&'a K, &
     }
 }
 
-impl<K: Key, V: Value, H: Hasher + Default> Index<&K> for PoMap<K, V, H> {
+impl<K: Key, V: Value, H: BuildHasher> Index<&K> for PoMap<K, V, H> {
     type Output = V;
 
     #[inline]
@@ -2345,9 +2639,9 @@ impl PoMapMeta {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
     use ahash::AHasher;
     use alloc::{format, vec, vec::Vec};
-    use super::*;
     use proptest::prelude::*;
     use rand::{Rng, SeedableRng, rngs::StdRng};
     use std::{
@@ -2656,6 +2950,36 @@ mod tests {
         assert_eq!(map.get(&4), Some(&105));
         assert!(!map.contains_key(&1));
         assert!(!map.contains_key(&3));
+    }
+
+    #[test]
+    fn extract_if_removes_matching_entries() {
+        let mut map = build_map_with_order(&[1u64, 2, 3, 4], 8);
+        let removed = map.extract_if(|k, _| k % 2 == 0).collect::<Vec<_>>();
+
+        assert_eq!(removed.len(), 2);
+        assert!(!map.contains_key(&2));
+        assert!(!map.contains_key(&4));
+        assert!(map.contains_key(&1));
+        assert!(map.contains_key(&3));
+    }
+
+    #[test]
+    fn get_many_mut_updates_values() {
+        let mut map = build_map_with_order(&[1u64, 2, 3], 8);
+        let [v1, v3] = map.get_many_mut([&1, &3]).expect("expected values");
+        *v1 += 10;
+        *v3 += 30;
+
+        assert_eq!(map.get(&1), Some(&111));
+        assert_eq!(map.get(&3), Some(&133));
+    }
+
+    #[test]
+    #[should_panic(expected = "duplicate key")]
+    fn get_many_mut_panics_on_duplicates() {
+        let mut map = build_map_with_order(&[1u64], 4);
+        let _ = map.get_many_mut([&1, &1]);
     }
 
     #[test]
