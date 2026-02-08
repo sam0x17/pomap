@@ -331,6 +331,32 @@ impl<K: Key, V: Value, H: Hasher + Default> PoMap<K, V, H> {
         None
     }
 
+    #[inline(always)]
+    fn _find_index_by_hash<F>(&self, hash: u64, mut is_match: F) -> Option<usize>
+    where
+        F: FnMut(&K) -> bool,
+    {
+        let ideal_slot = self.meta.ideal_slot(hash);
+        let scan_end = ideal_slot + self.meta.index_bits;
+
+        let hashes_ptr = self.slots.hashes_ptr();
+        let entries_ptr = self.slots.entries_ptr();
+
+        for idx in ideal_slot..scan_end {
+            let slot_hash = unsafe { *hashes_ptr.add(idx) };
+            if slot_hash == hash {
+                let entry = unsafe { &*entries_ptr.add(idx) };
+                let key = unsafe { entry.key.assume_init_ref() };
+                if is_match(key) {
+                    return Some(idx);
+                }
+            } else if slot_hash > hash {
+                return None;
+            }
+        }
+        None
+    }
+
     /// Gets a mutable reference to the value corresponding to the specified key, or `None` if not found.
     ///
     /// Calls [`Self::get_mut_with_hash`] internally after computing the hash.
@@ -388,6 +414,18 @@ impl<K: Key, V: Value, H: Hasher + Default> PoMap<K, V, H> {
     /// Gets the entry for a key using a precomputed hash.
     pub fn entry_with_hash(&mut self, hash: u64, key: K) -> Entry<'_, K, V, H> {
         self._entry_with_hash(encode_hash(hash), key)
+    }
+
+    /// Creates a raw mutable entry builder for advanced lookups.
+    #[inline]
+    pub fn raw_entry_mut(&mut self) -> RawEntryBuilderMut<'_, K, V, H> {
+        RawEntryBuilderMut { map: self }
+    }
+
+    /// Creates a raw immutable entry builder for advanced lookups.
+    #[inline]
+    pub fn raw_entry(&self) -> RawEntryBuilder<'_, K, V, H> {
+        RawEntryBuilder { map: self }
     }
 
     /// Returns an iterator over key-value pairs in deterministic order.
@@ -720,6 +758,61 @@ impl<K: Key, V: Value, H: Hasher + Default> PoMap<K, V, H> {
         }
 
         self.len = 0;
+    }
+
+    /// Retains only the entries specified by the predicate.
+    ///
+    /// The predicate is applied to each key and mutable value. Entries for
+    /// which it returns `false` are removed.
+    pub fn retain<F>(&mut self, mut f: F)
+    where
+        F: FnMut(&K, &mut V) -> bool,
+    {
+        if self.len == 0 {
+            return;
+        }
+
+        let capacity = self.slots.capacity();
+        let hashes_ptr = self.slots.hashes_ptr();
+        let entries_ptr = self.slots.entries_ptr();
+
+        let mut idx = 0usize;
+        while idx < capacity {
+            let hash = unsafe { *hashes_ptr.add(idx) };
+            if hash == VACANT_HASH {
+                idx += 1;
+                continue;
+            }
+
+            let keep = {
+                let entry = unsafe { &mut *entries_ptr.add(idx) };
+                let key = unsafe { entry.key.assume_init_ref() };
+                let value = unsafe { entry.value.assume_init_mut() };
+                f(key, value)
+            };
+
+            if keep {
+                idx += 1;
+            } else {
+                self.remove_entry_at(idx);
+            }
+        }
+    }
+
+    /// Removes all entries and returns an iterator over them in deterministic order.
+    ///
+    /// The map is emptied even if the iterator is not fully consumed.
+    pub fn drain(&mut self) -> Drain<'_, K, V> {
+        let remaining = self.len;
+        self.len = 0;
+        Drain {
+            hashes: self.slots.hashes_ptr(),
+            entries: self.slots.entries_ptr(),
+            index: 0,
+            capacity: self.slots.capacity(),
+            remaining,
+            _marker: PhantomData,
+        }
     }
 
     /// Hot path for `remove` that can be used when the caller already has the hash and doesn't
@@ -1335,6 +1428,74 @@ impl<K: Key, V: Value> ExactSizeIterator for IntoIter<K, V> {
 
 impl<K: Key, V: Value> FusedIterator for IntoIter<K, V> {}
 
+/// Draining iterator over key-value pairs in deterministic order.
+#[must_use]
+pub struct Drain<'a, K: Key, V: Value> {
+    hashes: *mut u64,
+    entries: *mut SlotEntry<K, V>,
+    index: usize,
+    capacity: usize,
+    remaining: usize,
+    _marker: PhantomData<&'a mut (K, V)>,
+}
+
+impl<'a, K: Key, V: Value> Iterator for Drain<'a, K, V> {
+    type Item = (K, V);
+
+    #[inline]
+    fn next(&mut self) -> Option<Self::Item> {
+        while self.index < self.capacity {
+            let idx = self.index;
+            self.index += 1;
+            let hash = unsafe { *self.hashes.add(idx) };
+            if hash == VACANT_HASH {
+                continue;
+            }
+            self.remaining -= 1;
+            unsafe { *self.hashes.add(idx) = VACANT_HASH };
+            let entry = unsafe { &mut *self.entries.add(idx) };
+            let key = unsafe { entry.key.assume_init_read() };
+            let value = unsafe { entry.value.assume_init_read() };
+            return Some((key, value));
+        }
+        None
+    }
+
+    #[inline]
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        (self.remaining, Some(self.remaining))
+    }
+}
+
+impl<'a, K: Key, V: Value> ExactSizeIterator for Drain<'a, K, V> {
+    #[inline]
+    fn len(&self) -> usize {
+        self.remaining
+    }
+}
+
+impl<'a, K: Key, V: Value> FusedIterator for Drain<'a, K, V> {}
+
+impl<'a, K: Key, V: Value> Drop for Drain<'a, K, V> {
+    fn drop(&mut self) {
+        while self.index < self.capacity {
+            let idx = self.index;
+            self.index += 1;
+            let hash = unsafe { *self.hashes.add(idx) };
+            if hash == VACANT_HASH {
+                continue;
+            }
+            unsafe { *self.hashes.add(idx) = VACANT_HASH };
+            let entry = unsafe { &mut *self.entries.add(idx) };
+            unsafe {
+                entry.key.assume_init_drop();
+                entry.value.assume_init_drop();
+            }
+        }
+        self.remaining = 0;
+    }
+}
+
 /// Owning iterator over keys in deterministic order.
 #[must_use]
 pub struct IntoKeys<K: Key, V: Value> {
@@ -1682,6 +1843,304 @@ impl<'a, K: Key, V: Value, H: Hasher + Default> VacantEntry<'a, K, V, H> {
     }
 }
 
+/// A builder for computing where in a [`PoMap`] a key-value pair would be stored.
+#[must_use]
+pub struct RawEntryBuilderMut<'a, K: Key, V: Value, H: Hasher + Default> {
+    map: &'a mut PoMap<K, V, H>,
+}
+
+/// A builder for computing where in a [`PoMap`] a key-value pair would be stored.
+#[must_use]
+pub struct RawEntryBuilder<'a, K: Key, V: Value, H: Hasher + Default> {
+    map: &'a PoMap<K, V, H>,
+}
+
+/// A view into a single raw entry in a [`PoMap`].
+#[must_use]
+pub enum RawEntryMut<'a, K: Key, V: Value, H: Hasher + Default> {
+    /// An occupied entry.
+    Occupied(RawOccupiedEntryMut<'a, K, V, H>),
+    /// A vacant entry.
+    Vacant(RawVacantEntryMut<'a, K, V, H>),
+}
+
+/// A view into an occupied raw entry in a [`PoMap`].
+pub struct RawOccupiedEntryMut<'a, K: Key, V: Value, H: Hasher + Default> {
+    map: &'a mut PoMap<K, V, H>,
+    index: usize,
+}
+
+/// A view into a vacant raw entry in a [`PoMap`].
+pub struct RawVacantEntryMut<'a, K: Key, V: Value, H: Hasher + Default> {
+    map: &'a mut PoMap<K, V, H>,
+    hash: u64,
+}
+
+impl<'a, K: Key, V: Value, H: Hasher + Default> RawEntryBuilderMut<'a, K, V, H> {
+    /// Creates a [`RawEntryMut`] from the given key.
+    #[inline]
+    #[allow(clippy::wrong_self_convention)]
+    pub fn from_key(self, key: &K) -> RawEntryMut<'a, K, V, H> {
+        let mut hasher = H::default();
+        key.hash(&mut hasher);
+        let hash = hasher.finish();
+        self.from_key_hashed_nocheck(hash, key)
+    }
+
+    /// Creates a [`RawEntryMut`] from a key and its precomputed hash.
+    #[inline]
+    #[allow(clippy::wrong_self_convention)]
+    pub fn from_key_hashed_nocheck(self, hash: u64, key: &K) -> RawEntryMut<'a, K, V, H> {
+        let hash = encode_hash(hash);
+        match self.map.find_entry_location(hash, key) {
+            EntryLocation::Occupied { index } => RawEntryMut::Occupied(RawOccupiedEntryMut {
+                map: self.map,
+                index,
+            }),
+            EntryLocation::Vacant { .. } => RawEntryMut::Vacant(RawVacantEntryMut {
+                map: self.map,
+                hash,
+            }),
+        }
+    }
+
+    /// Creates a [`RawEntryMut`] from a hash and matching function.
+    #[inline]
+    #[allow(clippy::wrong_self_convention)]
+    pub fn from_hash<F>(self, hash: u64, mut is_match: F) -> RawEntryMut<'a, K, V, H>
+    where
+        F: FnMut(&K) -> bool,
+    {
+        let hash = encode_hash(hash);
+        match self.map._find_index_by_hash(hash, &mut is_match) {
+            Some(index) => RawEntryMut::Occupied(RawOccupiedEntryMut {
+                map: self.map,
+                index,
+            }),
+            None => RawEntryMut::Vacant(RawVacantEntryMut {
+                map: self.map,
+                hash,
+            }),
+        }
+    }
+}
+
+impl<'a, K: Key, V: Value, H: Hasher + Default> RawEntryBuilder<'a, K, V, H> {
+    /// Accesses an immutable entry by key.
+    #[inline]
+    #[allow(clippy::wrong_self_convention)]
+    pub fn from_key(self, key: &K) -> Option<(&'a K, &'a V)> {
+        let mut hasher = H::default();
+        key.hash(&mut hasher);
+        let hash = encode_hash(hasher.finish());
+        self.map._get_key_value_with_hash(hash, key)
+    }
+
+    /// Accesses an immutable entry by a key and its precomputed hash.
+    #[inline]
+    #[allow(clippy::wrong_self_convention)]
+    pub fn from_key_hashed_nocheck(self, hash: u64, key: &K) -> Option<(&'a K, &'a V)> {
+        let hash = encode_hash(hash);
+        self.map._get_key_value_with_hash(hash, key)
+    }
+
+    /// Accesses an immutable entry by hash and matching function.
+    #[inline]
+    #[allow(clippy::wrong_self_convention)]
+    pub fn from_hash<F>(self, hash: u64, mut is_match: F) -> Option<(&'a K, &'a V)>
+    where
+        F: FnMut(&K) -> bool,
+    {
+        let hash = encode_hash(hash);
+        let index = self.map._find_index_by_hash(hash, &mut is_match)?;
+        let entries_ptr = self.map.slots.entries_ptr();
+        let entry = unsafe { &*entries_ptr.add(index) };
+        let key = unsafe { entry.key.assume_init_ref() };
+        let value = unsafe { entry.value.assume_init_ref() };
+        Some((key, value))
+    }
+}
+
+impl<'a, K: Key, V: Value, H: Hasher + Default> RawEntryMut<'a, K, V, H> {
+    /// Inserts a key-value pair into the entry, returning an occupied entry view.
+    #[inline]
+    pub fn insert(self, key: K, value: V) -> RawOccupiedEntryMut<'a, K, V, H> {
+        match self {
+            RawEntryMut::Occupied(mut entry) => {
+                entry.insert(value);
+                drop(key);
+                entry
+            }
+            RawEntryMut::Vacant(entry) => entry.insert_entry(key, value),
+        }
+    }
+
+    /// Ensures a value is in the entry by inserting the default if vacant.
+    #[inline]
+    pub fn or_insert(self, default_key: K, default_val: V) -> (&'a K, &'a mut V) {
+        match self {
+            RawEntryMut::Occupied(entry) => entry.into_key_value(),
+            RawEntryMut::Vacant(entry) => entry.insert(default_key, default_val),
+        }
+    }
+
+    /// Ensures a value is in the entry by inserting the result of the function if vacant.
+    #[inline]
+    pub fn or_insert_with<F>(self, default: F) -> (&'a K, &'a mut V)
+    where
+        F: FnOnce() -> (K, V),
+    {
+        match self {
+            RawEntryMut::Occupied(entry) => entry.into_key_value(),
+            RawEntryMut::Vacant(entry) => {
+                let (key, value) = default();
+                entry.insert(key, value)
+            }
+        }
+    }
+
+    /// Applies a function to the entry if it is occupied.
+    #[inline]
+    pub fn and_modify<F>(self, f: F) -> Self
+    where
+        F: FnOnce(&K, &mut V),
+    {
+        match self {
+            RawEntryMut::Occupied(mut entry) => {
+                {
+                    let (key, value) = entry.get_key_value_mut();
+                    f(key, value);
+                }
+                RawEntryMut::Occupied(entry)
+            }
+            RawEntryMut::Vacant(entry) => RawEntryMut::Vacant(entry),
+        }
+    }
+}
+
+impl<'a, K: Key, V: Value, H: Hasher + Default> RawOccupiedEntryMut<'a, K, V, H> {
+    /// Returns a reference to the entry's key.
+    #[inline]
+    pub fn key(&self) -> &K {
+        let entries_ptr = self.map.slots.entries_ptr();
+        let entry = unsafe { &*entries_ptr.add(self.index) };
+        unsafe { entry.key.assume_init_ref() }
+    }
+
+    /// Gets a reference to the value in the entry.
+    #[inline]
+    pub fn get(&self) -> &V {
+        let entries_ptr = self.map.slots.entries_ptr();
+        let entry = unsafe { &*entries_ptr.add(self.index) };
+        unsafe { entry.value.assume_init_ref() }
+    }
+
+    /// Gets a mutable reference to the value in the entry.
+    #[inline]
+    pub fn get_mut(&mut self) -> &mut V {
+        let entries_ptr = self.map.slots.entries_ptr();
+        let entry = unsafe { &mut *entries_ptr.add(self.index) };
+        unsafe { entry.value.assume_init_mut() }
+    }
+
+    /// Converts the entry into a mutable reference to the value.
+    #[inline]
+    pub fn into_mut(self) -> &'a mut V {
+        let entries_ptr = self.map.slots.entries_ptr();
+        let entry = unsafe { &mut *entries_ptr.add(self.index) };
+        unsafe { entry.value.assume_init_mut() }
+    }
+
+    /// Gets a reference to the key and value in the entry.
+    #[inline]
+    pub fn get_key_value(&self) -> (&K, &V) {
+        let entries_ptr = self.map.slots.entries_ptr();
+        let entry = unsafe { &*entries_ptr.add(self.index) };
+        let key = unsafe { entry.key.assume_init_ref() };
+        let value = unsafe { entry.value.assume_init_ref() };
+        (key, value)
+    }
+
+    /// Gets a reference to the key and a mutable reference to the value in the entry.
+    #[inline]
+    pub fn get_key_value_mut(&mut self) -> (&K, &mut V) {
+        let entries_ptr = self.map.slots.entries_ptr();
+        let entry = unsafe { &mut *entries_ptr.add(self.index) };
+        let key = unsafe { entry.key.assume_init_ref() };
+        let value = unsafe { entry.value.assume_init_mut() };
+        (key, value)
+    }
+
+    /// Converts the entry into a reference to the key and a mutable reference to the value.
+    #[inline]
+    pub fn into_key_value(self) -> (&'a K, &'a mut V) {
+        let entries_ptr = self.map.slots.entries_ptr();
+        let entry = unsafe { &mut *entries_ptr.add(self.index) };
+        let key = unsafe { entry.key.assume_init_ref() };
+        let value = unsafe { entry.value.assume_init_mut() };
+        (key, value)
+    }
+
+    /// Replaces the entry's value, returning the old value.
+    #[inline]
+    pub fn insert(&mut self, value: V) -> V {
+        let entries_ptr = self.map.slots.entries_ptr();
+        let entry = unsafe { &mut *entries_ptr.add(self.index) };
+        if core::mem::needs_drop::<V>() {
+            core::mem::replace(unsafe { entry.value.assume_init_mut() }, value)
+        } else {
+            unsafe {
+                let old = entry.value.assume_init_read();
+                entry.value.write(value);
+                old
+            }
+        }
+    }
+
+    /// Removes the entry from the map and returns the stored value.
+    #[inline]
+    pub fn remove(self) -> V {
+        let (key, value) = self.remove_entry();
+        drop(key);
+        value
+    }
+
+    /// Removes the entry from the map and returns the stored key and value.
+    #[inline]
+    pub fn remove_entry(self) -> (K, V) {
+        let index = self.index;
+        self.map.remove_entry_at(index)
+    }
+}
+
+impl<'a, K: Key, V: Value, H: Hasher + Default> RawVacantEntryMut<'a, K, V, H> {
+    /// Inserts the key and value, returning a reference to the key and a mutable reference to the value.
+    ///
+    /// The hash supplied to the raw entry must correspond to the key.
+    #[inline]
+    pub fn insert(self, key: K, value: V) -> (&'a K, &'a mut V) {
+        self.insert_entry(key, value).into_key_value()
+    }
+
+    #[inline]
+    fn insert_entry(self, key: K, value: V) -> RawOccupiedEntryMut<'a, K, V, H> {
+        let map = self.map;
+        let hash = self.hash;
+        let index = match map._insert_entry_with_hash(hash, key, value) {
+            InsertResult::Inserted { index } => index,
+            InsertResult::Replaced { index, old } => {
+                debug_assert!(
+                    false,
+                    "RawVacantEntryMut::insert replaced an existing value"
+                );
+                drop(old);
+                index
+            }
+        };
+        RawOccupiedEntryMut { map, index }
+    }
+}
+
 impl<K: Key, V: Value, H: Hasher + Default> Clone for PoMap<K, V, H> {
     fn clone(&self) -> Self {
         let capacity = self.capacity();
@@ -1888,13 +2347,11 @@ impl PoMapMeta {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use proptest::prelude::*;
     use rand::{Rng, SeedableRng, rngs::StdRng};
     use std::{
-        cell::Cell,
-        cmp::Ordering,
-        collections::HashMap,
-        hash::DefaultHasher,
-        rc::Rc,
+        cell::Cell, cmp::Ordering, collections::BTreeSet, collections::HashMap,
+        hash::DefaultHasher, rc::Rc,
     };
 
     #[derive(Clone)]
@@ -2141,7 +2598,10 @@ mod tests {
         assert_eq!(into_items, expected);
 
         let into_keys = map.clone().into_keys().collect::<Vec<_>>();
-        assert_eq!(into_keys, expected.iter().map(|(k, _)| *k).collect::<Vec<_>>());
+        assert_eq!(
+            into_keys,
+            expected.iter().map(|(k, _)| *k).collect::<Vec<_>>()
+        );
 
         let into_values = map.into_values().collect::<Vec<_>>();
         assert_eq!(
@@ -2182,6 +2642,50 @@ mod tests {
     }
 
     #[test]
+    fn retain_filters_and_mutates() {
+        let mut map = build_map_with_order(&[1u64, 2, 3, 4], 8);
+
+        map.retain(|k, v| {
+            *v += 1;
+            k % 2 == 0
+        });
+
+        assert_eq!(map.len(), 2);
+        assert_eq!(map.get(&2), Some(&103));
+        assert_eq!(map.get(&4), Some(&105));
+        assert!(!map.contains_key(&1));
+        assert!(!map.contains_key(&3));
+    }
+
+    #[test]
+    fn drain_clears_and_yields_in_order() {
+        let mut map = build_map_with_order(&[3u64, 1, 4, 2], 8);
+        let expected = map.iter().map(|(k, v)| (*k, *v)).collect::<Vec<_>>();
+
+        let drained = map.drain().collect::<Vec<_>>();
+
+        assert_eq!(drained, expected);
+        assert!(map.is_empty());
+        assert_eq!(map.len(), 0);
+
+        map.insert(9, 99);
+        assert_eq!(map.get(&9), Some(&99));
+    }
+
+    #[test]
+    fn drain_drop_clears_remaining() {
+        let mut map = build_map_with_order(&[1u64, 2, 3], 4);
+
+        {
+            let mut drain = map.drain();
+            let _ = drain.next();
+        }
+
+        assert!(map.is_empty());
+        assert_eq!(map.len(), 0);
+    }
+
+    #[test]
     fn deterministic_eq_ord_hash_and_debug() {
         let keys = [9u64, 3, 6, 1];
         let mut reversed = keys;
@@ -2200,6 +2704,74 @@ mod tests {
         let c_items = map_c.iter().map(|(k, v)| (*k, *v)).collect::<Vec<_>>();
         let d_items = map_d.iter().map(|(k, v)| (*k, *v)).collect::<Vec<_>>();
         assert_eq!(map_c.cmp(&map_d), c_items.cmp(&d_items));
+    }
+
+    #[test]
+    fn raw_entry_lookup_variants() {
+        let map = build_map_with_order(&[5u64, 1, 3], 8);
+        let hash = raw_hash(&1u64);
+
+        let kv = map.raw_entry().from_key(&1).map(|(k, v)| (*k, *v));
+        assert_eq!(kv, Some((1, 101)));
+
+        let kv = map
+            .raw_entry()
+            .from_key_hashed_nocheck(hash, &1)
+            .map(|(k, v)| (*k, *v));
+        assert_eq!(kv, Some((1, 101)));
+
+        let kv = map
+            .raw_entry()
+            .from_hash(hash, |k| *k == 1)
+            .map(|(k, v)| (*k, *v));
+        assert_eq!(kv, Some((1, 101)));
+
+        assert_eq!(map.raw_entry().from_key(&999), None);
+    }
+
+    #[test]
+    fn raw_entry_mut_insert_and_modify() {
+        let mut map: PoMap<u64, u64> = PoMap::new();
+
+        match map.raw_entry_mut().from_key(&1) {
+            RawEntryMut::Vacant(entry) => {
+                let (k, v) = entry.insert(1, 10);
+                assert_eq!((*k, *v), (1, 10));
+            }
+            RawEntryMut::Occupied(_) => panic!("expected vacant entry"),
+        }
+        assert_eq!(map.get(&1), Some(&10));
+
+        match map.raw_entry_mut().from_key(&1) {
+            RawEntryMut::Occupied(mut entry) => {
+                assert_eq!(entry.get(), &10);
+                entry.insert(11);
+            }
+            RawEntryMut::Vacant(_) => panic!("expected occupied entry"),
+        }
+        assert_eq!(map.get(&1), Some(&11));
+
+        let hash = raw_hash(&2u64);
+        let (k, v) = map
+            .raw_entry_mut()
+            .from_key_hashed_nocheck(hash, &2)
+            .or_insert(2, 20);
+        assert_eq!((*k, *v), (2, 20));
+        *v = 25;
+
+        let _ = map.raw_entry_mut().from_key(&2).and_modify(|k, v| *v += *k);
+        assert_eq!(map.get(&2), Some(&27));
+
+        let hash = raw_hash(&1u64);
+        match map.raw_entry_mut().from_hash(hash, |k| *k == 1) {
+            RawEntryMut::Occupied(entry) => {
+                let (k, v) = entry.remove_entry();
+                assert_eq!((k, v), (1, 11));
+            }
+            RawEntryMut::Vacant(_) => panic!("expected occupied entry"),
+        }
+        assert_eq!(map.get(&1), None);
+        assert_eq!(map.get(&2), Some(&27));
     }
 
     #[test]
@@ -2603,6 +3175,114 @@ mod tests {
         assert_eq!(map.len(), expected.len());
         for (key, val) in expected.iter() {
             assert_eq!(map.get(key), Some(val));
+        }
+    }
+
+    #[derive(Clone, Debug)]
+    enum Op {
+        Insert(u64, u64),
+        Remove(u64),
+    }
+
+    fn op_strategy() -> impl Strategy<Value = Op> {
+        prop_oneof![
+            (any::<u64>(), any::<u64>()).prop_map(|(k, v)| Op::Insert(k, v)),
+            any::<u64>().prop_map(Op::Remove),
+        ]
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig {
+            cases: 64,
+            .. ProptestConfig::default()
+        })]
+        #[test]
+        fn prop_deterministic_across_orders_and_capacities(
+            map in prop::collection::btree_map(0u64..1_000_000, any::<u64>(), 0..32),
+            cap_offset in 0usize..8,
+        ) {
+            let entries = map.iter().map(|(k, v)| (*k, *v)).collect::<Vec<_>>();
+            let mut reversed = entries.clone();
+            reversed.reverse();
+
+            let cap_a = entries.len().saturating_add(1 + cap_offset).max(1);
+            let cap_b = entries.len().saturating_mul(4).saturating_add(3).max(1);
+
+            let mut map_a: PoMap<u64, u64> = PoMap::with_capacity(cap_a);
+            for (k, v) in entries.iter() {
+                map_a.insert(*k, *v);
+            }
+
+            let mut map_b: PoMap<u64, u64> = PoMap::with_capacity(cap_b);
+            for (k, v) in reversed.iter() {
+                map_b.insert(*k, *v);
+            }
+
+            let a_items = map_a.iter().map(|(k, v)| (*k, *v)).collect::<Vec<_>>();
+            let b_items = map_b.iter().map(|(k, v)| (*k, *v)).collect::<Vec<_>>();
+
+            prop_assert_eq!(a_items, b_items);
+            prop_assert_eq!(&map_a, &map_b);
+            prop_assert_eq!(map_a.cmp(&map_b), Ordering::Equal);
+        }
+
+        #[test]
+        fn prop_collision_keys_iterate_in_key_order(
+            map in prop::collection::btree_map(0u64..10_000, any::<u64>(), 0..10),
+        ) {
+            let entries = map.iter().map(|(k, v)| (CollisionKey(*k), *v)).collect::<Vec<_>>();
+            let mut reversed = entries.clone();
+            reversed.reverse();
+
+            let len = entries.len().max(1);
+            let cap_small = 1usize << len;
+            let cap_large = cap_small.saturating_mul(4);
+
+            let mut map_a: PoMap<CollisionKey, u64> = PoMap::with_capacity(cap_small);
+            for (k, v) in entries.iter().cloned() {
+                map_a.insert(k, v);
+            }
+
+            let mut map_b: PoMap<CollisionKey, u64> = PoMap::with_capacity(cap_large);
+            for (k, v) in reversed.iter().cloned() {
+                map_b.insert(k, v);
+            }
+
+            let a_keys = map_a.keys().map(|k| k.0).collect::<Vec<_>>();
+            let b_keys = map_b.keys().map(|k| k.0).collect::<Vec<_>>();
+            let mut sorted_keys = a_keys.clone();
+            sorted_keys.sort();
+
+            prop_assert_eq!(&a_keys, &b_keys);
+            prop_assert_eq!(&a_keys, &sorted_keys);
+        }
+
+        #[test]
+        fn prop_matches_std_hashmap_for_ops(ops in prop::collection::vec(op_strategy(), 0..128)) {
+            let mut map: PoMap<u64, u64> = PoMap::new();
+            let mut expected: HashMap<u64, u64> = HashMap::new();
+            let mut touched: BTreeSet<u64> = BTreeSet::new();
+
+            for op in ops {
+                match op {
+                    Op::Insert(k, v) => {
+                        map.insert(k, v);
+                        expected.insert(k, v);
+                        touched.insert(k);
+                    }
+                    Op::Remove(k) => {
+                        map.remove(&k);
+                        expected.remove(&k);
+                        touched.insert(k);
+                    }
+                }
+            }
+
+            prop_assert_eq!(map.len(), expected.len());
+            for key in touched {
+                prop_assert_eq!(map.get(&key), expected.get(&key));
+                prop_assert_eq!(map.contains_key(&key), expected.contains_key(&key));
+            }
         }
     }
 }
