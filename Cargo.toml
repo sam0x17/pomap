@@ -11,14 +11,15 @@ missing_const_for_fn = "deny"
 missing_inline_in_public_items = "deny"
 
 [features]
-default = []
+default = ["std"]
+std = ["ahash/std", "ahash/runtime-rng"]
 resize-logging = []
 bench-string = []
 
 [dependencies]
 sha2 = { version = "0.10", features = ["asm"] }
 wide = "0.8"
-ahash = { version = "0.8", default-features = false, features = ["std", "runtime-rng"] }
+ahash = { version = "0.8", default-features = false }
 
 [dev-dependencies]
 criterion = { git = "https://github.com/sam0x17/criterion.rs" }

@@ -1,5 +1,7 @@
 use ahash::AHasher;
+use alloc::alloc::{alloc, dealloc, handle_alloc_error};
 use core::{
+    alloc::Layout,
     cmp::Ordering,
     fmt,
     hash::{Hash, Hasher},
@@ -10,7 +12,6 @@ use core::{
     ptr::{self, NonNull},
     slice,
 };
-use std::alloc::{Layout, alloc, dealloc, handle_alloc_error};
 
 /// Minimum capacity we will allow for PoMap
 const MIN_CAPACITY: usize = 4;
@@ -2344,8 +2345,9 @@ impl PoMapMeta {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use ahash::AHasher;
+    use alloc::{format, vec, vec::Vec};
+    use super::*;
     use proptest::prelude::*;
     use rand::{Rng, SeedableRng, rngs::StdRng};
     use std::{
