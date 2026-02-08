@@ -18,11 +18,11 @@ bench-string = []
 [dependencies]
 sha2 = { version = "0.10", features = ["asm"] }
 wide = "0.8"
+ahash = { version = "0.8", default-features = false, features = ["std", "runtime-rng"] }
 
 [dev-dependencies]
 criterion = { git = "https://github.com/sam0x17/criterion.rs" }
 rand = { version = "0.10.0-rc.5", features = ["std"] }
-ahash = { version = "0.8", features = ["runtime-rng"] }
 proptest = "1"
 
 [profile.release]
