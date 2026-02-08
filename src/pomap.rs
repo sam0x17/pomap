@@ -339,7 +339,7 @@ impl<K: Key, V: Value, H: BuildHasher> PoMap<K, V, H> {
     pub fn get(&self, key: &K) -> Option<&V> {
         
         
-        let hash = encode_hash(self.hash_builder.hash_one(&key));
+        let hash = encode_hash(self.hash_builder.hash_one(key));
         self._get_with_hash(hash, key)
     }
 
@@ -360,7 +360,7 @@ impl<K: Key, V: Value, H: BuildHasher> PoMap<K, V, H> {
     pub fn get_key_value(&self, key: &K) -> Option<(&K, &V)> {
         
         
-        let hash = encode_hash(self.hash_builder.hash_one(&key));
+        let hash = encode_hash(self.hash_builder.hash_one(key));
         self._get_key_value_with_hash(hash, key)
     }
 
@@ -449,7 +449,7 @@ impl<K: Key, V: Value, H: BuildHasher> PoMap<K, V, H> {
         for (i, key) in keys.iter().enumerate() {
             
             
-            let hash = encode_hash(self.hash_builder.hash_one(&key));
+            let hash = encode_hash(self.hash_builder.hash_one(key));
             let idx = self._find_index_by_hash(hash, |k| k == *key)?;
             indices[i] = idx;
         }
@@ -472,7 +472,7 @@ impl<K: Key, V: Value, H: BuildHasher> PoMap<K, V, H> {
     pub fn get_mut(&mut self, key: &K) -> Option<&mut V> {
         
         
-        let hash = encode_hash(self.hash_builder.hash_one(&key));
+        let hash = encode_hash(self.hash_builder.hash_one(key));
         self._get_mut_with_hash(hash, key)
     }
 
@@ -862,7 +862,7 @@ impl<K: Key, V: Value, H: BuildHasher> PoMap<K, V, H> {
     pub fn remove(&mut self, key: &K) -> Option<V> {
         
         
-        let hash = encode_hash(self.hash_builder.hash_one(&key));
+        let hash = encode_hash(self.hash_builder.hash_one(key));
         self._remove_with_hash(hash, key)
     }
 
@@ -877,7 +877,7 @@ impl<K: Key, V: Value, H: BuildHasher> PoMap<K, V, H> {
     pub fn remove_entry(&mut self, key: &K) -> Option<(K, V)> {
         
         
-        let hash = encode_hash(self.hash_builder.hash_one(&key));
+        let hash = encode_hash(self.hash_builder.hash_one(key));
         self._remove_entry_with_hash(hash, key)
     }
 
@@ -2206,7 +2206,7 @@ impl<'a, K: Key, V: Value, H: BuildHasher> RawEntryBuilderMut<'a, K, V, H> {
     pub fn from_key(self, key: &K) -> RawEntryMut<'a, K, V, H> {
         
         
-        let hash = self.map.hash_builder.hash_one(&key);
+        let hash = self.map.hash_builder.hash_one(key);
         self.from_key_hashed_nocheck(hash, key)
     }
 
@@ -2255,7 +2255,7 @@ impl<'a, K: Key, V: Value, H: BuildHasher> RawEntryBuilder<'a, K, V, H> {
     pub fn from_key(self, key: &K) -> Option<(&'a K, &'a V)> {
         
         
-        let hash = encode_hash(self.map.hash_builder.hash_one(&key));
+        let hash = encode_hash(self.map.hash_builder.hash_one(key));
         self.map._get_key_value_with_hash(hash, key)
     }
 
