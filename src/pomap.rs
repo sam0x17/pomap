@@ -1,7 +1,11 @@
 use core::{
+    cmp::Ordering,
+    fmt,
     hash::{Hash, Hasher},
+    iter::FusedIterator,
     marker::PhantomData,
     mem::MaybeUninit,
+    ops::Index,
     ptr::{self, NonNull},
     slice,
 };
@@ -259,6 +263,21 @@ impl<K: Key, V: Value, H: Hasher + Default> PoMap<K, V, H> {
         self._get_with_hash(encode_hash(hash), key)
     }
 
+    /// Returns `true` if the map contains the specified key.
+    #[inline]
+    pub fn contains_key(&self, key: &K) -> bool {
+        self.get(key).is_some()
+    }
+
+    /// Returns the key-value pair corresponding to the supplied key.
+    #[inline]
+    pub fn get_key_value(&self, key: &K) -> Option<(&K, &V)> {
+        let mut hasher = H::default();
+        key.hash(&mut hasher);
+        let hash = encode_hash(hasher.finish());
+        self._get_key_value_with_hash(hash, key)
+    }
+
     /// Hot path for `get` that can be used when the caller already has the hash and doesn't
     /// want to recompute it.
     #[inline(always)]
@@ -277,6 +296,32 @@ impl<K: Key, V: Value, H: Hasher + Default> PoMap<K, V, H> {
                 let slot_entry = unsafe { &*entries_ptr.add(idx) };
                 if unsafe { slot_entry.key.assume_init_ref() } == key {
                     return Some(unsafe { slot_entry.value.assume_init_ref() });
+                }
+                // hash collision: keep scanning
+            } else if slot_hash > hash {
+                return None; // also catches VACANT_HASH if VACANT_HASH > any valid hash
+            }
+        }
+        None
+    }
+
+    #[inline(always)]
+    fn _get_key_value_with_hash(&self, hash: u64, key: &K) -> Option<(&K, &V)> {
+        let ideal_slot = self.meta.ideal_slot(hash);
+        let scan_end = ideal_slot + self.meta.index_bits;
+
+        // SAFETY: ideal_slot..scan_end is always in-bounds for the backing allocation.
+        let hashes_ptr = self.slots.hashes_ptr();
+        let entries_ptr = self.slots.entries_ptr();
+
+        for idx in ideal_slot..scan_end {
+            let slot_hash = unsafe { *hashes_ptr.add(idx) };
+
+            if slot_hash == hash {
+                let slot_entry = unsafe { &*entries_ptr.add(idx) };
+                let slot_key = unsafe { slot_entry.key.assume_init_ref() };
+                if slot_key == key {
+                    return Some((slot_key, unsafe { slot_entry.value.assume_init_ref() }));
                 }
                 // hash collision: keep scanning
             } else if slot_hash > hash {
@@ -343,6 +388,68 @@ impl<K: Key, V: Value, H: Hasher + Default> PoMap<K, V, H> {
     /// Gets the entry for a key using a precomputed hash.
     pub fn entry_with_hash(&mut self, hash: u64, key: K) -> Entry<'_, K, V, H> {
         self._entry_with_hash(encode_hash(hash), key)
+    }
+
+    /// Returns an iterator over key-value pairs in deterministic order.
+    #[inline]
+    pub fn iter(&self) -> Iter<'_, K, V> {
+        Iter {
+            hashes: self.slots.hashes_ptr().cast_const(),
+            entries: self.slots.entries_ptr().cast_const(),
+            index: 0,
+            capacity: self.slots.capacity(),
+            remaining: self.len,
+            _marker: PhantomData,
+        }
+    }
+
+    /// Returns a mutable iterator over key-value pairs in deterministic order.
+    #[inline]
+    pub fn iter_mut(&mut self) -> IterMut<'_, K, V> {
+        IterMut {
+            hashes: self.slots.hashes_ptr().cast_const(),
+            entries: self.slots.entries_ptr(),
+            index: 0,
+            capacity: self.slots.capacity(),
+            remaining: self.len,
+            _marker: PhantomData,
+        }
+    }
+
+    /// Returns an iterator over all keys in deterministic order.
+    #[inline]
+    pub fn keys(&self) -> Keys<'_, K, V> {
+        Keys { iter: self.iter() }
+    }
+
+    /// Returns an iterator over all values in deterministic order.
+    #[inline]
+    pub fn values(&self) -> Values<'_, K, V> {
+        Values { iter: self.iter() }
+    }
+
+    /// Returns a mutable iterator over all values in deterministic order.
+    #[inline]
+    pub fn values_mut(&mut self) -> ValuesMut<'_, K, V> {
+        ValuesMut {
+            iter: self.iter_mut(),
+        }
+    }
+
+    /// Converts the map into an iterator over all keys in deterministic order.
+    #[inline]
+    pub fn into_keys(self) -> IntoKeys<K, V> {
+        IntoKeys {
+            iter: self.into_iter(),
+        }
+    }
+
+    /// Converts the map into an iterator over all values in deterministic order.
+    #[inline]
+    pub fn into_values(self) -> IntoValues<K, V> {
+        IntoValues {
+            iter: self.into_iter(),
+        }
     }
 
     #[inline(always)]
@@ -580,6 +687,41 @@ impl<K: Key, V: Value, H: Hasher + Default> PoMap<K, V, H> {
         self._remove_with_hash(encode_hash(hash), key)
     }
 
+    /// Removes a key from the map, returning the key and value if it existed.
+    #[inline]
+    pub fn remove_entry(&mut self, key: &K) -> Option<(K, V)> {
+        let mut hasher = H::default();
+        key.hash(&mut hasher);
+        let hash = encode_hash(hasher.finish());
+        self._remove_entry_with_hash(hash, key)
+    }
+
+    /// Clears the map, removing all key-value pairs.
+    #[inline]
+    pub fn clear(&mut self) {
+        if self.len == 0 {
+            return;
+        }
+
+        let hashes_ptr = self.slots.hashes_ptr();
+        let entries_ptr = self.slots.entries_ptr();
+        let capacity = self.slots.capacity();
+
+        for idx in 0..capacity {
+            let hash = unsafe { *hashes_ptr.add(idx) };
+            if hash != VACANT_HASH {
+                unsafe {
+                    let entry = &mut *entries_ptr.add(idx);
+                    entry.key.assume_init_drop();
+                    entry.value.assume_init_drop();
+                    *hashes_ptr.add(idx) = VACANT_HASH;
+                }
+            }
+        }
+
+        self.len = 0;
+    }
+
     /// Hot path for `remove` that can be used when the caller already has the hash and doesn't
     /// want to recompute it.
     #[inline(always)]
@@ -632,6 +774,40 @@ impl<K: Key, V: Value, H: Hasher + Default> PoMap<K, V, H> {
                     unsafe { *hashes_ptr.add(vacancy) = VACANT_HASH };
                     self.len -= 1;
                     return Some(value);
+                }
+
+                // Hash collision, but key order lets us stop early.
+                if slot_key > key {
+                    return None;
+                }
+            } else if slot_hash > hash {
+                return None; // also catches VACANT_HASH if VACANT_HASH > any valid hash
+            }
+
+            idx += 1;
+        }
+
+        None
+    }
+
+    #[inline(always)]
+    fn _remove_entry_with_hash(&mut self, hash: u64, key: &K) -> Option<(K, V)> {
+        let ideal_slot = self.meta.ideal_slot(hash);
+        let scan_end = ideal_slot + self.meta.index_bits;
+
+        // SAFETY: ideal_slot..scan_end is always in-bounds for the backing allocation.
+        let hashes_ptr = self.slots.hashes_ptr();
+        let entries_ptr = self.slots.entries_ptr();
+
+        let mut idx = ideal_slot;
+        while idx < scan_end {
+            let slot_hash = unsafe { *hashes_ptr.add(idx) };
+
+            if slot_hash == hash {
+                let slot_entry = unsafe { &*entries_ptr.add(idx) };
+                let slot_key = unsafe { slot_entry.key.assume_init_ref() };
+                if slot_key == key {
+                    return Some(self.remove_entry_at(idx));
                 }
 
                 // Hash collision, but key order lets us stop early.
@@ -894,6 +1070,362 @@ impl<K: Key, V: Value, H: Hasher + Default> PoMap<K, V, H> {
         );*/
 
         new_vec_capacity
+    }
+}
+
+/// Iterator over shared references to key-value pairs in deterministic order.
+#[must_use]
+pub struct Iter<'a, K: Key, V: Value> {
+    hashes: *const u64,
+    entries: *const SlotEntry<K, V>,
+    index: usize,
+    capacity: usize,
+    remaining: usize,
+    _marker: PhantomData<&'a (K, V)>,
+}
+
+impl<'a, K: Key, V: Value> Clone for Iter<'a, K, V> {
+    #[inline]
+    fn clone(&self) -> Self {
+        Self {
+            hashes: self.hashes,
+            entries: self.entries,
+            index: self.index,
+            capacity: self.capacity,
+            remaining: self.remaining,
+            _marker: PhantomData,
+        }
+    }
+}
+
+impl<'a, K: Key, V: Value> Iterator for Iter<'a, K, V> {
+    type Item = (&'a K, &'a V);
+
+    #[inline]
+    fn next(&mut self) -> Option<Self::Item> {
+        while self.index < self.capacity {
+            let idx = self.index;
+            self.index += 1;
+            let hash = unsafe { *self.hashes.add(idx) };
+            if hash == VACANT_HASH {
+                continue;
+            }
+            self.remaining -= 1;
+            let entry = unsafe { &*self.entries.add(idx) };
+            let key = unsafe { entry.key.assume_init_ref() };
+            let value = unsafe { entry.value.assume_init_ref() };
+            return Some((key, value));
+        }
+        None
+    }
+
+    #[inline]
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        (self.remaining, Some(self.remaining))
+    }
+}
+
+impl<'a, K: Key, V: Value> ExactSizeIterator for Iter<'a, K, V> {
+    #[inline]
+    fn len(&self) -> usize {
+        self.remaining
+    }
+}
+
+impl<'a, K: Key, V: Value> FusedIterator for Iter<'a, K, V> {}
+
+/// Iterator over mutable references to values in deterministic order.
+#[must_use]
+pub struct IterMut<'a, K: Key, V: Value> {
+    hashes: *const u64,
+    entries: *mut SlotEntry<K, V>,
+    index: usize,
+    capacity: usize,
+    remaining: usize,
+    _marker: PhantomData<&'a mut (K, V)>,
+}
+
+impl<'a, K: Key, V: Value> Iterator for IterMut<'a, K, V> {
+    type Item = (&'a K, &'a mut V);
+
+    #[inline]
+    fn next(&mut self) -> Option<Self::Item> {
+        while self.index < self.capacity {
+            let idx = self.index;
+            self.index += 1;
+            let hash = unsafe { *self.hashes.add(idx) };
+            if hash == VACANT_HASH {
+                continue;
+            }
+            self.remaining -= 1;
+            let entry = unsafe { &mut *self.entries.add(idx) };
+            let key = unsafe { entry.key.assume_init_ref() };
+            let value = unsafe { entry.value.assume_init_mut() };
+            return Some((key, value));
+        }
+        None
+    }
+
+    #[inline]
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        (self.remaining, Some(self.remaining))
+    }
+}
+
+impl<'a, K: Key, V: Value> ExactSizeIterator for IterMut<'a, K, V> {
+    #[inline]
+    fn len(&self) -> usize {
+        self.remaining
+    }
+}
+
+impl<'a, K: Key, V: Value> FusedIterator for IterMut<'a, K, V> {}
+
+/// Iterator over shared references to keys in deterministic order.
+#[must_use]
+pub struct Keys<'a, K: Key, V: Value> {
+    iter: Iter<'a, K, V>,
+}
+
+impl<'a, K: Key, V: Value> Clone for Keys<'a, K, V> {
+    #[inline]
+    fn clone(&self) -> Self {
+        Self {
+            iter: self.iter.clone(),
+        }
+    }
+}
+
+impl<'a, K: Key, V: Value> Iterator for Keys<'a, K, V> {
+    type Item = &'a K;
+
+    #[inline]
+    fn next(&mut self) -> Option<Self::Item> {
+        self.iter.next().map(|(k, _)| k)
+    }
+
+    #[inline]
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        self.iter.size_hint()
+    }
+}
+
+impl<'a, K: Key, V: Value> ExactSizeIterator for Keys<'a, K, V> {
+    #[inline]
+    fn len(&self) -> usize {
+        self.iter.len()
+    }
+}
+
+impl<'a, K: Key, V: Value> FusedIterator for Keys<'a, K, V> {}
+
+/// Iterator over shared references to values in deterministic order.
+#[must_use]
+pub struct Values<'a, K: Key, V: Value> {
+    iter: Iter<'a, K, V>,
+}
+
+impl<'a, K: Key, V: Value> Clone for Values<'a, K, V> {
+    #[inline]
+    fn clone(&self) -> Self {
+        Self {
+            iter: self.iter.clone(),
+        }
+    }
+}
+
+impl<'a, K: Key, V: Value> Iterator for Values<'a, K, V> {
+    type Item = &'a V;
+
+    #[inline]
+    fn next(&mut self) -> Option<Self::Item> {
+        self.iter.next().map(|(_, v)| v)
+    }
+
+    #[inline]
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        self.iter.size_hint()
+    }
+}
+
+impl<'a, K: Key, V: Value> ExactSizeIterator for Values<'a, K, V> {
+    #[inline]
+    fn len(&self) -> usize {
+        self.iter.len()
+    }
+}
+
+impl<'a, K: Key, V: Value> FusedIterator for Values<'a, K, V> {}
+
+/// Iterator over mutable references to values in deterministic order.
+#[must_use]
+pub struct ValuesMut<'a, K: Key, V: Value> {
+    iter: IterMut<'a, K, V>,
+}
+
+impl<'a, K: Key, V: Value> Iterator for ValuesMut<'a, K, V> {
+    type Item = &'a mut V;
+
+    #[inline]
+    fn next(&mut self) -> Option<Self::Item> {
+        self.iter.next().map(|(_, v)| v)
+    }
+
+    #[inline]
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        self.iter.size_hint()
+    }
+}
+
+impl<'a, K: Key, V: Value> ExactSizeIterator for ValuesMut<'a, K, V> {
+    #[inline]
+    fn len(&self) -> usize {
+        self.iter.len()
+    }
+}
+
+impl<'a, K: Key, V: Value> FusedIterator for ValuesMut<'a, K, V> {}
+
+/// Owning iterator over key-value pairs in deterministic order.
+#[must_use]
+pub struct IntoIter<K: Key, V: Value> {
+    slots: Slots<K, V>,
+    index: usize,
+    capacity: usize,
+    remaining: usize,
+}
+
+impl<K: Key, V: Value> Iterator for IntoIter<K, V> {
+    type Item = (K, V);
+
+    #[inline]
+    fn next(&mut self) -> Option<Self::Item> {
+        let hashes_ptr = self.slots.hashes_ptr();
+        let entries_ptr = self.slots.entries_ptr();
+
+        while self.index < self.capacity {
+            let idx = self.index;
+            self.index += 1;
+            let hash = unsafe { *hashes_ptr.add(idx) };
+            if hash == VACANT_HASH {
+                continue;
+            }
+            self.remaining -= 1;
+            unsafe { *hashes_ptr.add(idx) = VACANT_HASH };
+            let entry = unsafe { &mut *entries_ptr.add(idx) };
+            let key = unsafe { entry.key.assume_init_read() };
+            let value = unsafe { entry.value.assume_init_read() };
+            return Some((key, value));
+        }
+        None
+    }
+
+    #[inline]
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        (self.remaining, Some(self.remaining))
+    }
+}
+
+impl<K: Key, V: Value> ExactSizeIterator for IntoIter<K, V> {
+    #[inline]
+    fn len(&self) -> usize {
+        self.remaining
+    }
+}
+
+impl<K: Key, V: Value> FusedIterator for IntoIter<K, V> {}
+
+/// Owning iterator over keys in deterministic order.
+#[must_use]
+pub struct IntoKeys<K: Key, V: Value> {
+    iter: IntoIter<K, V>,
+}
+
+impl<K: Key, V: Value> Iterator for IntoKeys<K, V> {
+    type Item = K;
+
+    #[inline]
+    fn next(&mut self) -> Option<Self::Item> {
+        self.iter.next().map(|(k, _)| k)
+    }
+
+    #[inline]
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        self.iter.size_hint()
+    }
+}
+
+impl<K: Key, V: Value> ExactSizeIterator for IntoKeys<K, V> {
+    #[inline]
+    fn len(&self) -> usize {
+        self.iter.len()
+    }
+}
+
+impl<K: Key, V: Value> FusedIterator for IntoKeys<K, V> {}
+
+/// Owning iterator over values in deterministic order.
+#[must_use]
+pub struct IntoValues<K: Key, V: Value> {
+    iter: IntoIter<K, V>,
+}
+
+impl<K: Key, V: Value> Iterator for IntoValues<K, V> {
+    type Item = V;
+
+    #[inline]
+    fn next(&mut self) -> Option<Self::Item> {
+        self.iter.next().map(|(_, v)| v)
+    }
+
+    #[inline]
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        self.iter.size_hint()
+    }
+}
+
+impl<K: Key, V: Value> ExactSizeIterator for IntoValues<K, V> {
+    #[inline]
+    fn len(&self) -> usize {
+        self.iter.len()
+    }
+}
+
+impl<K: Key, V: Value> FusedIterator for IntoValues<K, V> {}
+
+impl<'a, K: Key, V: Value, H: Hasher + Default> IntoIterator for &'a PoMap<K, V, H> {
+    type Item = (&'a K, &'a V);
+    type IntoIter = Iter<'a, K, V>;
+
+    #[inline]
+    fn into_iter(self) -> Self::IntoIter {
+        self.iter()
+    }
+}
+
+impl<'a, K: Key, V: Value, H: Hasher + Default> IntoIterator for &'a mut PoMap<K, V, H> {
+    type Item = (&'a K, &'a mut V);
+    type IntoIter = IterMut<'a, K, V>;
+
+    #[inline]
+    fn into_iter(self) -> Self::IntoIter {
+        self.iter_mut()
+    }
+}
+
+impl<K: Key, V: Value, H: Hasher + Default> IntoIterator for PoMap<K, V, H> {
+    type Item = (K, V);
+    type IntoIter = IntoIter<K, V>;
+
+    #[inline]
+    fn into_iter(self) -> Self::IntoIter {
+        let capacity = self.slots.capacity();
+        IntoIter {
+            slots: self.slots,
+            index: 0,
+            capacity,
+            remaining: self.len,
+        }
     }
 }
 
@@ -1178,11 +1710,113 @@ impl<K: Key, V: Value, H: Hasher + Default> Clone for PoMap<K, V, H> {
     }
 }
 
-impl Default for PoMap<(), ()> {
+impl<K: Key, V: Value, H: Hasher + Default> Default for PoMap<K, V, H> {
     #[inline(always)]
     /// Creates an empty map using [`PoMap::new`].
     fn default() -> Self {
         Self::new()
+    }
+}
+
+impl<K: Key, V: Value, H: Hasher + Default> fmt::Debug for PoMap<K, V, H>
+where
+    K: fmt::Debug,
+    V: fmt::Debug,
+{
+    #[inline]
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let mut map = f.debug_map();
+        for (k, v) in self.iter() {
+            map.entry(k, v);
+        }
+        map.finish()
+    }
+}
+
+impl<K: Key, V: Value + PartialEq, H: Hasher + Default> PartialEq for PoMap<K, V, H> {
+    #[inline]
+    fn eq(&self, other: &Self) -> bool {
+        self.len == other.len && self.iter().eq(other.iter())
+    }
+}
+
+impl<K: Key, V: Value + Eq, H: Hasher + Default> Eq for PoMap<K, V, H> {}
+
+impl<K: Key, V: Value + PartialOrd, H: Hasher + Default> PartialOrd for PoMap<K, V, H> {
+    #[inline]
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        self.iter().partial_cmp(other.iter())
+    }
+}
+
+impl<K: Key, V: Value + Ord, H: Hasher + Default> Ord for PoMap<K, V, H> {
+    #[inline]
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.iter().cmp(other.iter())
+    }
+}
+
+impl<K: Key, V: Value + Hash, H: Hasher + Default> Hash for PoMap<K, V, H> {
+    #[inline]
+    fn hash<S: Hasher>(&self, state: &mut S) {
+        self.len.hash(state);
+        for (k, v) in self.iter() {
+            k.hash(state);
+            v.hash(state);
+        }
+    }
+}
+
+impl<K: Key, V: Value, H: Hasher + Default> Extend<(K, V)> for PoMap<K, V, H> {
+    #[inline]
+    fn extend<T: IntoIterator<Item = (K, V)>>(&mut self, iter: T) {
+        for (key, value) in iter {
+            self.insert(key, value);
+        }
+    }
+}
+
+impl<'a, K: Key + 'a, V: Value + 'a, H: Hasher + Default> Extend<(&'a K, &'a V)>
+    for PoMap<K, V, H>
+{
+    #[inline]
+    fn extend<T: IntoIterator<Item = (&'a K, &'a V)>>(&mut self, iter: T) {
+        for (key, value) in iter {
+            self.insert(key.clone(), value.clone());
+        }
+    }
+}
+
+impl<K: Key, V: Value, H: Hasher + Default> FromIterator<(K, V)> for PoMap<K, V, H> {
+    #[inline]
+    fn from_iter<T: IntoIterator<Item = (K, V)>>(iter: T) -> Self {
+        let iter = iter.into_iter();
+        let (lower, _) = iter.size_hint();
+        let mut map = PoMap::with_capacity(lower);
+        map.extend(iter);
+        map
+    }
+}
+
+impl<'a, K: Key + 'a, V: Value + 'a, H: Hasher + Default> FromIterator<(&'a K, &'a V)>
+    for PoMap<K, V, H>
+{
+    #[inline]
+    fn from_iter<T: IntoIterator<Item = (&'a K, &'a V)>>(iter: T) -> Self {
+        let iter = iter.into_iter();
+        let (lower, _) = iter.size_hint();
+        let mut map = PoMap::with_capacity(lower);
+        map.extend(iter);
+        map
+    }
+}
+
+impl<K: Key, V: Value, H: Hasher + Default> Index<&K> for PoMap<K, V, H> {
+    type Output = V;
+
+    #[inline]
+    fn index(&self, index: &K) -> &Self::Output {
+        self.get(index).expect("key not found")
     }
 }
 
