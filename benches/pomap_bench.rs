@@ -6,6 +6,7 @@ use std::{
 
 use ahash::AHasher;
 use criterion::{BatchSize, Criterion, criterion_group, criterion_main};
+use hashbrown::HashMap as HashbrownMap;
 use pomap::PoMap;
 #[cfg(feature = "bench-string")]
 use rand::distr::Alphanumeric;
@@ -25,6 +26,7 @@ type BenchHasher = AHasher;
 type BenchHasherBuilder = BuildHasherDefault<BenchHasher>;
 type BenchPoMap = PoMap<BenchKey, BenchValue, BenchHasherBuilder>;
 type BenchHashMap = HashMap<BenchKey, BenchValue, BenchHasherBuilder>;
+type BenchHashbrownMap = HashbrownMap<BenchKey, BenchValue, BenchHasherBuilder>;
 
 #[inline]
 fn new_std_hashmap() -> BenchHashMap {
@@ -34,6 +36,16 @@ fn new_std_hashmap() -> BenchHashMap {
 #[inline]
 fn std_hashmap_with_capacity(capacity: usize) -> BenchHashMap {
     BenchHashMap::with_capacity_and_hasher(capacity, BenchHasherBuilder::default())
+}
+
+#[inline]
+fn new_hashbrown_hashmap() -> BenchHashbrownMap {
+    BenchHashbrownMap::with_hasher(BenchHasherBuilder::default())
+}
+
+#[inline]
+fn hashbrown_with_capacity(capacity: usize) -> BenchHashbrownMap {
+    BenchHashbrownMap::with_capacity_and_hasher(capacity, BenchHasherBuilder::default())
 }
 
 const MAX_GET_INPUT_SIZE: usize = 1_000_000_usize;
@@ -182,6 +194,23 @@ fn build_std_maps_from_data(
         .collect()
 }
 
+fn build_hashbrown_maps_from_data(
+    target_sizes: &[usize],
+    keys: &[BenchKey],
+    values: &[BenchValue],
+) -> Vec<(usize, BenchHashbrownMap)> {
+    target_sizes
+        .iter()
+        .map(|&size| {
+            let mut map: BenchHashbrownMap = hashbrown_with_capacity(size);
+            for idx in 0..size {
+                map.insert(keys[idx].clone(), values[idx].clone());
+            }
+            (size, map)
+        })
+        .collect()
+}
+
 fn build_std_maps_from_data_with_capacity(
     target_sizes: &[usize],
     keys: &[BenchKey],
@@ -193,6 +222,25 @@ fn build_std_maps_from_data_with_capacity(
         .map(|&size| {
             let capacity = size.saturating_mul(capacity_multiplier).max(size);
             let mut map: BenchHashMap = std_hashmap_with_capacity(capacity);
+            for idx in 0..size {
+                map.insert(keys[idx].clone(), values[idx].clone());
+            }
+            (size, map)
+        })
+        .collect()
+}
+
+fn build_hashbrown_maps_from_data_with_capacity(
+    target_sizes: &[usize],
+    keys: &[BenchKey],
+    values: &[BenchValue],
+    capacity_multiplier: usize,
+) -> Vec<(usize, BenchHashbrownMap)> {
+    target_sizes
+        .iter()
+        .map(|&size| {
+            let capacity = size.saturating_mul(capacity_multiplier).max(size);
+            let mut map: BenchHashbrownMap = hashbrown_with_capacity(capacity);
             for idx in 0..size {
                 map.insert(keys[idx].clone(), values[idx].clone());
             }
@@ -233,6 +281,21 @@ fn bench_insert_allocate(c: &mut Criterion) {
                 let mut iterations = 0;
                 while iterations < max_target_size {
                     let mut map: BenchHashMap = new_std_hashmap();
+                    for (key, val) in keys.iter().zip(values.iter()).take(size) {
+                        black_box(map.insert(key.clone(), val.clone()));
+                    }
+                    iterations += size;
+                }
+            }
+        });
+    });
+
+    group.bench_function("hashbrown", |b| {
+        b.iter(|| {
+            for &size in &target_sizes {
+                let mut iterations = 0;
+                while iterations < max_target_size {
+                    let mut map: BenchHashbrownMap = new_hashbrown_hashmap();
                     for (key, val) in keys.iter().zip(values.iter()).take(size) {
                         black_box(map.insert(key.clone(), val.clone()));
                     }
@@ -306,6 +369,21 @@ fn bench_insert_preallocated(c: &mut Criterion) {
         });
     });
 
+    group.bench_function("hashbrown", |b| {
+        b.iter(|| {
+            for &size in target_sizes.iter() {
+                let mut iterations = 0;
+                while iterations < max_target_size {
+                    let mut map: BenchHashbrownMap = hashbrown_with_capacity(size);
+                    for (key, val) in combined.iter().take(size) {
+                        black_box(map.insert(key.clone(), val.clone()));
+                    }
+                    iterations += size;
+                }
+            }
+        });
+    });
+
     group.finish();
 }
 
@@ -335,6 +413,22 @@ fn bench_get_hits(c: &mut Criterion) {
     group.bench_function("std_hashmap", |b| {
         b.iter(|| {
             for &(size, ref map) in &std_maps {
+                let mut rng = StdRng::seed_from_u64(0xC01DBEEF ^ size as u64);
+                for _ in 0..GETS_PER_ROUND {
+                    let idx = rng.random_range(0..size);
+                    let key = &keys[idx];
+                    black_box(map.get(key));
+                }
+            }
+        });
+    });
+
+    drop(std_maps);
+    let hashbrown_maps = build_hashbrown_maps_from_data(&target_sizes, &keys, &values);
+
+    group.bench_function("hashbrown", |b| {
+        b.iter(|| {
+            for &(size, ref map) in &hashbrown_maps {
                 let mut rng = StdRng::seed_from_u64(0xC01DBEEF ^ size as u64);
                 for _ in 0..GETS_PER_ROUND {
                     let idx = rng.random_range(0..size);
@@ -400,6 +494,23 @@ fn bench_get_misses(c: &mut Criterion) {
         });
     });
 
+    drop(std_maps);
+    let hashbrown_maps =
+        build_hashbrown_maps_from_data(&target_sizes, &present_keys, &present_values);
+
+    group.bench_function("hashbrown", |b| {
+        b.iter(|| {
+            for &(size, ref map) in &hashbrown_maps {
+                let mut rng = StdRng::seed_from_u64(0xC0FFEE42 ^ size as u64);
+                for _ in 0..GETS_PER_ROUND {
+                    let idx = rng.random_range(0..size);
+                    let key = &miss_keys[idx];
+                    black_box(map.get(key));
+                }
+            }
+        });
+    });
+
     group.finish();
 }
 
@@ -430,6 +541,23 @@ fn bench_update(c: &mut Criterion) {
     group.bench_function("std_hashmap", |b| {
         b.iter(|| {
             for (size, map) in std_maps.iter_mut() {
+                let size = *size;
+                for idx in 0..GETS_PER_ROUND {
+                    let key = keys[idx % size].clone();
+                    let val = update_values[idx % size].clone();
+                    black_box(map.insert(key, val));
+                }
+            }
+        });
+    });
+
+    drop(std_maps);
+    let mut hashbrown_maps =
+        build_hashbrown_maps_from_data(&target_sizes, &keys, &initial_values);
+
+    group.bench_function("hashbrown", |b| {
+        b.iter(|| {
+            for (size, map) in hashbrown_maps.iter_mut() {
                 let size = *size;
                 for idx in 0..GETS_PER_ROUND {
                     let key = keys[idx % size].clone();
@@ -487,6 +615,22 @@ fn bench_hot_gets(c: &mut Criterion) {
         });
     });
 
+    drop(std_maps);
+    let hashbrown_maps = build_hashbrown_maps_from_data(&target_sizes, &map_keys, &map_values);
+
+    group.bench_function("hashbrown", |b| {
+        b.iter(|| {
+            for ((_, map), &hot_count) in hashbrown_maps.iter().zip(&hot_counts) {
+                let mut rng = StdRng::seed_from_u64(0xDEC0DE42 ^ hot_count as u64);
+                for _ in 0..GETS_PER_ROUND {
+                    let idx = rng.random_range(0..hot_count);
+                    let key = &hot_keys[idx];
+                    black_box(map.get(key));
+                }
+            }
+        });
+    });
+
     group.finish();
 }
 
@@ -522,6 +666,7 @@ fn bench_remove_hits(c: &mut Criterion) {
         );
     });
 
+    drop(pomap_maps);
     let std_maps = build_std_maps_from_data(&target_sizes, &keys, &values);
     group.bench_function("std_hashmap", |b| {
         b.iter_batched(
@@ -530,6 +675,29 @@ fn bench_remove_hits(c: &mut Criterion) {
                     .iter()
                     .map(|(size, map)| (*size, map.clone()))
                     .collect::<Vec<(usize, BenchHashMap)>>()
+            },
+            |mut maps| {
+                for (size, map) in maps.iter_mut() {
+                    let removes = GETS_PER_ROUND.min(*size);
+                    for idx in 0..removes {
+                        let key = &keys[idx];
+                        black_box(map.remove(key));
+                    }
+                }
+            },
+            BatchSize::LargeInput,
+        );
+    });
+
+    drop(std_maps);
+    let hashbrown_maps = build_hashbrown_maps_from_data(&target_sizes, &keys, &values);
+    group.bench_function("hashbrown", |b| {
+        b.iter_batched(
+            || {
+                hashbrown_maps
+                    .iter()
+                    .map(|(size, map)| (*size, map.clone()))
+                    .collect::<Vec<(usize, BenchHashbrownMap)>>()
             },
             |mut maps| {
                 for (size, map) in maps.iter_mut() {
@@ -601,6 +769,22 @@ fn bench_remove_misses(c: &mut Criterion) {
         });
     });
 
+    drop(std_maps);
+    let mut hashbrown_maps =
+        build_hashbrown_maps_from_data(&target_sizes, &present_keys, &present_values);
+
+    group.bench_function("hashbrown", |b| {
+        b.iter(|| {
+            for (size, map) in hashbrown_maps.iter_mut() {
+                let removes = GETS_PER_ROUND.min(*size);
+                for idx in 0..removes {
+                    let key = &miss_keys[idx];
+                    black_box(map.remove(key));
+                }
+            }
+        });
+    });
+
     group.finish();
 }
 
@@ -632,6 +816,7 @@ fn bench_shrink_to(c: &mut Criterion) {
         );
     });
 
+    drop(pomap_maps);
     let std_maps = build_std_maps_from_data_with_capacity(&target_sizes, &keys, &values, 8);
     group.bench_function("std_hashmap", |b| {
         b.iter_batched(
@@ -640,6 +825,26 @@ fn bench_shrink_to(c: &mut Criterion) {
                     .iter()
                     .map(|(size, map)| (*size, map.clone()))
                     .collect::<Vec<(usize, BenchHashMap)>>()
+            },
+            |mut maps| {
+                for (size, map) in maps.iter_mut() {
+                    black_box(map.shrink_to(*size));
+                }
+            },
+            BatchSize::LargeInput,
+        );
+    });
+
+    drop(std_maps);
+    let hashbrown_maps =
+        build_hashbrown_maps_from_data_with_capacity(&target_sizes, &keys, &values, 8);
+    group.bench_function("hashbrown", |b| {
+        b.iter_batched(
+            || {
+                hashbrown_maps
+                    .iter()
+                    .map(|(size, map)| (*size, map.clone()))
+                    .collect::<Vec<(usize, BenchHashbrownMap)>>()
             },
             |mut maps| {
                 for (size, map) in maps.iter_mut() {
