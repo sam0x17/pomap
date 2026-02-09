@@ -9,7 +9,5 @@ extern crate alloc;
 #[cfg(test)]
 extern crate std;
 
-//pub mod auth;
-
 mod pomap;
 pub use pomap::*;
