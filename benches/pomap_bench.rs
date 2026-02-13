@@ -404,7 +404,7 @@ fn bench_insert_warmup_curve(c: &mut Criterion) {
     }
     let pomap_capacity = pomap_probe.capacity() - pomap_probe.max_scan();
 
-    let mut group = c.comparison_benchmark_group("insert_warmup_curve");
+    let mut group = c.benchmark_group("insert_warmup_curve");
     group.sample_size(WARMUP_CURVE_SAMPLE_SIZE);
     group.throughput(Throughput::Elements(
         (WARMUP_CURVE_INSERT_SIZE * WARMUP_CURVE_MEASURE_ROUNDS) as u64,
@@ -566,7 +566,7 @@ fn bench_get_hits_warmup_curve(c: &mut Criterion) {
         .map(|_| rng.random_range(0..WARMUP_CURVE_SIZE))
         .collect();
 
-    let mut group = c.comparison_benchmark_group("get_hits_warmup_curve");
+    let mut group = c.benchmark_group("get_hits_warmup_curve");
     group.sample_size(WARMUP_CURVE_SAMPLE_SIZE);
     group.throughput(Throughput::Elements(
         (WARMUP_CURVE_GETS_PER_ROUND * WARMUP_CURVE_MEASURE_ROUNDS) as u64,
