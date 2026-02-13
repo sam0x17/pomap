@@ -5,7 +5,7 @@ use std::{
 };
 
 use ahash::AHasher;
-use criterion::{BatchSize, Criterion, criterion_group, criterion_main};
+use criterion::{BatchSize, BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use hashbrown::HashMap as HashbrownMap;
 use pomap::PoMap;
 #[cfg(feature = "bench-string")]
@@ -53,6 +53,14 @@ const MAX_INSERT_INPUT_SIZE: usize = 100_000_usize;
 const GETS_PER_ROUND: usize = 100_usize;
 const NUM_INTERMEDIATE_ROUNDS: usize = 5_usize;
 const HOT_SET: usize = MAX_GET_INPUT_SIZE.isqrt();
+const WARMUP_CURVE_SIZE: usize = 100_000_usize;
+const WARMUP_CURVE_INSERT_SIZE: usize = MAX_INSERT_INPUT_SIZE;
+const WARMUP_CURVE_GETS_PER_ROUND: usize = 256_usize;
+const WARMUP_CURVE_MEASURE_ROUNDS: usize = 8_usize;
+const WARMUP_CURVE_SAMPLE_SIZE: usize = 20_usize;
+const WARMUP_CURVE_WARMUP_ROUNDS: &[usize] = &[
+    0, 1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192,
+];
 
 #[cfg(feature = "bench-string")]
 const STR_LEN: usize = 128;
@@ -387,6 +395,114 @@ fn bench_insert_preallocated(c: &mut Criterion) {
     group.finish();
 }
 
+fn bench_insert_warmup_curve(c: &mut Criterion) {
+    let keys: Vec<BenchKey> = random_items(0xD16E, WARMUP_CURVE_INSERT_SIZE);
+    let values: Vec<BenchValue> = random_items(0xB16B00B5, WARMUP_CURVE_INSERT_SIZE);
+    let mut pomap_probe: BenchPoMap = BenchPoMap::with_hasher(BenchHasherBuilder::default());
+    for idx in 0..WARMUP_CURVE_INSERT_SIZE {
+        pomap_probe.insert(keys[idx].clone(), values[idx].clone());
+    }
+    let pomap_capacity = pomap_probe.capacity() - pomap_probe.max_scan();
+
+    let mut group = c.comparison_benchmark_group("insert_warmup_curve");
+    group.sample_size(WARMUP_CURVE_SAMPLE_SIZE);
+    group.throughput(Throughput::Elements(
+        (WARMUP_CURVE_INSERT_SIZE * WARMUP_CURVE_MEASURE_ROUNDS) as u64,
+    ));
+
+    for &warmup_rounds in WARMUP_CURVE_WARMUP_ROUNDS {
+        group.bench_with_input(
+            BenchmarkId::new("pomap", warmup_rounds),
+            &warmup_rounds,
+            |b, &warmup_rounds| {
+                b.iter_batched(
+                    || {
+                        for _ in 0..warmup_rounds {
+                            let mut map: BenchPoMap = BenchPoMap::with_capacity_and_hasher(
+                                pomap_capacity,
+                                BenchHasherBuilder::default(),
+                            );
+                            for idx in 0..WARMUP_CURVE_INSERT_SIZE {
+                                black_box(map.insert(keys[idx].clone(), values[idx].clone()));
+                            }
+                        }
+                    },
+                    |_| {
+                        for _ in 0..WARMUP_CURVE_MEASURE_ROUNDS {
+                            let mut map: BenchPoMap = BenchPoMap::with_capacity_and_hasher(
+                                pomap_capacity,
+                                BenchHasherBuilder::default(),
+                            );
+                            for idx in 0..WARMUP_CURVE_INSERT_SIZE {
+                                black_box(map.insert(keys[idx].clone(), values[idx].clone()));
+                            }
+                        }
+                    },
+                    BatchSize::LargeInput,
+                );
+            },
+        );
+
+        group.bench_with_input(
+            BenchmarkId::new("std_hashmap", warmup_rounds),
+            &warmup_rounds,
+            |b, &warmup_rounds| {
+                b.iter_batched(
+                    || {
+                        for _ in 0..warmup_rounds {
+                            let mut map: BenchHashMap =
+                                std_hashmap_with_capacity(WARMUP_CURVE_INSERT_SIZE);
+                            for idx in 0..WARMUP_CURVE_INSERT_SIZE {
+                                black_box(map.insert(keys[idx].clone(), values[idx].clone()));
+                            }
+                        }
+                    },
+                    |_| {
+                        for _ in 0..WARMUP_CURVE_MEASURE_ROUNDS {
+                            let mut map: BenchHashMap =
+                                std_hashmap_with_capacity(WARMUP_CURVE_INSERT_SIZE);
+                            for idx in 0..WARMUP_CURVE_INSERT_SIZE {
+                                black_box(map.insert(keys[idx].clone(), values[idx].clone()));
+                            }
+                        }
+                    },
+                    BatchSize::LargeInput,
+                );
+            },
+        );
+
+        group.bench_with_input(
+            BenchmarkId::new("hashbrown", warmup_rounds),
+            &warmup_rounds,
+            |b, &warmup_rounds| {
+                b.iter_batched(
+                    || {
+                        for _ in 0..warmup_rounds {
+                            let mut map: BenchHashbrownMap =
+                                hashbrown_with_capacity(WARMUP_CURVE_INSERT_SIZE);
+                            for idx in 0..WARMUP_CURVE_INSERT_SIZE {
+                                black_box(map.insert(keys[idx].clone(), values[idx].clone()));
+                            }
+                        }
+                    },
+                    |_| {
+                        for _ in 0..WARMUP_CURVE_MEASURE_ROUNDS {
+                            let mut map: BenchHashbrownMap =
+                                hashbrown_with_capacity(WARMUP_CURVE_INSERT_SIZE);
+                            for idx in 0..WARMUP_CURVE_INSERT_SIZE {
+                                black_box(map.insert(keys[idx].clone(), values[idx].clone()));
+                            }
+                        }
+                    },
+                    BatchSize::LargeInput,
+                );
+            },
+        );
+    }
+
+    group.finish();
+}
+
 fn bench_get_hits(c: &mut Criterion) {
     let target_sizes = get_target_sizes();
     let keys: Vec<BenchKey> = random_items(0xFEED, MAX_GET_INPUT_SIZE);
@@ -438,6 +554,118 @@ fn bench_get_hits(c: &mut Criterion) {
             }
         });
     });
+
+    group.finish();
+}
+
+fn bench_get_hits_warmup_curve(c: &mut Criterion) {
+    let keys: Vec<BenchKey> = random_items(0xAC1D, WARMUP_CURVE_SIZE);
+    let values: Vec<BenchValue> = random_items(0xBADC0FFEE, WARMUP_CURVE_SIZE);
+    let mut rng = StdRng::seed_from_u64(0xC0DEC0DE);
+    let query_indices: Vec<usize> = (0..WARMUP_CURVE_GETS_PER_ROUND)
+        .map(|_| rng.random_range(0..WARMUP_CURVE_SIZE))
+        .collect();
+
+    let mut group = c.comparison_benchmark_group("get_hits_warmup_curve");
+    group.sample_size(WARMUP_CURVE_SAMPLE_SIZE);
+    group.throughput(Throughput::Elements(
+        (WARMUP_CURVE_GETS_PER_ROUND * WARMUP_CURVE_MEASURE_ROUNDS) as u64,
+    ));
+
+    for &warmup_rounds in WARMUP_CURVE_WARMUP_ROUNDS {
+        group.bench_with_input(
+            BenchmarkId::new("pomap", warmup_rounds),
+            &warmup_rounds,
+            |b, &warmup_rounds| {
+                b.iter_batched(
+                    || {
+                        let mut map: BenchPoMap = BenchPoMap::with_capacity_and_hasher(
+                            WARMUP_CURVE_SIZE,
+                            BenchHasherBuilder::default(),
+                        );
+                        for idx in 0..WARMUP_CURVE_SIZE {
+                            map.insert(keys[idx].clone(), values[idx].clone());
+                        }
+                        for _ in 0..warmup_rounds {
+                            for &idx in &query_indices {
+                                black_box(map.get(&keys[idx]));
+                            }
+                        }
+                        map
+                    },
+                    |map| {
+                        let map = black_box(map);
+                        for _ in 0..WARMUP_CURVE_MEASURE_ROUNDS {
+                            for &idx in &query_indices {
+                                black_box(map.get(&keys[idx]));
+                            }
+                        }
+                    },
+                    BatchSize::LargeInput,
+                );
+            },
+        );
+
+        group.bench_with_input(
+            BenchmarkId::new("std_hashmap", warmup_rounds),
+            &warmup_rounds,
+            |b, &warmup_rounds| {
+                b.iter_batched(
+                    || {
+                        let mut map: BenchHashMap = std_hashmap_with_capacity(WARMUP_CURVE_SIZE);
+                        for idx in 0..WARMUP_CURVE_SIZE {
+                            map.insert(keys[idx].clone(), values[idx].clone());
+                        }
+                        for _ in 0..warmup_rounds {
+                            for &idx in &query_indices {
+                                black_box(map.get(&keys[idx]));
+                            }
+                        }
+                        map
+                    },
+                    |map| {
+                        let map = black_box(map);
+                        for _ in 0..WARMUP_CURVE_MEASURE_ROUNDS {
+                            for &idx in &query_indices {
+                                black_box(map.get(&keys[idx]));
+                            }
+                        }
+                    },
+                    BatchSize::LargeInput,
+                );
+            },
+        );
+
+        group.bench_with_input(
+            BenchmarkId::new("hashbrown", warmup_rounds),
+            &warmup_rounds,
+            |b, &warmup_rounds| {
+                b.iter_batched(
+                    || {
+                        let mut map: BenchHashbrownMap = hashbrown_with_capacity(WARMUP_CURVE_SIZE);
+                        for idx in 0..WARMUP_CURVE_SIZE {
+                            map.insert(keys[idx].clone(), values[idx].clone());
+                        }
+                        for _ in 0..warmup_rounds {
+                            for &idx in &query_indices {
+                                black_box(map.get(&keys[idx]));
+                            }
+                        }
+                        map
+                    },
+                    |map| {
+                        let map = black_box(map);
+                        for _ in 0..WARMUP_CURVE_MEASURE_ROUNDS {
+                            for &idx in &query_indices {
+                                black_box(map.get(&keys[idx]));
+                            }
+                        }
+                    },
+                    BatchSize::LargeInput,
+                );
+            },
+        );
+    }
 
     group.finish();
 }
@@ -861,7 +1089,9 @@ criterion_group!(
     benches,
     bench_insert_allocate,
     bench_insert_preallocated,
+    bench_insert_warmup_curve,
     bench_get_hits,
+    bench_get_hits_warmup_curve,
     bench_get_misses,
     bench_update,
     bench_hot_gets,
