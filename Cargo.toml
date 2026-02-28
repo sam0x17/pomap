@@ -17,8 +17,6 @@ resize-logging = []
 bench-string = []
 
 [dependencies]
-sha2 = { version = "0.10", features = ["asm"] }
-wide = "0.8"
 ahash = { version = "0.8", default-features = false }
 
 [dev-dependencies]
