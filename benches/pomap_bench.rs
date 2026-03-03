@@ -579,9 +579,11 @@ fn bench_update(c: &mut Criterion) {
             for (size, map) in pomap_maps.iter_mut() {
                 let size = *size;
                 for idx in 0..GETS_PER_ROUND {
-                    let key = keys[idx % size].clone();
-                    let val = update_values[idx % size].clone();
-                    black_box(map.insert(key, val));
+                    let key = &keys[idx % size];
+                    let val = update_values[idx % size];
+                    if let Some(v) = map.get_mut(key) {
+                        black_box(*v = val);
+                    }
                 }
             }
         });
@@ -595,9 +597,11 @@ fn bench_update(c: &mut Criterion) {
             for (size, map) in std_maps.iter_mut() {
                 let size = *size;
                 for idx in 0..GETS_PER_ROUND {
-                    let key = keys[idx % size].clone();
-                    let val = update_values[idx % size].clone();
-                    black_box(map.insert(key, val));
+                    let key = &keys[idx % size];
+                    let val = update_values[idx % size];
+                    if let Some(v) = map.get_mut(key) {
+                        black_box(*v = val);
+                    }
                 }
             }
         });
@@ -611,9 +615,11 @@ fn bench_update(c: &mut Criterion) {
             for (size, map) in hashbrown_maps.iter_mut() {
                 let size = *size;
                 for idx in 0..GETS_PER_ROUND {
-                    let key = keys[idx % size].clone();
-                    let val = update_values[idx % size].clone();
-                    black_box(map.insert(key, val));
+                    let key = &keys[idx % size];
+                    let val = update_values[idx % size];
+                    if let Some(v) = map.get_mut(key) {
+                        black_box(*v = val);
+                    }
                 }
             }
         });
