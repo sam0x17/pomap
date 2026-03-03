@@ -923,7 +923,7 @@ fn bench_memory_footprint(c: &mut Criterion) {
     // std HashMap is backed by hashbrown so its slot size is the same.
     const HB_SLOT: usize = 1 + std::mem::size_of::<BenchKey>() + std::mem::size_of::<BenchValue>();
 
-    let sizes = [100usize, 1_000, 10_000, 100_000, 1_000_000];
+    let sizes = [500usize, 5_000, 50_000, 500_000, 5_000_000];
     let max_size = *sizes.iter().max().unwrap();
     let keys: Vec<BenchKey> = random_items(0xB17E5, max_size);
     let values: Vec<BenchValue> = random_items(0xF007, max_size);

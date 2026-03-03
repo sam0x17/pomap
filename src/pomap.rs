@@ -3436,16 +3436,17 @@ mod tests {
 
     #[test]
     fn shrink_to_sizes_up_on_scan_overflow() {
+        // With MIN_CAPACITY=16, shrink_to first tries ideal_range=16 (index_bits=4, max_scan=4).
+        // We need 5 collision keys so the 5th triggers cursor(4) >= ideal_slot(0)+max_scan(4),
+        // forcing a bump to ideal_range=32 (index_bits=5, capacity=37).
         let mut map: PoMap<CollisionKey, u64> = PoMap::with_capacity(64);
-        let k1 = CollisionKey(1);
-        let k2 = CollisionKey(2);
-        let k3 = CollisionKey(3);
-        map.insert(k1.clone(), 10);
-        map.insert(k2.clone(), 20);
-        map.insert(k3.clone(), 30);
+        let keys: Vec<CollisionKey> = (1..=5u64).map(CollisionKey).collect();
+        for k in keys.iter() {
+            map.insert(k.clone(), k.0 * 10);
+        }
 
         let old_capacity = map.capacity();
-        let (base_meta, _) = PoMapMeta::new(4);
+        let (base_meta, _) = PoMapMeta::new(MIN_CAPACITY);
         let bumped_ideal_range = (1usize << base_meta.index_bits) * 2;
         let (_, expected_capacity) = PoMapMeta::new(bumped_ideal_range);
 
@@ -3453,10 +3454,10 @@ mod tests {
         assert!(new_capacity < old_capacity);
         assert_eq!(new_capacity, expected_capacity);
 
-        assert_eq!(map.get(&k1), Some(&10));
-        assert_eq!(map.get(&k2), Some(&20));
-        assert_eq!(map.get(&k3), Some(&30));
-        assert_eq!(map.len(), 3);
+        for k in keys.iter() {
+            assert_eq!(map.get(k), Some(&(k.0 * 10)));
+        }
+        assert_eq!(map.len(), 5);
     }
 
     #[test]
