@@ -14,12 +14,12 @@ use core::{
 };
 
 /// Minimum capacity we will allow for PoMap
-const MIN_CAPACITY: usize = 4;
+const MIN_CAPACITY: usize = 16;
 
 /// Number of bits in the hashcode
 const HASH_BITS: usize = 64; // we use a 64-bit hashcode
 
-const GROWTH_FACTOR: usize = 4;
+const GROWTH_FACTOR: usize = 2;
 const VACANT_HASH: u64 = u64::MAX;
 
 /// Default build hasher for [`PoMap`], backed by [`AHasher`].
@@ -818,7 +818,62 @@ impl<K: Key, V: Value, H: BuildHasher> PoMap<K, V, H> {
                     search += 1;
                 }
 
-                // No room in this window; grow and retry.
+                // No room in this window; try cascade displacement before growing.
+                //
+                // The last entry in [idx, scan_end) has the highest hash. If its
+                // ideal_slot > ideal_slot_x it can legally live past scan_end (its
+                // window extends beyond the current window boundary). In that case we
+                // look for the first vacant slot v >= scan_end where every entry in
+                // [scan_end, v) can also shift right (i.e. is not already at the last
+                // valid position of its own window). Shifting [idx, v-1] right by one
+                // and placing X at idx is then a valid, sorted, in-bounds operation.
+                let ideal_slot_x = scan_end - self.meta.index_bits;
+                let last_hash = unsafe { *hashes_ptr.add(scan_end - 1) };
+                let last_ideal = (last_hash >> self.meta.index_shift) as usize;
+
+                if last_ideal > ideal_slot_x {
+                    let capacity = self.slots.capacity();
+                    let mut v = scan_end;
+                    let mut cascade_ok = true;
+
+                    while v < capacity {
+                        let v_hash = unsafe { *hashes_ptr.add(v) };
+                        if v_hash == VACANT_HASH {
+                            break; // found the destination vacancy
+                        }
+                        // Entry at v must be able to shift right to v+1.
+                        // Condition: v+1 < ideal_slot(v_hash) + index_bits
+                        let v_ideal = (v_hash >> self.meta.index_shift) as usize;
+                        if v + 1 >= v_ideal + self.meta.index_bits {
+                            cascade_ok = false; // entry pinned to last valid position
+                            break;
+                        }
+                        v += 1;
+                    }
+
+                    if cascade_ok && v < capacity {
+                        // Shift [idx, v-1] right by 1 and insert X at idx.
+                        unsafe {
+                            let mut i = v;
+                            while i > idx {
+                                *hashes_ptr.add(i) = *hashes_ptr.add(i - 1);
+                                core::ptr::write(
+                                    entries_ptr.add(i),
+                                    core::ptr::read(entries_ptr.add(i - 1)),
+                                );
+                                i -= 1;
+                            }
+                            *hashes_ptr.add(idx) = hash;
+                            let entry = &mut *entries_ptr.add(idx);
+                            entry.key.write(key);
+                            entry.value.write(value);
+                        }
+                        self.len += 1;
+                        return InsertResult::Inserted { index: idx };
+                    }
+                }
+
+                // No cascade possible; grow and retry.
                 break;
             }
 
