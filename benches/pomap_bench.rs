@@ -1,11 +1,63 @@
 use std::{
+    alloc::{GlobalAlloc, Layout, System},
     collections::{HashMap, HashSet},
     hash::BuildHasherDefault,
     hint::black_box,
+    sync::atomic::{AtomicUsize, Ordering},
 };
 
 use ahash::AHasher;
 use criterion::{BatchSize, BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
+
+// ---------------------------------------------------------------------------
+// Tracking allocator — measures net heap bytes held by a map after construction
+// ---------------------------------------------------------------------------
+
+static NET_ALLOCATED: AtomicUsize = AtomicUsize::new(0);
+
+struct TrackingAlloc;
+
+unsafe impl GlobalAlloc for TrackingAlloc {
+    #[inline]
+    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+        let ptr = unsafe { System.alloc(layout) };
+        if !ptr.is_null() {
+            NET_ALLOCATED.fetch_add(layout.size(), Ordering::Relaxed);
+        }
+        ptr
+    }
+
+    #[inline]
+    unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+        unsafe { System.dealloc(ptr, layout) };
+        NET_ALLOCATED.fetch_sub(layout.size(), Ordering::Relaxed);
+    }
+
+    #[inline]
+    unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
+        let ptr = unsafe { System.alloc_zeroed(layout) };
+        if !ptr.is_null() {
+            NET_ALLOCATED.fetch_add(layout.size(), Ordering::Relaxed);
+        }
+        ptr
+    }
+
+    #[inline]
+    unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
+        let new_ptr = unsafe { System.realloc(ptr, layout, new_size) };
+        if !new_ptr.is_null() {
+            if new_size > layout.size() {
+                NET_ALLOCATED.fetch_add(new_size - layout.size(), Ordering::Relaxed);
+            } else {
+                NET_ALLOCATED.fetch_sub(layout.size() - new_size, Ordering::Relaxed);
+            }
+        }
+        new_ptr
+    }
+}
+
+#[global_allocator]
+static GLOBAL_ALLOC: TrackingAlloc = TrackingAlloc;
 use hashbrown::HashMap as HashbrownMap;
 use pomap::PoMap;
 #[cfg(feature = "bench-string")]
@@ -1085,6 +1137,69 @@ fn bench_shrink_to(c: &mut Criterion) {
     group.finish();
 }
 
+fn measure_map_bytes<F: FnOnce() -> R, R>(build: F) -> (usize, R) {
+    let before = NET_ALLOCATED.load(Ordering::Relaxed);
+    let map = build();
+    let bytes = NET_ALLOCATED.load(Ordering::Relaxed).saturating_sub(before);
+    (bytes, map)
+}
+
+fn bench_memory_footprint(c: &mut Criterion) {
+    // Slot sizes for the current BenchKey/BenchValue types.
+    // PoMap:     8 (hash u64) + size_of::<K>() + size_of::<V>()
+    // hashbrown: 1 (control)  + size_of::<K>() + size_of::<V>()
+    // std HashMap is backed by hashbrown so its slot size is the same.
+    const HB_SLOT: usize = 1 + std::mem::size_of::<BenchKey>() + std::mem::size_of::<BenchValue>();
+
+    let sizes = [100usize, 1_000, 10_000, 100_000, 1_000_000];
+    let max_size = *sizes.iter().max().unwrap();
+    let keys: Vec<BenchKey> = random_items(0xB17E5, max_size);
+    let values: Vec<BenchValue> = random_items(0xF007, max_size);
+
+    println!(
+        "\n{:<12} {:>14} {:>14} {:>12} {:>12} {:>12}",
+        "entries", "pomap slots", "hb slots", "pm/hb", "pm load%", "hb load%"
+    );
+    println!("{}", "-".repeat(80));
+
+    for &size in &sizes {
+        let (_, pm) = measure_map_bytes(|| {
+            let mut m = BenchPoMap::with_hasher(BenchHasherBuilder::default());
+            for i in 0..size {
+                m.insert(keys[i].clone(), values[i].clone());
+            }
+            m
+        });
+        let pm_slots = pm.capacity();
+        drop(black_box(pm));
+
+        let (hb_bytes, hb) = measure_map_bytes(|| {
+            let mut m = new_hashbrown_hashmap();
+            for i in 0..size {
+                m.insert(keys[i].clone(), values[i].clone());
+            }
+            m
+        });
+        let hb_slots = hb_bytes / HB_SLOT;
+        drop(black_box(hb));
+
+        println!(
+            "{:<12} {:>14} {:>14} {:>11.2}x {:>11.1}% {:>11.1}%",
+            size,
+            pm_slots,
+            hb_slots,
+            pm_slots as f64 / hb_slots.max(1) as f64,
+            size as f64 / pm_slots as f64 * 100.0,
+            size as f64 / hb_slots.max(1) as f64 * 100.0,
+        );
+    }
+
+    // No-op benchmark so `-- memory_footprint_bytes` filter still triggers this group.
+    let mut group = c.benchmark_group("memory_footprint_bytes");
+    group.bench_function("report", |b| b.iter(|| {}));
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench_insert_allocate,
@@ -1097,6 +1212,7 @@ criterion_group!(
     bench_hot_gets,
     bench_remove_hits,
     bench_remove_misses,
-    bench_shrink_to
+    bench_shrink_to,
+    bench_memory_footprint
 );
 criterion_main!(benches);
