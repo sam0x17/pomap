@@ -1354,15 +1354,36 @@ impl<K: Key, V: Value, H: BuildHasher> PoMap<K, V, H> {
         // allocate new slots and keep the old ones for re-distribution.
         let mut old_slots = core::mem::replace(&mut self.slots, Slots::new(new_vec_capacity));
 
-        // re-insert all existing elements into the new vec in the same order, with spaces
-        // added based on hash prefix / the new meta
+        // Re-pack all live entries from the old map into the new map. Each entry is placed at
+        // max(ideal_slot_new, cursor) so that entries always move forward and never collide.
+        //
+        // When we encounter a VACANT slot in the old map we bump cursor by 1. This preserves a
+        // trace of the gap that existed between two runs in the old map, which improves insert
+        // performance after the resize by pre-creating open slots at the ideal positions of the
+        // next run. Concretely:
+        //
+        //   OLD MAP  (ideal_range=4, index_bits=4)
+        //   slot:  [ 0 ][ 1 ][ 2 ][ 3 ][ 4 ][ 5 ]
+        //           A0   A1   A2   A3   --   B0
+        //   ideal:   0    0    0    0        1
+        //                                ↑ VACANT: bucket A ended here
+        //
+        //   WITHOUT bump            WITH bump
+        //   [A0][A1][A2][A3][B0]    [A0][A1][A2][A3][ ][B0]
+        //                    ↑                       ↑
+        //              B0 blocks its           ideal slot left open:
+        //              own ideal slot          next insert is direct,
+        //                                      no displacement needed
+        //
+        // The bump is safe: at resize time the old map has ~index_bits total vacant slots, and
+        // the 4× growth factor guarantees every entry still lands within its new scan window.
         let mut cursor = 0;
         let hashes_ptr = old_slots.hashes_ptr();
         let entries_ptr = old_slots.entries_ptr();
         for idx in 0..current_capacity {
             let hash = unsafe { *hashes_ptr.add(idx) };
             if hash == VACANT_HASH {
-                cursor += 1;
+                cursor += 1; // preserve inter-run spacing in the new map (see comment above)
                 continue;
             }
 
@@ -1375,14 +1396,8 @@ impl<K: Key, V: Value, H: BuildHasher> PoMap<K, V, H> {
 
             // Prevent the old slot from dropping the moved value on destruction.
             unsafe { old_slots.clear_slot(idx) };
-
-            // insert the slot, we should be at or past the ideal slot now. Because the
-            // previous layout was already valid and is strictly smaller than the new one, this
-            // can never cause us to exceed the scan limit past the ideal slot because we are
-            // always gaining more room.
             unsafe { self.slots.write_slot(cursor, hash, key, value) };
 
-            // advance cursor
             cursor += 1;
         }
 
@@ -1413,13 +1428,14 @@ impl<K: Key, V: Value, H: BuildHasher> PoMap<K, V, H> {
 
         let mut old_slots = core::mem::replace(&mut self.slots, Slots::try_new(new_vec_capacity)?);
 
+        // Same packing logic as reserve_for_capacity; see that function for commentary.
         let mut cursor = 0;
         let hashes_ptr = old_slots.hashes_ptr();
         let entries_ptr = old_slots.entries_ptr();
         for idx in 0..current_capacity {
             let hash = unsafe { *hashes_ptr.add(idx) };
             if hash == VACANT_HASH {
-                cursor += 1;
+                cursor += 1; // preserve inter-run spacing in the new map
                 continue;
             }
 
