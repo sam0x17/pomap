@@ -320,8 +320,8 @@ impl<K: Key, V: Value, H: BuildHasher> PoMap<K, V, H> {
     /// Every entry is guaranteed to reside within `[ideal_slot, ideal_slot + max_scan())`,
     /// so any get/remove terminates after at most `max_scan()` comparisons.
     ///
-    /// Insert is bounded by `2 * max_scan()`: when the main window is full, cascade
-    /// displacement searches up to `max_scan()` additional slots for a free destination,
+    /// Insert is bounded by `3 * max_scan()`: when the main window is full, cascade
+    /// displacement searches up to `2 * max_scan()` additional slots for a free destination,
     /// then shifts the entire range right by one. In practice cascade terminates well within
     /// this limit.
     pub const fn max_scan(&self) -> usize {
@@ -842,13 +842,13 @@ impl<K: Key, V: Value, H: BuildHasher> PoMap<K, V, H> {
                 //   3. We shift [idx, v-1] right by one and place X at idx. Because each
                 //      shifted entry stays within its own scan window, all invariants hold.
                 //
-                // The cascade search is capped at scan_end + index_bits (= ideal_slot +
-                // 2*index_bits). This bounds both the search and the subsequent shift to
+                // The cascade search is capped at scan_end + 2*index_bits (= ideal_slot +
+                // 3*index_bits). This bounds both the search and the subsequent shift to
                 // O(index_bits) = O(log N), keeping insert worst-case O(log N) rather than
                 // O(N). In practice the cascade terminates well within this limit at the
                 // first vacant slot or pinned entry.
                 let ideal_slot_x = scan_end - self.meta.index_bits;
-                let cascade_limit = scan_end + self.meta.index_bits;
+                let cascade_limit = scan_end + 2 * self.meta.index_bits;
                 let last_hash = unsafe { *hashes_ptr.add(scan_end - 1) };
                 let last_ideal = (last_hash >> self.meta.index_shift) as usize;
 
