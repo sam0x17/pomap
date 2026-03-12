@@ -381,10 +381,8 @@ fn bench_insert_preallocated(c: &mut Criterion) {
         .map(|&size| {
             let mut requested = size;
             loop {
-                let mut map: BenchPoMap = BenchPoMap::with_capacity_and_hasher(
-                    requested,
-                    BenchHasherBuilder::default(),
-                );
+                let mut map: BenchPoMap =
+                    BenchPoMap::with_capacity_and_hasher(requested, BenchHasherBuilder::default());
                 let cap_before = map.capacity();
                 for (key, val) in combined.iter().take(size) {
                     map.insert(key.clone(), val.clone());
