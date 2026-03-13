@@ -15,6 +15,7 @@ default = ["std"]
 std = ["ahash/std", "ahash/runtime-rng"]
 resize-logging = []
 bench-string = []
+get-graph = []
 
 [dependencies]
 ahash = { version = "0.8", default-features = false }
@@ -24,6 +25,8 @@ criterion = { git = "https://github.com/sam0x17/criterion.rs" }
 hashbrown = "0.14"
 rand = { version = "0.10.0-rc.5", features = ["std"] }
 proptest = "1"
+ratatui = "0.29"
+crossterm = "0.28"
 
 [profile.release]
 codegen-units = 1
