@@ -15,7 +15,6 @@ default = ["std"]
 std = ["ahash/std", "ahash/runtime-rng"]
 resize-logging = []
 bench-string = []
-get-graph = []
 
 [dependencies]
 ahash = { version = "0.8", default-features = false }
@@ -39,4 +38,8 @@ codegen-units = 1
 
 [[bench]]
 name = "pomap_bench"
+harness = false
+
+[[bench]]
+name = "gets_graph_bench"
 harness = false
