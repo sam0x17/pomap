@@ -65,6 +65,8 @@ use pomap::PoMap;
 #[cfg(feature = "bench-string")]
 use rand::distr::Alphanumeric;
 use rand::{Rng, SeedableRng, rngs::StdRng};
+#[cfg(feature = "get-graph")]
+use rand::seq::SliceRandom;
 
 /// Swap these type aliases to switch benchmark payloads.
 #[cfg(feature = "bench-string")]
@@ -1061,17 +1063,7 @@ fn get_graph() {
     hot_map_keys.extend(random_items(0xD00D, max_size - HOT_SET));
     let hot_map_values: Vec<BenchValue> = random_items(0xBADD, max_size);
 
-    const ROUNDS: u64 = 1;
-
-    let pm_hits = build_pomap_maps_from_data(&target_sizes, &keys, &values);
-    let std_hits = build_std_maps_from_data(&target_sizes, &keys, &values);
-    let hb_hits = build_hashbrown_maps_from_data(&target_sizes, &keys, &values);
-    let pm_misses = build_pomap_maps_from_data(&target_sizes, &keys, &values);
-    let std_misses = build_std_maps_from_data(&target_sizes, &keys, &values);
-    let hb_misses = build_hashbrown_maps_from_data(&target_sizes, &keys, &values);
-    let pm_hot = build_pomap_maps_from_data(&target_sizes, &hot_map_keys, &hot_map_values);
-    let std_hot = build_std_maps_from_data(&target_sizes, &hot_map_keys, &hot_map_values);
-    let hb_hot = build_hashbrown_maps_from_data(&target_sizes, &hot_map_keys, &hot_map_values);
+    const ROUNDS: u64 = 100;
 
     let mut file = std::fs::File::create("get_graph.csv").expect("failed to create get_graph.csv");
     writeln!(file, "gets_per_round,bench,impl,map_size,per_get_ns").unwrap();
@@ -1090,7 +1082,7 @@ fn get_graph() {
 
     // Chart data: (bench, impl) -> Vec<(log10_gpr, avg_per_get_ns)>
     let mut chart_data: StdMap<(&str, &str), Vec<(f64, f64)>> = StdMap::new();
-    let total_gpr = gpr_values.len();
+    let _total_gpr = gpr_values.len();
 
     const BENCH_NAMES: [&str; 3] = ["get_hits", "get_misses", "get_hotset"];
     const IMPL_COLORS: [(&str, Color); 3] = [
@@ -1208,18 +1200,16 @@ fn get_graph() {
             });
     }
 
-    // Simple per-impl timing macro. Each impl runs in isolation (like criterion) so
-    // branch predictor and i-cache stay warm. GPR controls cold→hot data cache naturally.
+    // Timing macro matching criterion: benchmark each size independently, then average.
     macro_rules! time_gets {
         ($file:expr, $chart:expr, $bench:expr, $impl_name:expr, $maps:expr,
          $gpr:expr, $lookup_keys:expr, $seed_base:expr, $key_range:expr) => {{
-            let mut sum = 0.0f64;
-            let mut count = 0usize;
+            let mut sum_per_get = 0.0f64;
             for &(size, ref map) in $maps.iter() {
                 let range = $key_range(size);
-                let seed = $seed_base ^ size as u64;
                 let mut total_ns = 0u128;
                 for round in 0..ROUNDS {
+                    let seed = $seed_base ^ size as u64;
                     let mut rng = StdRng::seed_from_u64(seed.wrapping_add(round));
                     let start = Instant::now();
                     for _ in 0..$gpr {
@@ -1228,22 +1218,20 @@ fn get_graph() {
                     }
                     total_ns += start.elapsed().as_nanos();
                 }
-                let per_get = total_ns as f64 / ($gpr as u128 * ROUNDS as u128) as f64;
-                writeln!(
-                    $file,
-                    "{},{},{},{},{:.2}",
-                    $gpr, $bench, $impl_name, size, per_get
-                )
-                .unwrap();
-                sum += per_get;
-                count += 1;
+                sum_per_get += total_ns as f64 / ($gpr as f64 * ROUNDS as f64);
             }
-            let avg = sum / count.max(1) as f64;
+            let per_get = sum_per_get / $maps.len() as f64;
+            writeln!(
+                $file,
+                "{},{},{},all,{:.2}",
+                $gpr, $bench, $impl_name, per_get
+            )
+            .unwrap();
             let x = ($gpr as f64).log10().max(0.0);
             $chart
                 .entry(($bench, $impl_name))
                 .or_insert_with(Vec::new)
-                .push((x, avg));
+                .push((x, per_get));
         }};
     }
 
@@ -1305,119 +1293,75 @@ fn get_graph() {
         }};
     }
 
-    macro_rules! check_quit {
-        () => {
+    macro_rules! check_quit_labeled {
+        ($label:lifetime) => {
             if quit.load(Ordering::Relaxed) {
-                break;
+                break $label;
             }
         };
     }
 
-    for (gi, &gpr) in gpr_values.iter().enumerate() {
-        check_quit!();
-        status = format!(" gpr={:<6} [{}/{}]", gpr, gi + 1, total_gpr);
-        draw_tui(&mut terminal, &chart_data, &status);
+    // Each bench type: build all 3 impls' maps (like criterion's bench functions),
+    // then for each GPR value, run impls in random order. Measure per-size independently.
+    // Drop all maps between bench types to reduce memory pressure.
 
-        step!(
-            gpr,
-            "get_hits",
-            "pomap",
-            pm_hits,
-            gpr,
-            keys,
-            0xC01DBEEF,
-            |s: usize| s
-        );
-        check_quit!();
-        step!(
-            gpr,
-            "get_hits",
-            "std_hashmap",
-            std_hits,
-            gpr,
-            keys,
-            0xC01DBEEF,
-            |s: usize| s
-        );
-        check_quit!();
-        step!(
-            gpr,
-            "get_hits",
-            "hashbrown",
-            hb_hits,
-            gpr,
-            keys,
-            0xC01DBEEF,
-            |s: usize| s
-        );
-        check_quit!();
+    let mut order_rng = StdRng::seed_from_u64(0x0DE12);
 
-        step!(
-            gpr,
-            "get_misses",
-            "pomap",
-            pm_misses,
-            gpr,
-            miss_keys,
-            0xC0FFEE42,
-            |s: usize| s
-        );
-        check_quit!();
-        step!(
-            gpr,
-            "get_misses",
-            "std_hashmap",
-            std_misses,
-            gpr,
-            miss_keys,
-            0xC0FFEE42,
-            |s: usize| s
-        );
-        check_quit!();
-        step!(
-            gpr,
-            "get_misses",
-            "hashbrown",
-            hb_misses,
-            gpr,
-            miss_keys,
-            0xC0FFEE42,
-            |s: usize| s
-        );
-        check_quit!();
+    // get_hits
+    {
+        let pm = build_pomap_maps_from_data(&target_sizes, &keys, &values);
+        let sm = build_std_maps_from_data(&target_sizes, &keys, &values);
+        let hb = build_hashbrown_maps_from_data(&target_sizes, &keys, &values);
+        'hits: for (_, &gpr) in gpr_values.iter().enumerate() {
+            let mut order = [0u8, 1, 2];
+            order.shuffle(&mut order_rng);
+            for &idx in &order {
+                check_quit_labeled!('hits);
+                match idx {
+                    0 => step!(gpr, "get_hits", "pomap", pm, gpr, keys, 0xC01DBEEF, |s: usize| s),
+                    1 => step!(gpr, "get_hits", "std_hashmap", sm, gpr, keys, 0xC01DBEEF, |s: usize| s),
+                    _ => step!(gpr, "get_hits", "hashbrown", hb, gpr, keys, 0xC01DBEEF, |s: usize| s),
+                }
+            }
+        }
+    }
 
-        step!(
-            gpr,
-            "get_hotset",
-            "pomap",
-            pm_hot,
-            gpr,
-            hot_keys,
-            0xDEC0DE42,
-            |s: usize| HOT_SET.min(s).max(1)
-        );
-        check_quit!();
-        step!(
-            gpr,
-            "get_hotset",
-            "std_hashmap",
-            std_hot,
-            gpr,
-            hot_keys,
-            0xDEC0DE42,
-            |s: usize| HOT_SET.min(s).max(1)
-        );
-        check_quit!();
-        step!(
-            gpr,
-            "get_hotset",
-            "hashbrown",
-            hb_hot,
-            gpr,
-            hot_keys,
-            0xDEC0DE42,
-            |s: usize| HOT_SET.min(s).max(1)
-        );
+    // get_misses — maps built from keys/values, lookups use miss_keys
+    {
+        let pm = build_pomap_maps_from_data(&target_sizes, &keys, &values);
+        let sm = build_std_maps_from_data(&target_sizes, &keys, &values);
+        let hb = build_hashbrown_maps_from_data(&target_sizes, &keys, &values);
+        'misses: for (_, &gpr) in gpr_values.iter().enumerate() {
+            let mut order = [0u8, 1, 2];
+            order.shuffle(&mut order_rng);
+            for &idx in &order {
+                check_quit_labeled!('misses);
+                match idx {
+                    0 => step!(gpr, "get_misses", "pomap", pm, gpr, miss_keys, 0xC0FFEE42, |s: usize| s),
+                    1 => step!(gpr, "get_misses", "std_hashmap", sm, gpr, miss_keys, 0xC0FFEE42, |s: usize| s),
+                    _ => step!(gpr, "get_misses", "hashbrown", hb, gpr, miss_keys, 0xC0FFEE42, |s: usize| s),
+                }
+            }
+        }
+    }
+
+    // get_hotset
+    {
+        let pm = build_pomap_maps_from_data(&target_sizes, &hot_map_keys, &hot_map_values);
+        let sm = build_std_maps_from_data(&target_sizes, &hot_map_keys, &hot_map_values);
+        let hb = build_hashbrown_maps_from_data(&target_sizes, &hot_map_keys, &hot_map_values);
+        'hotset: for (_, &gpr) in gpr_values.iter().enumerate() {
+            let mut order = [0u8, 1, 2];
+            order.shuffle(&mut order_rng);
+            for &idx in &order {
+                check_quit_labeled!('hotset);
+                match idx {
+                    0 => step!(gpr, "get_hotset", "pomap", pm, gpr, hot_keys, 0xDEC0DE42, |s: usize| HOT_SET.min(s).max(1)),
+                    1 => step!(gpr, "get_hotset", "std_hashmap", sm, gpr, hot_keys, 0xDEC0DE42, |s: usize| HOT_SET.min(s).max(1)),
+                    _ => step!(gpr, "get_hotset", "hashbrown", hb, gpr, hot_keys, 0xDEC0DE42, |s: usize| HOT_SET.min(s).max(1)),
+                }
+            }
+        }
     }
 
     if !quit.load(Ordering::Relaxed) {
