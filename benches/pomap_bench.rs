@@ -1003,16 +1003,16 @@ fn get_graph() {
     use crossterm::{
         event::{self, Event, KeyCode},
         execute,
-        terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
+        terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
     };
     use ratatui::{
+        Terminal,
         backend::CrosstermBackend,
         layout::{Constraint, Direction, Layout},
         style::{Color, Style},
         symbols,
         text::{Line, Span},
         widgets::{Axis, Block, Borders, Chart, Dataset, Paragraph},
-        Terminal,
     };
 
     // 1..10, then 2x: 20, 40, 80, ..., 100_000
@@ -1021,10 +1021,16 @@ fn get_graph() {
     loop {
         v = (v * 2.0).ceil();
         let n = v as usize;
-        if n > 100_000 { break; }
-        if n != *gpr_values.last().unwrap() { gpr_values.push(n); }
+        if n > 100_000 {
+            break;
+        }
+        if n != *gpr_values.last().unwrap() {
+            gpr_values.push(n);
+        }
     }
-    if *gpr_values.last().unwrap() != 100_000 { gpr_values.push(100_000); }
+    if *gpr_values.last().unwrap() != 100_000 {
+        gpr_values.push(100_000);
+    }
 
     let target_sizes: Vec<usize> = vec![10, 100, 1_000, 10_000, 100_000, 1_000_000];
     let max_size = *target_sizes.last().unwrap();
@@ -1034,22 +1040,28 @@ fn get_graph() {
 
     let mut present_set: HashSet<BenchKey, BenchHasherBuilder> =
         HashSet::with_capacity_and_hasher(keys.len(), BenchHasherBuilder::default());
-    for key in &keys { present_set.insert(key.clone()); }
+    for key in &keys {
+        present_set.insert(key.clone());
+    }
     let mut miss_rng = StdRng::seed_from_u64(0xBA5E);
     let mut miss_keys: Vec<BenchKey> = Vec::with_capacity(max_size);
     while miss_keys.len() < max_size {
         let candidate = random_bench_item(&mut miss_rng);
-        if !present_set.contains(&candidate) { miss_keys.push(candidate); }
+        if !present_set.contains(&candidate) {
+            miss_keys.push(candidate);
+        }
     }
     drop(present_set);
 
     let mut hot_rng = StdRng::seed_from_u64(0xDEC0DE);
-    let hot_keys: Vec<BenchKey> = (0..HOT_SET).map(|_| random_bench_item(&mut hot_rng)).collect();
+    let hot_keys: Vec<BenchKey> = (0..HOT_SET)
+        .map(|_| random_bench_item(&mut hot_rng))
+        .collect();
     let mut hot_map_keys: Vec<BenchKey> = hot_keys.clone();
     hot_map_keys.extend(random_items(0xD00D, max_size - HOT_SET));
     let hot_map_values: Vec<BenchValue> = random_items(0xBADD, max_size);
 
-    const TARGET_TIME: Duration = Duration::from_secs(1);
+    const ROUNDS: u64 = 1;
 
     let pm_hits = build_pomap_maps_from_data(&target_sizes, &keys, &values);
     let std_hits = build_std_maps_from_data(&target_sizes, &keys, &values);
@@ -1061,8 +1073,7 @@ fn get_graph() {
     let std_hot = build_std_maps_from_data(&target_sizes, &hot_map_keys, &hot_map_values);
     let hb_hot = build_hashbrown_maps_from_data(&target_sizes, &hot_map_keys, &hot_map_values);
 
-    let mut file =
-        std::fs::File::create("get_graph.csv").expect("failed to create get_graph.csv");
+    let mut file = std::fs::File::create("get_graph.csv").expect("failed to create get_graph.csv");
     writeln!(file, "gets_per_round,bench,impl,map_size,per_get_ns").unwrap();
 
     // TUI setup — install panic hook to restore terminal on crash.
@@ -1093,93 +1104,112 @@ fn get_graph() {
         chart_data: &StdMap<(&str, &str), Vec<(f64, f64)>>,
         status: &str,
     ) {
-        let _ = terminal.draw(|f| {
-            let chunks = Layout::default()
-                .direction(Direction::Vertical)
-                .constraints([
-                    Constraint::Ratio(1, 4),
-                    Constraint::Ratio(1, 4),
-                    Constraint::Ratio(1, 4),
-                    Constraint::Min(2),
-                ])
-                .split(f.area());
+        let _ =
+            terminal.draw(|f| {
+                let chunks = Layout::default()
+                    .direction(Direction::Vertical)
+                    .constraints([
+                        Constraint::Ratio(1, 4),
+                        Constraint::Ratio(1, 4),
+                        Constraint::Ratio(1, 4),
+                        Constraint::Min(2),
+                    ])
+                    .split(f.area());
 
-            let x_labels: Vec<Span> = ["1", "10", "100", "1K", "10K", "100K"]
-                .iter().map(|s| Span::raw(*s)).collect();
+                let x_labels: Vec<Span> = ["1", "10", "100", "1K", "10K", "100K"]
+                    .iter()
+                    .map(|s| Span::raw(*s))
+                    .collect();
 
-            for (i, bench) in BENCH_NAMES.iter().enumerate() {
-                // At each x, compute average of all impls, then show each as ratio to that average
-                let all_impl_data: Vec<(&str, &Vec<(f64, f64)>)> = IMPL_COLORS.iter()
-                    .filter_map(|(name, _)| {
-                        chart_data.get(&(*bench as &str, *name as &str)).map(|d| (*name, d))
-                    }).collect();
-
-                let avg_at = |x: f64| -> f64 {
-                    let (sum, count) = all_impl_data.iter()
-                        .filter_map(|(_, d)| d.iter().find(|(dx, _)| *dx == x).map(|(_, y)| *y))
-                        .fold((0.0, 0usize), |(s, c), y| (s + y, c + 1));
-                    if count > 0 { sum / count as f64 } else { 1.0 }
-                };
-
-                let datasets: Vec<Dataset> = IMPL_COLORS.iter().filter_map(|(impl_name, color)| {
-                    let data = chart_data.get(&(*bench as &str, *impl_name as &str))?;
-                    let ratio: Vec<(f64, f64)> = data.iter()
-                        .map(|&(x, y)| (x, y / avg_at(x)))
+                for (i, bench) in BENCH_NAMES.iter().enumerate() {
+                    // At each x, compute average of all impls, then show each as ratio to that average
+                    let all_impl_data: Vec<(&str, &Vec<(f64, f64)>)> = IMPL_COLORS
+                        .iter()
+                        .filter_map(|(name, _)| {
+                            chart_data
+                                .get(&(*bench as &str, *name as &str))
+                                .map(|d| (*name, d))
+                        })
                         .collect();
-                    let ratio = Vec::leak(ratio);
-                    Some(Dataset::default()
-                        .marker(symbols::Marker::Braille)
-                        .graph_type(ratatui::widgets::GraphType::Line)
-                        .style(Style::default().fg(*color))
-                        .data(ratio))
-                }).collect();
 
-                let all_ratios = || IMPL_COLORS.iter()
-                    .filter_map(|(name, _)| chart_data.get(&(*bench as &str, *name as &str)))
-                    .flat_map(|v| v.iter().map(|&(x, y)| y / avg_at(x)));
-                let max_r = all_ratios().fold(1.0f64, f64::max);
-                let min_r = all_ratios().fold(f64::MAX, f64::min).min(1.0);
-                let margin = (max_r - min_r).max(0.01) * 0.15;
-                let y_lo = (min_r - margin).max(0.0);
-                let y_hi = max_r + margin;
+                    let avg_at = |x: f64| -> f64 {
+                        let (sum, count) = all_impl_data
+                            .iter()
+                            .filter_map(|(_, d)| d.iter().find(|(dx, _)| *dx == x).map(|(_, y)| *y))
+                            .fold((0.0, 0usize), |(s, c), y| (s + y, c + 1));
+                        if count > 0 { sum / count as f64 } else { 1.0 }
+                    };
 
-                let y_lo_s = format!("{:.2}x", y_lo);
-                let y_mid_s = format!("{:.2}x", (y_lo + y_hi) / 2.0);
-                let y_hi_s = format!("{:.2}x", y_hi);
+                    let datasets: Vec<Dataset> = IMPL_COLORS
+                        .iter()
+                        .filter_map(|(impl_name, color)| {
+                            let data = chart_data.get(&(*bench as &str, *impl_name as &str))?;
+                            let ratio: Vec<(f64, f64)> =
+                                data.iter().map(|&(x, y)| (x, y / avg_at(x))).collect();
+                            let ratio = Vec::leak(ratio);
+                            Some(
+                                Dataset::default()
+                                    .marker(symbols::Marker::Braille)
+                                    .graph_type(ratatui::widgets::GraphType::Line)
+                                    .style(Style::default().fg(*color))
+                                    .data(ratio),
+                            )
+                        })
+                        .collect();
 
-                let chart = Chart::new(datasets)
-                    .block(Block::default().title(*bench).borders(Borders::ALL))
-                    .x_axis(Axis::default()
-                        .title("gets_per_round")
-                        .bounds([0.0, 5.0])
-                        .labels(x_labels.clone()))
-                    .y_axis(Axis::default()
-                        .title("vs avg")
-                        .bounds([y_lo, y_hi])
-                        .labels(vec![Span::raw(y_lo_s), Span::raw(y_mid_s), Span::raw(y_hi_s)]));
+                    let all_ratios = || {
+                        IMPL_COLORS
+                            .iter()
+                            .filter_map(|(name, _)| {
+                                chart_data.get(&(*bench as &str, *name as &str))
+                            })
+                            .flat_map(|v| v.iter().map(|&(x, y)| y / avg_at(x)))
+                    };
+                    let max_r = all_ratios().fold(1.0f64, f64::max);
+                    let min_r = all_ratios().fold(f64::MAX, f64::min).min(1.0);
+                    let margin = (max_r - min_r).max(0.01) * 0.15;
+                    let y_lo = (min_r - margin).max(0.0);
+                    let y_hi = max_r + margin;
 
-                f.render_widget(chart, chunks[i]);
-            }
+                    let y_lo_s = format!("{:.2}x", y_lo);
+                    let y_mid_s = format!("{:.2}x", (y_lo + y_hi) / 2.0);
+                    let y_hi_s = format!("{:.2}x", y_hi);
 
-            let bottom = Layout::default()
-                .direction(Direction::Vertical)
-                .constraints([Constraint::Length(1), Constraint::Length(1)])
-                .split(chunks[3]);
+                    let chart =
+                        Chart::new(datasets)
+                            .block(Block::default().title(*bench).borders(Borders::ALL))
+                            .x_axis(
+                                Axis::default()
+                                    .title("gets_per_round")
+                                    .bounds([0.0, 5.0])
+                                    .labels(x_labels.clone()),
+                            )
+                            .y_axis(Axis::default().title("vs avg").bounds([y_lo, y_hi]).labels(
+                                vec![Span::raw(y_lo_s), Span::raw(y_mid_s), Span::raw(y_hi_s)],
+                            ));
 
-            let legend = Line::from(vec![
-                Span::styled("■ pomap", Style::default().fg(Color::Green)),
-                Span::raw("  "),
-                Span::styled("■ std_hashmap", Style::default().fg(Color::Yellow)),
-                Span::raw("  "),
-                Span::styled("■ hashbrown", Style::default().fg(Color::Red)),
-            ]);
-            f.render_widget(Paragraph::new(legend), bottom[0]);
-            f.render_widget(Paragraph::new(status), bottom[1]);
-        });
+                    f.render_widget(chart, chunks[i]);
+                }
+
+                let bottom = Layout::default()
+                    .direction(Direction::Vertical)
+                    .constraints([Constraint::Length(1), Constraint::Length(1)])
+                    .split(chunks[3]);
+
+                let legend = Line::from(vec![
+                    Span::styled("■ pomap", Style::default().fg(Color::Green)),
+                    Span::raw("  "),
+                    Span::styled("■ std_hashmap", Style::default().fg(Color::Yellow)),
+                    Span::raw("  "),
+                    Span::styled("■ hashbrown", Style::default().fg(Color::Red)),
+                ]);
+                f.render_widget(Paragraph::new(legend), bottom[0]);
+                f.render_widget(Paragraph::new(status), bottom[1]);
+            });
     }
 
-    // Calibrated timing macro. Each round clones the map (untimed) then does gpr gets (timed),
-    // so the map is cold in cache each round.
+    // Simple per-impl timing macro. Each impl runs in isolation (like criterion) so
+    // branch predictor and i-cache stay warm. GPR controls cold→hot data cache naturally.
     macro_rules! time_gets {
         ($file:expr, $chart:expr, $bench:expr, $impl_name:expr, $maps:expr,
          $gpr:expr, $lookup_keys:expr, $seed_base:expr, $key_range:expr) => {{
@@ -1188,52 +1218,32 @@ fn get_graph() {
             for &(size, ref map) in $maps.iter() {
                 let range = $key_range(size);
                 let seed = $seed_base ^ size as u64;
-                // Warmup: ~500ms of clone+get rounds
-                let warmup_end = Instant::now() + Duration::from_millis(500);
-                let mut r = 0u64;
-                while Instant::now() < warmup_end {
-                    let m = black_box(map.clone());
-                    let mut rng = StdRng::seed_from_u64(seed.wrapping_add(r));
-                    for _ in 0..$gpr {
-                        let idx = rng.random_range(0..range);
-                        black_box(m.get(&$lookup_keys[idx]));
-                    }
-                    r = r.wrapping_add(1);
-                }
-                // Pilot: 10 rounds to estimate cost
-                let pilot_start = Instant::now();
-                for pi in 0..10u64 {
-                    let m = black_box(map.clone());
-                    let mut rng = StdRng::seed_from_u64(seed.wrapping_add(r.wrapping_add(pi)));
-                    for _ in 0..$gpr {
-                        let idx = rng.random_range(0..range);
-                        black_box(m.get(&$lookup_keys[idx]));
-                    }
-                }
-                r = r.wrapping_add(10);
-                let pilot_ns = pilot_start.elapsed().as_nanos();
-                let rounds = if pilot_ns == 0 { 1_000_000usize }
-                    else { ((TARGET_TIME.as_nanos() as f64 / (pilot_ns as f64 / 10.0)) as usize).max(1) };
-                // Measure: each round clones (untimed) then does gpr gets (timed)
                 let mut total_ns = 0u128;
-                for ri in 0..rounds as u64 {
-                    let m = black_box(map.clone());
-                    let mut rng = StdRng::seed_from_u64(seed.wrapping_add(r.wrapping_add(ri)));
+                for round in 0..ROUNDS {
+                    let mut rng = StdRng::seed_from_u64(seed.wrapping_add(round));
                     let start = Instant::now();
                     for _ in 0..$gpr {
                         let idx = rng.random_range(0..range);
-                        black_box(m.get(&$lookup_keys[idx]));
+                        black_box(map.get(&$lookup_keys[idx]));
                     }
                     total_ns += start.elapsed().as_nanos();
                 }
-                let per_get = total_ns as f64 / ($gpr as u128 * rounds as u128) as f64;
-                writeln!($file, "{},{},{},{},{:.2}", $gpr, $bench, $impl_name, size, per_get).unwrap();
+                let per_get = total_ns as f64 / ($gpr as u128 * ROUNDS as u128) as f64;
+                writeln!(
+                    $file,
+                    "{},{},{},{},{:.2}",
+                    $gpr, $bench, $impl_name, size, per_get
+                )
+                .unwrap();
                 sum += per_get;
                 count += 1;
             }
             let avg = sum / count.max(1) as f64;
             let x = ($gpr as f64).log10().max(0.0);
-            $chart.entry(($bench, $impl_name)).or_insert_with(Vec::new).push((x, avg));
+            $chart
+                .entry(($bench, $impl_name))
+                .or_insert_with(Vec::new)
+                .push((x, avg));
         }};
     }
 
@@ -1248,14 +1258,18 @@ fn get_graph() {
                 if let Ok(Event::Key(key)) = event::read() {
                     if key.code == KeyCode::Char('q')
                         || (key.code == KeyCode::Char('c')
-                            && key.modifiers.contains(crossterm::event::KeyModifiers::CONTROL))
+                            && key
+                                .modifiers
+                                .contains(crossterm::event::KeyModifiers::CONTROL))
                     {
                         quit_bg.store(true, Ordering::Relaxed);
                         break;
                     }
                 }
             }
-            if quit_bg.load(Ordering::Relaxed) { break; }
+            if quit_bg.load(Ordering::Relaxed) {
+                break;
+            }
         }
     });
 
@@ -1291,24 +1305,119 @@ fn get_graph() {
         }};
     }
 
-    macro_rules! check_quit { () => { if quit.load(Ordering::Relaxed) { break; } } }
+    macro_rules! check_quit {
+        () => {
+            if quit.load(Ordering::Relaxed) {
+                break;
+            }
+        };
+    }
 
     for (gi, &gpr) in gpr_values.iter().enumerate() {
         check_quit!();
         status = format!(" gpr={:<6} [{}/{}]", gpr, gi + 1, total_gpr);
         draw_tui(&mut terminal, &chart_data, &status);
 
-        step!(gpr, "get_hits", "pomap", pm_hits, gpr, keys, 0xC01DBEEF, |s: usize| s); check_quit!();
-        step!(gpr, "get_hits", "std_hashmap", std_hits, gpr, keys, 0xC01DBEEF, |s: usize| s); check_quit!();
-        step!(gpr, "get_hits", "hashbrown", hb_hits, gpr, keys, 0xC01DBEEF, |s: usize| s); check_quit!();
+        step!(
+            gpr,
+            "get_hits",
+            "pomap",
+            pm_hits,
+            gpr,
+            keys,
+            0xC01DBEEF,
+            |s: usize| s
+        );
+        check_quit!();
+        step!(
+            gpr,
+            "get_hits",
+            "std_hashmap",
+            std_hits,
+            gpr,
+            keys,
+            0xC01DBEEF,
+            |s: usize| s
+        );
+        check_quit!();
+        step!(
+            gpr,
+            "get_hits",
+            "hashbrown",
+            hb_hits,
+            gpr,
+            keys,
+            0xC01DBEEF,
+            |s: usize| s
+        );
+        check_quit!();
 
-        step!(gpr, "get_misses", "pomap", pm_misses, gpr, miss_keys, 0xC0FFEE42, |s: usize| s); check_quit!();
-        step!(gpr, "get_misses", "std_hashmap", std_misses, gpr, miss_keys, 0xC0FFEE42, |s: usize| s); check_quit!();
-        step!(gpr, "get_misses", "hashbrown", hb_misses, gpr, miss_keys, 0xC0FFEE42, |s: usize| s); check_quit!();
+        step!(
+            gpr,
+            "get_misses",
+            "pomap",
+            pm_misses,
+            gpr,
+            miss_keys,
+            0xC0FFEE42,
+            |s: usize| s
+        );
+        check_quit!();
+        step!(
+            gpr,
+            "get_misses",
+            "std_hashmap",
+            std_misses,
+            gpr,
+            miss_keys,
+            0xC0FFEE42,
+            |s: usize| s
+        );
+        check_quit!();
+        step!(
+            gpr,
+            "get_misses",
+            "hashbrown",
+            hb_misses,
+            gpr,
+            miss_keys,
+            0xC0FFEE42,
+            |s: usize| s
+        );
+        check_quit!();
 
-        step!(gpr, "get_hotset", "pomap", pm_hot, gpr, hot_keys, 0xDEC0DE42, |s: usize| HOT_SET.min(s).max(1)); check_quit!();
-        step!(gpr, "get_hotset", "std_hashmap", std_hot, gpr, hot_keys, 0xDEC0DE42, |s: usize| HOT_SET.min(s).max(1)); check_quit!();
-        step!(gpr, "get_hotset", "hashbrown", hb_hot, gpr, hot_keys, 0xDEC0DE42, |s: usize| HOT_SET.min(s).max(1));
+        step!(
+            gpr,
+            "get_hotset",
+            "pomap",
+            pm_hot,
+            gpr,
+            hot_keys,
+            0xDEC0DE42,
+            |s: usize| HOT_SET.min(s).max(1)
+        );
+        check_quit!();
+        step!(
+            gpr,
+            "get_hotset",
+            "std_hashmap",
+            std_hot,
+            gpr,
+            hot_keys,
+            0xDEC0DE42,
+            |s: usize| HOT_SET.min(s).max(1)
+        );
+        check_quit!();
+        step!(
+            gpr,
+            "get_hotset",
+            "hashbrown",
+            hb_hot,
+            gpr,
+            hot_keys,
+            0xDEC0DE42,
+            |s: usize| HOT_SET.min(s).max(1)
+        );
     }
 
     if !quit.load(Ordering::Relaxed) {
