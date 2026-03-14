@@ -15,6 +15,7 @@ default = ["std"]
 std = ["ahash/std", "ahash/runtime-rng"]
 resize-logging = []
 bench-string = []
+dots = []
 
 [dependencies]
 ahash = { version = "0.8", default-features = false }

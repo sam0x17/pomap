@@ -197,7 +197,11 @@ fn draw_tui(
                 Some(
                     Dataset::default()
                         .marker(symbols::Marker::Braille)
-                        .graph_type(ratatui::widgets::GraphType::Line)
+                        .graph_type(if cfg!(feature = "dots") {
+                            ratatui::widgets::GraphType::Scatter
+                        } else {
+                            ratatui::widgets::GraphType::Line
+                        })
                         .style(Style::default().fg(*color))
                         .data(ratio),
                 )
