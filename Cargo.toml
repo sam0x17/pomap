@@ -43,3 +43,11 @@ harness = false
 [[bench]]
 name = "gets_graph_bench"
 harness = false
+
+[[bench]]
+name = "insert_graph_bench"
+harness = false
+
+[[bench]]
+name = "insert_hot_graph_bench"
+harness = false
