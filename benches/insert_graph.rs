@@ -116,7 +116,7 @@ fn random_items(seed: u64, count: usize) -> Vec<BenchType> {
 }
 
 const MAX_INSERT_SIZE: usize = 10_000_000;
-const NUM_INTERMEDIATE_ROUNDS: usize = 5;
+const NUM_INTERMEDIATE_ROUNDS: usize = 60;
 
 fn insert_target_sizes() -> Vec<usize> {
     let mut power_targets = Vec::new();
@@ -170,30 +170,11 @@ fn draw_tui(
             .map(|s| Span::raw(*s))
             .collect();
 
-        let all_impl_data: Vec<(&str, &Vec<(f64, f64)>)> = IMPL_COLORS
-            .iter()
-            .filter_map(|(name, _)| chart_data.get(*name).map(|d| (*name, d)))
-            .collect();
-
-        let avg_at = |x: f64| -> f64 {
-            let (sum, count) = all_impl_data
-                .iter()
-                .filter_map(|(_, d)| d.iter().find(|(dx, _)| *dx == x).map(|(_, y)| *y))
-                .fold((0.0, 0usize), |(s, c), y| (s + y, c + 1));
-            if count > 0 {
-                sum / count as f64
-            } else {
-                1.0
-            }
-        };
-
         let datasets: Vec<Dataset> = IMPL_COLORS
             .iter()
             .filter_map(|(impl_name, color)| {
                 let data = chart_data.get(*impl_name)?;
-                let ratio: Vec<(f64, f64)> =
-                    data.iter().map(|&(x, y)| (x, y / avg_at(x))).collect();
-                let ratio = Vec::leak(ratio);
+                let leaked = Vec::leak(data.clone());
                 Some(
                     Dataset::default()
                         .marker(symbols::Marker::Braille)
@@ -203,26 +184,26 @@ fn draw_tui(
                             ratatui::widgets::GraphType::Line
                         })
                         .style(Style::default().fg(*color))
-                        .data(ratio),
+                        .data(leaked),
                 )
             })
             .collect();
 
-        let all_ratios = || {
+        let all_ys = || {
             IMPL_COLORS
                 .iter()
                 .filter_map(|(name, _)| chart_data.get(*name))
-                .flat_map(|v| v.iter().map(|&(x, y)| y / avg_at(x)))
+                .flat_map(|v| v.iter().map(|&(_, y)| y))
         };
-        let max_r = all_ratios().fold(1.0f64, f64::max);
-        let min_r = all_ratios().fold(f64::MAX, f64::min).min(1.0);
-        let margin = (max_r - min_r).max(0.01) * 0.15;
-        let y_lo = (min_r - margin).max(0.0);
-        let y_hi = max_r + margin;
+        let max_y = all_ys().fold(0.0f64, f64::max);
+        let min_y = all_ys().fold(f64::MAX, f64::min);
+        let margin = (max_y - min_y).max(0.01) * 0.1;
+        let y_lo = (min_y - margin).max(0.0);
+        let y_hi = max_y + margin;
 
-        let y_lo_s = format!("{:.2}x", y_lo);
-        let y_mid_s = format!("{:.2}x", (y_lo + y_hi) / 2.0);
-        let y_hi_s = format!("{:.2}x", y_hi);
+        let y_lo_s = format!("{:.0}ns", y_lo);
+        let y_mid_s = format!("{:.0}ns", (y_lo + y_hi) / 2.0);
+        let y_hi_s = format!("{:.0}ns", y_hi);
 
         let chart = Chart::new(datasets)
             .block(
@@ -237,11 +218,14 @@ fn draw_tui(
                     .labels(x_labels),
             )
             .y_axis(
-                Axis::default().title("vs avg").bounds([y_lo, y_hi]).labels(vec![
-                    Span::raw(y_lo_s),
-                    Span::raw(y_mid_s),
-                    Span::raw(y_hi_s),
-                ]),
+                Axis::default()
+                    .title("ns/insert")
+                    .bounds([y_lo, y_hi])
+                    .labels(vec![
+                        Span::raw(y_lo_s),
+                        Span::raw(y_mid_s),
+                        Span::raw(y_hi_s),
+                    ]),
             );
 
         f.render_widget(chart, chunks[0]);
@@ -274,7 +258,7 @@ fn main() {
     let keys: Vec<BenchKey> = random_items(0xA11CE, max_size);
     let values: Vec<BenchValue> = random_items(0xFACE, max_size);
 
-    const ROUNDS: u64 = 20;
+    const ROUNDS: u64 = 2;
 
     let mut file =
         std::fs::File::create("insert_graph.csv").expect("failed to create insert_graph.csv");
