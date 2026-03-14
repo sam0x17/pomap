@@ -373,7 +373,7 @@ impl<K: Key, V: Value, H: BuildHasher> PoMap<K, V, H> {
     #[inline(always)]
     pub fn _get_with_hash(&self, hash: u64, key: &K) -> Option<&V> {
         let ideal_slot = self.meta.ideal_slot(hash);
-        let scan_end = ideal_slot + self.meta.index_bits;
+        let scan_end = ideal_slot + self.max_scan();
 
         // SAFETY: ideal_slot..scan_end is always in-bounds for the backing allocation.
         let hashes_ptr = self.slots.hashes_ptr();
@@ -398,7 +398,7 @@ impl<K: Key, V: Value, H: BuildHasher> PoMap<K, V, H> {
     #[inline(always)]
     fn _get_key_value_with_hash(&self, hash: u64, key: &K) -> Option<(&K, &V)> {
         let ideal_slot = self.meta.ideal_slot(hash);
-        let scan_end = ideal_slot + self.meta.index_bits;
+        let scan_end = ideal_slot + self.max_scan();
 
         // SAFETY: ideal_slot..scan_end is always in-bounds for the backing allocation.
         let hashes_ptr = self.slots.hashes_ptr();
@@ -427,7 +427,7 @@ impl<K: Key, V: Value, H: BuildHasher> PoMap<K, V, H> {
         F: FnMut(&K) -> bool,
     {
         let ideal_slot = self.meta.ideal_slot(hash);
-        let scan_end = ideal_slot + self.meta.index_bits;
+        let scan_end = ideal_slot + self.max_scan();
 
         let hashes_ptr = self.slots.hashes_ptr();
         let entries_ptr = self.slots.entries_ptr();
@@ -524,7 +524,7 @@ impl<K: Key, V: Value, H: BuildHasher> PoMap<K, V, H> {
     #[inline(always)]
     fn _get_mut_with_hash(&mut self, hash: u64, key: &K) -> Option<&mut V> {
         let ideal_slot = self.meta.ideal_slot(hash);
-        let scan_end = ideal_slot + self.meta.index_bits;
+        let scan_end = ideal_slot + self.max_scan();
 
         // SAFETY: ideal_slot..scan_end is always in-bounds for the backing allocation.
         let hashes_ptr = self.slots.hashes_ptr();
@@ -636,7 +636,7 @@ impl<K: Key, V: Value, H: BuildHasher> PoMap<K, V, H> {
     #[inline(always)]
     fn find_entry_location(&self, hash: u64, key: &K) -> EntryLocation {
         let ideal_slot = self.meta.ideal_slot(hash);
-        let scan_end = ideal_slot + self.meta.index_bits;
+        let scan_end = ideal_slot + self.max_scan();
 
         // SAFETY: ideal_slot..scan_end is always in-bounds for the backing allocation.
         let hashes_ptr = self.slots.hashes_ptr();
@@ -737,7 +737,7 @@ impl<K: Key, V: Value, H: BuildHasher> PoMap<K, V, H> {
     fn _insert_entry_with_hash(&mut self, hash: u64, key: K, value: V) -> InsertResult<V> {
         loop {
             let ideal_slot = self.meta.ideal_slot(hash);
-            let scan_end = ideal_slot + self.meta.index_bits;
+            let scan_end = ideal_slot + self.max_scan();
 
             // SAFETY: ideal_slot..scan_end is always in-bounds for the backing allocation.
             let hashes_ptr = self.slots.hashes_ptr();
@@ -847,8 +847,8 @@ impl<K: Key, V: Value, H: BuildHasher> PoMap<K, V, H> {
                 // O(index_bits) = O(log N), keeping insert worst-case O(log N) rather than
                 // O(N). In practice the cascade terminates well within this limit at the
                 // first vacant slot or pinned entry.
-                let ideal_slot_x = scan_end - self.meta.index_bits;
-                let cascade_limit = scan_end + 2 * self.meta.index_bits;
+                let ideal_slot_x = scan_end - self.max_scan();
+                let cascade_limit = scan_end + 2 * self.max_scan();
                 let last_hash = unsafe { *hashes_ptr.add(scan_end - 1) };
                 let last_ideal = (last_hash >> self.meta.index_shift) as usize;
 
@@ -865,7 +865,7 @@ impl<K: Key, V: Value, H: BuildHasher> PoMap<K, V, H> {
                         // Entry at v must be able to shift right to v+1.
                         // Condition: v+1 < ideal_slot(v_hash) + index_bits
                         let v_ideal = (v_hash >> self.meta.index_shift) as usize;
-                        if v + 1 >= v_ideal + self.meta.index_bits {
+                        if v + 1 >= v_ideal + self.max_scan() {
                             cascade_ok = false; // entry pinned to last valid position
                             break;
                         }
@@ -908,7 +908,7 @@ impl<K: Key, V: Value, H: BuildHasher> PoMap<K, V, H> {
             let old_cap = self.slots.capacity();
             #[cfg(feature = "resize-logging")]
             let load_factor = self.len as f64 / old_cap as f64;
-            let ideal_range = self.slots.capacity() - self.meta.index_bits;
+            let ideal_range = self.slots.capacity() - self.max_scan();
             let target_capacity = ideal_range.saturating_mul(GROWTH_FACTOR);
             self.reserve_for_capacity(target_capacity);
             #[cfg(feature = "resize-logging")]
@@ -1044,7 +1044,7 @@ impl<K: Key, V: Value, H: BuildHasher> PoMap<K, V, H> {
     #[inline(always)]
     fn _remove_with_hash(&mut self, hash: u64, key: &K) -> Option<V> {
         let ideal_slot = self.meta.ideal_slot(hash);
-        let scan_end = ideal_slot + self.meta.index_bits;
+        let scan_end = ideal_slot + self.max_scan();
 
         // SAFETY: ideal_slot..scan_end is always in-bounds for the backing allocation.
         let hashes_ptr = self.slots.hashes_ptr();
@@ -1110,7 +1110,7 @@ impl<K: Key, V: Value, H: BuildHasher> PoMap<K, V, H> {
     #[inline(always)]
     fn _remove_entry_with_hash(&mut self, hash: u64, key: &K) -> Option<(K, V)> {
         let ideal_slot = self.meta.ideal_slot(hash);
-        let scan_end = ideal_slot + self.meta.index_bits;
+        let scan_end = ideal_slot + self.max_scan();
 
         // SAFETY: ideal_slot..scan_end is always in-bounds for the backing allocation.
         let hashes_ptr = self.slots.hashes_ptr();
