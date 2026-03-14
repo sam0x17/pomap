@@ -1,5 +1,5 @@
 #!/bin/sh
-cargo bench --color=always 2>&1 \
+cargo bench --bench pomap_bench --color=always 2>&1 \
   | grep --line-buffered -E 'rank' \
   | grep --line-buffered 'pomap' \
   | awk '{
