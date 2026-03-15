@@ -225,11 +225,7 @@ fn draw_tui(
                     .iter()
                     .filter_map(|(_, d)| d.iter().find(|(dx, _)| *dx == x).map(|(_, y)| *y))
                     .fold((0.0, 0usize), |(s, c), y| (s + y, c + 1));
-                if count > 0 {
-                    sum / count as f64
-                } else {
-                    1.0
-                }
+                if count > 0 { sum / count as f64 } else { 1.0 }
             };
 
             let datasets: Vec<Dataset> = IMPL_COLORS
@@ -278,11 +274,14 @@ fn draw_tui(
                         .labels(x_labels.clone()),
                 )
                 .y_axis(
-                    Axis::default().title("vs avg").bounds([y_lo, y_hi]).labels(vec![
-                        Span::raw(y_lo_s),
-                        Span::raw(y_mid_s),
-                        Span::raw(y_hi_s),
-                    ]),
+                    Axis::default()
+                        .title("vs avg")
+                        .bounds([y_lo, y_hi])
+                        .labels(vec![
+                            Span::raw(y_lo_s),
+                            Span::raw(y_mid_s),
+                            Span::raw(y_hi_s),
+                        ]),
                 );
 
             f.render_widget(chart, chunks[i]);
@@ -490,9 +489,36 @@ fn main() {
             for &idx in &order {
                 check_quit_labeled!('hits);
                 match idx {
-                    0 => step!(gpr, "get_hits", "pomap", pm, gpr, keys, 0xC01DBEEF, |s: usize| s),
-                    1 => step!(gpr, "get_hits", "std_hashmap", sm, gpr, keys, 0xC01DBEEF, |s: usize| s),
-                    _ => step!(gpr, "get_hits", "hashbrown", hb, gpr, keys, 0xC01DBEEF, |s: usize| s),
+                    0 => step!(
+                        gpr,
+                        "get_hits",
+                        "pomap",
+                        pm,
+                        gpr,
+                        keys,
+                        0xC01DBEEF,
+                        |s: usize| s
+                    ),
+                    1 => step!(
+                        gpr,
+                        "get_hits",
+                        "std_hashmap",
+                        sm,
+                        gpr,
+                        keys,
+                        0xC01DBEEF,
+                        |s: usize| s
+                    ),
+                    _ => step!(
+                        gpr,
+                        "get_hits",
+                        "hashbrown",
+                        hb,
+                        gpr,
+                        keys,
+                        0xC01DBEEF,
+                        |s: usize| s
+                    ),
                 }
             }
         }
@@ -509,9 +535,36 @@ fn main() {
             for &idx in &order {
                 check_quit_labeled!('misses);
                 match idx {
-                    0 => step!(gpr, "get_misses", "pomap", pm, gpr, miss_keys, 0xC0FFEE42, |s: usize| s),
-                    1 => step!(gpr, "get_misses", "std_hashmap", sm, gpr, miss_keys, 0xC0FFEE42, |s: usize| s),
-                    _ => step!(gpr, "get_misses", "hashbrown", hb, gpr, miss_keys, 0xC0FFEE42, |s: usize| s),
+                    0 => step!(
+                        gpr,
+                        "get_misses",
+                        "pomap",
+                        pm,
+                        gpr,
+                        miss_keys,
+                        0xC0FFEE42,
+                        |s: usize| s
+                    ),
+                    1 => step!(
+                        gpr,
+                        "get_misses",
+                        "std_hashmap",
+                        sm,
+                        gpr,
+                        miss_keys,
+                        0xC0FFEE42,
+                        |s: usize| s
+                    ),
+                    _ => step!(
+                        gpr,
+                        "get_misses",
+                        "hashbrown",
+                        hb,
+                        gpr,
+                        miss_keys,
+                        0xC0FFEE42,
+                        |s: usize| s
+                    ),
                 }
             }
         }
@@ -528,9 +581,36 @@ fn main() {
             for &idx in &order {
                 check_quit_labeled!('hotset);
                 match idx {
-                    0 => step!(gpr, "get_hotset", "pomap", pm, gpr, hot_keys, 0xDEC0DE42, |s: usize| HOT_SET.min(s).max(1)),
-                    1 => step!(gpr, "get_hotset", "std_hashmap", sm, gpr, hot_keys, 0xDEC0DE42, |s: usize| HOT_SET.min(s).max(1)),
-                    _ => step!(gpr, "get_hotset", "hashbrown", hb, gpr, hot_keys, 0xDEC0DE42, |s: usize| HOT_SET.min(s).max(1)),
+                    0 => step!(
+                        gpr,
+                        "get_hotset",
+                        "pomap",
+                        pm,
+                        gpr,
+                        hot_keys,
+                        0xDEC0DE42,
+                        |s: usize| HOT_SET.min(s).max(1)
+                    ),
+                    1 => step!(
+                        gpr,
+                        "get_hotset",
+                        "std_hashmap",
+                        sm,
+                        gpr,
+                        hot_keys,
+                        0xDEC0DE42,
+                        |s: usize| HOT_SET.min(s).max(1)
+                    ),
+                    _ => step!(
+                        gpr,
+                        "get_hotset",
+                        "hashbrown",
+                        hb,
+                        gpr,
+                        hot_keys,
+                        0xDEC0DE42,
+                        |s: usize| HOT_SET.min(s).max(1)
+                    ),
                 }
             }
         }

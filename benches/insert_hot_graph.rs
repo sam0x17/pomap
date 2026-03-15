@@ -180,11 +180,7 @@ fn draw_tui(
                 .iter()
                 .filter_map(|(_, d)| d.iter().find(|(dx, _)| *dx == x).map(|(_, y)| *y))
                 .fold((0.0, 0usize), |(s, c), y| (s + y, c + 1));
-            if count > 0 {
-                sum / count as f64
-            } else {
-                1.0
-            }
+            if count > 0 { sum / count as f64 } else { 1.0 }
         };
 
         let datasets: Vec<Dataset> = IMPL_COLORS
@@ -225,11 +221,7 @@ fn draw_tui(
         let y_hi_s = format!("{:.2}x", y_hi);
 
         let chart = Chart::new(datasets)
-            .block(
-                Block::default()
-                    .title("insert_hot")
-                    .borders(Borders::ALL),
-            )
+            .block(Block::default().title("insert_hot").borders(Borders::ALL))
             .x_axis(
                 Axis::default()
                     .title("map_size")
@@ -237,11 +229,14 @@ fn draw_tui(
                     .labels(x_labels),
             )
             .y_axis(
-                Axis::default().title("vs avg").bounds([y_lo, y_hi]).labels(vec![
-                    Span::raw(y_lo_s),
-                    Span::raw(y_mid_s),
-                    Span::raw(y_hi_s),
-                ]),
+                Axis::default()
+                    .title("vs avg")
+                    .bounds([y_lo, y_hi])
+                    .labels(vec![
+                        Span::raw(y_lo_s),
+                        Span::raw(y_mid_s),
+                        Span::raw(y_hi_s),
+                    ]),
             );
 
         f.render_widget(chart, chunks[0]);
@@ -276,8 +271,8 @@ fn main() {
 
     const ROUNDS: u64 = 20;
 
-    let mut file =
-        std::fs::File::create("insert_hot_graph.csv").expect("failed to create insert_hot_graph.csv");
+    let mut file = std::fs::File::create("insert_hot_graph.csv")
+        .expect("failed to create insert_hot_graph.csv");
     writeln!(file, "map_size,impl,per_insert_ns").unwrap();
 
     // TUI setup
@@ -329,22 +324,24 @@ fn main() {
     // Background thread for quit on 'q' or Ctrl+C.
     let quit = Arc::new(AtomicBool::new(false));
     let quit_bg = quit.clone();
-    let _input_thread = std::thread::spawn(move || loop {
-        if event::poll(Duration::from_millis(50)).unwrap_or(false) {
-            if let Ok(Event::Key(key)) = event::read() {
-                if key.code == KeyCode::Char('q')
-                    || (key.code == KeyCode::Char('c')
-                        && key
-                            .modifiers
-                            .contains(crossterm::event::KeyModifiers::CONTROL))
-                {
-                    quit_bg.store(true, Ordering::Relaxed);
-                    break;
+    let _input_thread = std::thread::spawn(move || {
+        loop {
+            if event::poll(Duration::from_millis(50)).unwrap_or(false) {
+                if let Ok(Event::Key(key)) = event::read() {
+                    if key.code == KeyCode::Char('q')
+                        || (key.code == KeyCode::Char('c')
+                            && key
+                                .modifiers
+                                .contains(crossterm::event::KeyModifiers::CONTROL))
+                    {
+                        quit_bg.store(true, Ordering::Relaxed);
+                        break;
+                    }
                 }
             }
-        }
-        if quit_bg.load(Ordering::Relaxed) {
-            break;
+            if quit_bg.load(Ordering::Relaxed) {
+                break;
+            }
         }
     });
 
@@ -387,7 +384,11 @@ fn main() {
             };
             status = format!(
                 " size={:<6} | {} | {}/{} | ETA {} | 'q' or Ctrl+C to stop",
-                size, impl_name, completed_steps + 1, total_steps, eta
+                size,
+                impl_name,
+                completed_steps + 1,
+                total_steps,
+                eta
             );
             draw_tui(&mut terminal, &chart_data, &status);
 
@@ -414,11 +415,7 @@ fn main() {
     }
 
     if !quit.load(Ordering::Relaxed) {
-        draw_tui(
-            &mut terminal,
-            &chart_data,
-            " Done! Press any key to exit.",
-        );
+        draw_tui(&mut terminal, &chart_data, " Done! Press any key to exit.");
         while !quit.load(Ordering::Relaxed) {
             std::thread::sleep(Duration::from_millis(50));
         }

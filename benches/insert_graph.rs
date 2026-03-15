@@ -298,8 +298,7 @@ fn main() {
                 }
                 total_ns += start.elapsed().as_nanos();
             }
-            let per_insert =
-                total_ns as f64 / (total_inserts_per_round as f64 * ROUNDS as f64);
+            let per_insert = total_ns as f64 / (total_inserts_per_round as f64 * ROUNDS as f64);
             writeln!(file, "{},{},{:.2}", size, $impl_name, per_insert).unwrap();
             let x = (size as f64).log10();
             chart_data
@@ -312,22 +311,24 @@ fn main() {
     // Background thread for quit on 'q' or Ctrl+C.
     let quit = Arc::new(AtomicBool::new(false));
     let quit_bg = quit.clone();
-    let _input_thread = std::thread::spawn(move || loop {
-        if event::poll(Duration::from_millis(50)).unwrap_or(false) {
-            if let Ok(Event::Key(key)) = event::read() {
-                if key.code == KeyCode::Char('q')
-                    || (key.code == KeyCode::Char('c')
-                        && key
-                            .modifiers
-                            .contains(crossterm::event::KeyModifiers::CONTROL))
-                {
-                    quit_bg.store(true, Ordering::Relaxed);
-                    break;
+    let _input_thread = std::thread::spawn(move || {
+        loop {
+            if event::poll(Duration::from_millis(50)).unwrap_or(false) {
+                if let Ok(Event::Key(key)) = event::read() {
+                    if key.code == KeyCode::Char('q')
+                        || (key.code == KeyCode::Char('c')
+                            && key
+                                .modifiers
+                                .contains(crossterm::event::KeyModifiers::CONTROL))
+                    {
+                        quit_bg.store(true, Ordering::Relaxed);
+                        break;
+                    }
                 }
             }
-        }
-        if quit_bg.load(Ordering::Relaxed) {
-            break;
+            if quit_bg.load(Ordering::Relaxed) {
+                break;
+            }
         }
     });
 
@@ -370,7 +371,11 @@ fn main() {
             };
             status = format!(
                 " size={:<6} | {} | {}/{} | ETA {} | 'q' or Ctrl+C to stop",
-                size, impl_name, completed_steps + 1, total_steps, eta
+                size,
+                impl_name,
+                completed_steps + 1,
+                total_steps,
+                eta
             );
             draw_tui(&mut terminal, &chart_data, &status);
 
@@ -397,11 +402,7 @@ fn main() {
     }
 
     if !quit.load(Ordering::Relaxed) {
-        draw_tui(
-            &mut terminal,
-            &chart_data,
-            " Done! Press any key to exit.",
-        );
+        draw_tui(&mut terminal, &chart_data, " Done! Press any key to exit.");
         while !quit.load(Ordering::Relaxed) {
             std::thread::sleep(Duration::from_millis(50));
         }

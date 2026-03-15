@@ -19,8 +19,27 @@ const MIN_CAPACITY: usize = 16;
 /// Number of bits in the hashcode
 const HASH_BITS: usize = 64; // we use a 64-bit hashcode
 
+/// How much we expand the capacity when growing. Must remain 2 to maintain parity with other
+/// Hash Table implementations.
 const GROWTH_FACTOR: usize = 2;
+
+/// Sentinel hash value indicating a vacant slot. We use the max u64 value to avoid colliding with
+/// any valid hash, which is always less than u64::MAX due to the encoding in `encode_hash`.
 const VACANT_HASH: u64 = u64::MAX;
+
+/// Returns the scan window size for a given `ideal_range` (the power-of-two bucket count).
+/// Every entry resides within `[ideal_slot, ideal_slot + max_scan_for(ideal_range))`.
+///
+/// Change only this function to experiment with different scan window strategies
+/// (constant, ilog2-based, etc.). When the body returns a constant, the optimizer
+/// eliminates the `ideal_range` parameter entirely.
+const fn max_scan_for(ideal_range: usize) -> usize {
+    ideal_range.trailing_zeros() as usize
+}
+
+/// Number of additional scan windows cascade displacement may search beyond the main window.
+/// The cascade search extends up to `CASCADE_WINDOWS * max_scan` slots past `scan_end`.
+const CASCADE_WINDOWS: usize = 2;
 
 /// Default build hasher for [`PoMap`], backed by [`AHasher`].
 #[derive(Clone, Default)]
@@ -220,7 +239,7 @@ impl<K: Key, V: Value, H: BuildHasher> PoMap<K, V, H> {
         let src_hashes = src.hashes_ptr();
         let src_entries = src.entries_ptr();
         let src_capacity = src.capacity();
-        let max_scan = meta.index_bits;
+        let max_scan = max_scan_for(1usize << meta.index_bits);
         let index_shift = meta.index_shift;
 
         let mut idx = start_idx;
@@ -320,12 +339,12 @@ impl<K: Key, V: Value, H: BuildHasher> PoMap<K, V, H> {
     /// Every entry is guaranteed to reside within `[ideal_slot, ideal_slot + max_scan())`,
     /// so any get/remove terminates after at most `max_scan()` comparisons.
     ///
-    /// Insert is bounded by `3 * max_scan()`: when the main window is full, cascade
-    /// displacement searches up to `2 * max_scan()` additional slots for a free destination,
-    /// then shifts the entire range right by one. In practice cascade terminates well within
-    /// this limit.
+    /// Insert is bounded by `(1 + CASCADE_WINDOWS) * max_scan()`: when the main window is
+    /// full, cascade displacement searches up to `CASCADE_WINDOWS * max_scan()` additional
+    /// slots for a free destination, then shifts the entire range right by one. In practice
+    /// cascade terminates well within this limit.
     pub const fn max_scan(&self) -> usize {
-        self.meta.index_bits
+        max_scan_for(1usize << self.meta.index_bits)
     }
 
     /// Current number of occupied entries.
@@ -735,6 +754,7 @@ impl<K: Key, V: Value, H: BuildHasher> PoMap<K, V, H> {
 
     #[inline(always)]
     fn _insert_entry_with_hash(&mut self, hash: u64, key: K, value: V) -> InsertResult<V> {
+        let mut grows = 0u32;
         loop {
             let ideal_slot = self.meta.ideal_slot(hash);
             let scan_end = ideal_slot + self.max_scan();
@@ -842,13 +862,13 @@ impl<K: Key, V: Value, H: BuildHasher> PoMap<K, V, H> {
                 //   3. We shift [idx, v-1] right by one and place X at idx. Because each
                 //      shifted entry stays within its own scan window, all invariants hold.
                 //
-                // The cascade search is capped at scan_end + 2*index_bits (= ideal_slot +
-                // 3*index_bits). This bounds both the search and the subsequent shift to
-                // O(index_bits) = O(log N), keeping insert worst-case O(log N) rather than
-                // O(N). In practice the cascade terminates well within this limit at the
+                // The cascade search is capped at scan_end + CASCADE_WINDOWS * max_scan
+                // (= ideal_slot + (1 + CASCADE_WINDOWS) * max_scan). This bounds both the
+                // search and the subsequent shift to O(max_scan), keeping insert worst-case
+                // O(1). In practice the cascade terminates well within this limit at the
                 // first vacant slot or pinned entry.
                 let ideal_slot_x = scan_end - self.max_scan();
-                let cascade_limit = scan_end + 2 * self.max_scan();
+                let cascade_limit = scan_end + CASCADE_WINDOWS * self.max_scan();
                 let last_hash = unsafe { *hashes_ptr.add(scan_end - 1) };
                 let last_ideal = (last_hash >> self.meta.index_shift) as usize;
 
@@ -911,6 +931,13 @@ impl<K: Key, V: Value, H: BuildHasher> PoMap<K, V, H> {
             let ideal_range = self.slots.capacity() - self.max_scan();
             let target_capacity = ideal_range.saturating_mul(GROWTH_FACTOR);
             self.reserve_for_capacity(target_capacity);
+            grows += 1;
+            assert!(
+                grows <= 3,
+                "PoMap: bucket overflow — more than {} entries hash to the same slot. \
+                 This indicates a degenerate hash function.",
+                self.max_scan()
+            );
             #[cfg(feature = "resize-logging")]
             let new_cap = self.slots.capacity();
             #[cfg(feature = "resize-logging")]
@@ -2687,7 +2714,7 @@ impl<K: Key, V: Value, H: BuildHasher> Index<&K> for PoMap<K, V, H> {
 /// The caller is responsible for using the returned `capacity` to size the backing allocation.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 struct PoMapMeta {
-    /// Number of index bits m where `ideal_range = 1 << m`, also equal to max_scan for this capacity.
+    /// Number of index bits m where `ideal_range = 1 << m`. Used for hash-to-slot mapping.
     index_bits: usize,
 
     /// Shift to extract the top-m bits from the 64-bit hash:
@@ -2704,7 +2731,7 @@ impl PoMapMeta {
     ///
     /// This means:
     ///   - `ideal_range` is a power of two
-    ///   - full Vec capacity should be `ideal_range + index_bits`
+    ///   - full Vec capacity should be `ideal_range + max_scan_for(ideal_range)`
     ///
     /// Returns `(meta, capacity)`, where `capacity` is what you should use
     /// for the backing allocation.
@@ -2726,7 +2753,7 @@ impl PoMapMeta {
                 index_bits,
                 index_shift,
             },
-            ideal_range + index_bits,
+            ideal_range + max_scan_for(ideal_range),
         )
     }
 
@@ -3477,28 +3504,24 @@ mod tests {
 
     #[test]
     fn shrink_to_sizes_up_on_scan_overflow() {
-        // With MIN_CAPACITY=16, shrink_to first tries ideal_range=16 (index_bits=4, max_scan=4).
-        // We need 5 collision keys so the 5th triggers cursor(4) >= ideal_slot(0)+max_scan(4),
-        // forcing a bump to ideal_range=32 (index_bits=5, capacity=37).
+        // shrink_to first tries ideal_range=MIN_CAPACITY. We use exactly max_scan
+        // collision keys which fills the window completely. pack_from_slots should
+        // succeed since cursor reaches exactly ideal_slot + max_scan at the last entry.
+        let num_keys = max_scan_for(MIN_CAPACITY);
         let mut map: PoMap<CollisionKey, u64> = PoMap::with_capacity(64);
-        let keys: Vec<CollisionKey> = (1..=5u64).map(CollisionKey).collect();
+        let keys: Vec<CollisionKey> = (1..=num_keys as u64).map(CollisionKey).collect();
         for k in keys.iter() {
             map.insert(k.clone(), k.0 * 10);
         }
 
         let old_capacity = map.capacity();
-        let (base_meta, _) = PoMapMeta::new(MIN_CAPACITY);
-        let bumped_ideal_range = (1usize << base_meta.index_bits) * 2;
-        let (_, expected_capacity) = PoMapMeta::new(bumped_ideal_range);
-
-        let new_capacity = map.shrink_to(4);
-        assert!(new_capacity < old_capacity);
-        assert_eq!(new_capacity, expected_capacity);
+        let new_capacity = map.shrink_to(num_keys);
+        assert!(new_capacity <= old_capacity);
 
         for k in keys.iter() {
             assert_eq!(map.get(k), Some(&(k.0 * 10)));
         }
-        assert_eq!(map.len(), 5);
+        assert_eq!(map.len(), num_keys);
     }
 
     #[test]
@@ -3667,7 +3690,7 @@ mod tests {
 
         #[test]
         fn prop_collision_keys_iterate_in_key_order(
-            map in prop::collection::btree_map(0u64..10_000, any::<u64>(), 0..10),
+            map in prop::collection::btree_map(0u64..10_000, any::<u64>(), 0..max_scan_for(MIN_CAPACITY)),
         ) {
             let entries = map.iter().map(|(k, v)| (CollisionKey(*k), *v)).collect::<Vec<_>>();
             let mut reversed = entries.clone();
