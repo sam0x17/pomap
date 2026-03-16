@@ -52,3 +52,7 @@ harness = false
 [[bench]]
 name = "insert_hot_graph"
 harness = false
+
+[[bench]]
+name = "scan_depth"
+harness = false

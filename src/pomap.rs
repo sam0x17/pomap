@@ -41,7 +41,7 @@ const fn max_scan_for(ideal_range: usize) -> usize {
 
 /// Number of additional scan windows cascade displacement may search beyond the main window.
 /// The cascade search extends up to `CASCADE_WINDOWS * max_scan` slots past `scan_end`.
-const CASCADE_WINDOWS: usize = 2;
+const CASCADE_WINDOWS: usize = 1;
 
 /// Default build hasher for [`PoMap`], backed by [`AHasher`].
 #[derive(Clone, Default)]
@@ -1353,6 +1353,115 @@ impl<K: Key, V: Value, H: BuildHasher> PoMap<K, V, H> {
     #[inline]
     pub fn shrink_to_fit(&mut self) -> usize {
         self.shrink_to(self.len)
+    }
+
+    /// Returns `(displacement, count)` pairs describing how far each occupied slot
+    /// is from its ideal slot. Displacement 0 means the entry sits exactly at its
+    /// ideal slot. Only useful for diagnostics / benchmarks.
+    #[inline]
+    pub fn displacement_histogram(&self) -> alloc::vec::Vec<(usize, usize)> {
+        let cap = self.slots.capacity();
+        let hashes_ptr = self.slots.hashes_ptr();
+        let max_scan = self.max_scan();
+        let mut counts = alloc::vec![0usize; max_scan + 1];
+        for i in 0..cap {
+            let h = unsafe { *hashes_ptr.add(i) };
+            if h == VACANT_HASH {
+                continue;
+            }
+            let ideal = self.meta.ideal_slot(h);
+            let disp = i.saturating_sub(ideal);
+            if disp < counts.len() {
+                counts[disp] += 1;
+            } else {
+                // shouldn't happen, but be safe
+                let last = counts.len() - 1;
+                counts[last] += 1;
+            }
+        }
+        counts.into_iter().enumerate().filter(|(_, c)| *c > 0).collect()
+    }
+
+    /// Simulates the insert scan for `key` (without actually inserting) and returns
+    /// the number of hash slots read. Counts the main window scan, the shift-vacant
+    /// search, and any cascade probe. Returns `None` if the insert would trigger a grow
+    /// (meaning the scan exhausted all available slots).
+    #[inline]
+    pub fn insert_probe_count(&self, key: &K) -> Option<usize>
+    where
+        H: core::hash::BuildHasher,
+    {
+        let hash = encode_hash(self.hash_builder.hash_one(key));
+        let ideal_slot = self.meta.ideal_slot(hash);
+        let max_scan = self.max_scan();
+        let scan_end = ideal_slot + max_scan;
+        let hashes_ptr = self.slots.hashes_ptr();
+        let entries_ptr = self.slots.entries_ptr();
+
+        let mut probes = 0usize;
+        let mut idx = ideal_slot;
+
+        // Phase 1: main window scan
+        while idx < scan_end {
+            let slot_hash = unsafe { *hashes_ptr.add(idx) };
+            probes += 1;
+
+            if slot_hash == VACANT_HASH {
+                return Some(probes); // direct insert
+            }
+            if slot_hash < hash {
+                idx += 1;
+                continue;
+            }
+            if slot_hash == hash {
+                let slot_key = unsafe { (*entries_ptr.add(idx)).key.assume_init_ref() };
+                if slot_key == key {
+                    return Some(probes); // would replace
+                }
+                if slot_key < key {
+                    idx += 1;
+                    continue;
+                }
+            }
+
+            // Phase 2: shift-vacant search within main window
+            let mut search = idx + 1;
+            while search < scan_end {
+                let cand_hash = unsafe { *hashes_ptr.add(search) };
+                probes += 1;
+                if cand_hash == VACANT_HASH {
+                    return Some(probes); // shift insert
+                }
+                search += 1;
+            }
+
+            // Phase 3: cascade probe
+            let ideal_slot_x = scan_end - max_scan;
+            let cascade_limit = scan_end + CASCADE_WINDOWS * max_scan;
+            let last_hash = unsafe { *hashes_ptr.add(scan_end - 1) };
+            let last_ideal = (last_hash >> self.meta.index_shift) as usize;
+
+            if last_ideal > ideal_slot_x {
+                let capacity = self.slots.capacity();
+                let mut v = scan_end;
+                while v < capacity && v < cascade_limit {
+                    let v_hash = unsafe { *hashes_ptr.add(v) };
+                    probes += 1;
+                    if v_hash == VACANT_HASH {
+                        return Some(probes); // cascade insert
+                    }
+                    let v_ideal = (v_hash >> self.meta.index_shift) as usize;
+                    if v + 1 >= v_ideal + max_scan {
+                        return None; // pinned, would grow
+                    }
+                    v += 1;
+                }
+            }
+
+            return None; // would grow
+        }
+
+        None // window exhausted, would grow
     }
 
     /// Reserve capacity for at least `additional` more elements.
