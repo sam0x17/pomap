@@ -34,7 +34,9 @@ const VACANT_HASH: u64 = u64::MAX;
 /// (constant, ilog2-based, etc.). When the body returns a constant, the optimizer
 /// eliminates the `ideal_range` parameter entirely.
 const fn max_scan_for(ideal_range: usize) -> usize {
-    ideal_range.trailing_zeros() as usize
+    let tz = ideal_range.trailing_zeros() as usize;
+    let half = tz / 2;
+    if half > 4 { half } else { 4 }
 }
 
 /// Number of additional scan windows cascade displacement may search beyond the main window.
