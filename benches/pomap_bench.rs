@@ -103,7 +103,7 @@ fn hashbrown_with_capacity(capacity: usize) -> BenchHashbrownMap {
 const MAX_GET_INPUT_SIZE: usize = 1_000_000_usize;
 const MAX_INSERT_INPUT_SIZE: usize = 100_000_usize;
 const GETS_PER_ROUND: usize = 100_usize;
-const NUM_INTERMEDIATE_ROUNDS: usize = 5_usize;
+const NUM_INTERMEDIATE_ROUNDS: usize = 50_usize;
 const HOT_SET: usize = MAX_GET_INPUT_SIZE.isqrt();
 
 #[cfg(feature = "bench-string")]
@@ -132,63 +132,24 @@ fn random_items(seed: u64, count: usize) -> Vec<BenchType> {
     (0..count).map(|_| random_bench_item(&mut rng)).collect()
 }
 
-fn get_target_sizes() -> Vec<usize> {
-    let mut power_targets = Vec::new();
-    let mut current = 10usize;
-
-    while current < MAX_GET_INPUT_SIZE {
-        power_targets.push(current);
-        current *= 10;
-    }
-    power_targets.push(MAX_GET_INPUT_SIZE);
-
-    let rounds = NUM_INTERMEDIATE_ROUNDS.max(2);
-    let mut targets = Vec::new();
-    for window in power_targets.windows(2) {
-        let start = window[0];
-        let end = window[1];
-        for step in 0..rounds {
-            let size = start + (end - start) * step / (rounds - 1);
-            if targets.last().copied() != Some(size) {
-                targets.push(size);
-            }
+fn evenly_spaced_sizes(min: usize, max: usize, num_points: usize) -> Vec<usize> {
+    let n = num_points.max(2);
+    let mut sizes = Vec::with_capacity(n);
+    for i in 0..n {
+        let size = min + (max - min) * i / (n - 1);
+        if sizes.last().copied() != Some(size) {
+            sizes.push(size);
         }
     }
+    sizes
+}
 
-    if targets.is_empty() {
-        targets.push(MAX_GET_INPUT_SIZE);
-    }
-
-    targets
+fn get_target_sizes() -> Vec<usize> {
+    evenly_spaced_sizes(10, MAX_GET_INPUT_SIZE, NUM_INTERMEDIATE_ROUNDS)
 }
 
 fn insert_target_sizes() -> Vec<usize> {
-    let mut power_targets = Vec::new();
-    let mut current = 10usize;
-
-    while current < MAX_INSERT_INPUT_SIZE {
-        power_targets.push(current);
-        current *= 10;
-    }
-    power_targets.push(MAX_INSERT_INPUT_SIZE);
-    let rounds = NUM_INTERMEDIATE_ROUNDS.max(2);
-    let mut targets = Vec::new();
-    for window in power_targets.windows(2) {
-        let start = window[0];
-        let end = window[1];
-        for step in 0..rounds {
-            let size = start + (end - start) * step / (rounds - 1);
-            if targets.last().copied() != Some(size) {
-                targets.push(size);
-            }
-        }
-    }
-
-    if targets.is_empty() {
-        targets.push(MAX_INSERT_INPUT_SIZE);
-    }
-
-    targets
+    evenly_spaced_sizes(10, MAX_INSERT_INPUT_SIZE, NUM_INTERMEDIATE_ROUNDS)
 }
 
 fn build_pomap_maps_from_data(
@@ -303,10 +264,7 @@ fn build_hashbrown_maps_from_data_with_capacity(
 
 fn bench_insert_allocate(c: &mut Criterion) {
     let target_sizes = insert_target_sizes();
-    let max_target_size = *target_sizes
-        .iter()
-        .max()
-        .expect("target sizes should not be empty");
+    let max_target_size = *target_sizes.iter().max().unwrap();
     let keys: Vec<BenchKey> = random_items(0xA11CE, max_target_size);
     let values: Vec<BenchValue> = random_items(0xFACE, max_target_size);
     let mut group = c.comparison_benchmark_group("insert_allocate");
@@ -314,15 +272,12 @@ fn bench_insert_allocate(c: &mut Criterion) {
     group.bench_function("pomap", |b| {
         b.iter(|| {
             for &size in &target_sizes {
-                let mut iterations = 0;
-                while iterations < max_target_size {
-                    let mut map: BenchPoMap =
-                        BenchPoMap::with_hasher(BenchHasherBuilder::default());
-                    for (key, val) in keys.iter().zip(values.iter()).take(size) {
-                        black_box(map.insert(key.clone(), val.clone()));
-                    }
-                    iterations += size;
+                let mut map: BenchPoMap =
+                    BenchPoMap::with_hasher(BenchHasherBuilder::default());
+                for (key, val) in keys.iter().zip(values.iter()).take(size) {
+                    black_box(map.insert(key.clone(), val.clone()));
                 }
+                black_box(&map);
             }
         });
     });
@@ -330,14 +285,11 @@ fn bench_insert_allocate(c: &mut Criterion) {
     group.bench_function("std_hashmap", |b| {
         b.iter(|| {
             for &size in &target_sizes {
-                let mut iterations = 0;
-                while iterations < max_target_size {
-                    let mut map: BenchHashMap = new_std_hashmap();
-                    for (key, val) in keys.iter().zip(values.iter()).take(size) {
-                        black_box(map.insert(key.clone(), val.clone()));
-                    }
-                    iterations += size;
+                let mut map: BenchHashMap = new_std_hashmap();
+                for (key, val) in keys.iter().zip(values.iter()).take(size) {
+                    black_box(map.insert(key.clone(), val.clone()));
                 }
+                black_box(&map);
             }
         });
     });
@@ -345,14 +297,11 @@ fn bench_insert_allocate(c: &mut Criterion) {
     group.bench_function("hashbrown", |b| {
         b.iter(|| {
             for &size in &target_sizes {
-                let mut iterations = 0;
-                while iterations < max_target_size {
-                    let mut map: BenchHashbrownMap = new_hashbrown_hashmap();
-                    for (key, val) in keys.iter().zip(values.iter()).take(size) {
-                        black_box(map.insert(key.clone(), val.clone()));
-                    }
-                    iterations += size;
+                let mut map: BenchHashbrownMap = new_hashbrown_hashmap();
+                for (key, val) in keys.iter().zip(values.iter()).take(size) {
+                    black_box(map.insert(key.clone(), val.clone()));
                 }
+                black_box(&map);
             }
         });
     });
@@ -397,39 +346,33 @@ fn bench_insert_preallocated(c: &mut Criterion) {
         .collect();
     let mut group = c.comparison_benchmark_group("insert_preallocated");
 
+    // std/hashbrown interpret with_capacity(N) as "hold N elements before growing",
+    // internally allocating ~N*8/7 slots. To match pomap's slot count we request N*7/8,
+    // but never less than `size` (so they don't grow when pomap wouldn't).
     group.bench_function("pomap", |b| {
         b.iter(|| {
             for (i, &size) in target_sizes.iter().enumerate() {
-                let mut iterations = 0;
-                while iterations < max_target_size {
-                    let mut map: BenchPoMap = BenchPoMap::with_capacity_and_hasher(
-                        preallocated_capacities[i],
-                        BenchHasherBuilder::default(),
-                    );
-                    for (key, val) in combined.iter().take(size) {
-                        black_box(map.insert(key.clone(), val.clone()));
-                    }
-                    iterations += size;
+                let mut map: BenchPoMap = BenchPoMap::with_capacity_and_hasher(
+                    preallocated_capacities[i],
+                    BenchHasherBuilder::default(),
+                );
+                for (key, val) in combined.iter().take(size) {
+                    black_box(map.insert(key.clone(), val.clone()));
                 }
+                black_box(&map);
             }
         });
     });
 
-    // std/hashbrown interpret with_capacity(N) as "hold N elements before growing",
-    // internally allocating ~N*8/7 slots. To match pomap's slot count we request N*7/8,
-    // but never less than `size` (so they don't grow when pomap wouldn't).
     group.bench_function("std_hashmap", |b| {
         b.iter(|| {
             for (i, &size) in target_sizes.iter().enumerate() {
-                let mut iterations = 0;
-                while iterations < max_target_size {
-                    let mut map: BenchHashMap =
-                        std_hashmap_with_capacity((preallocated_capacities[i] * 7 / 8).max(size));
-                    for (key, val) in combined.iter().take(size) {
-                        black_box(map.insert(key.clone(), val.clone()));
-                    }
-                    iterations += size;
+                let mut map: BenchHashMap =
+                    std_hashmap_with_capacity((preallocated_capacities[i] * 7 / 8).max(size));
+                for (key, val) in combined.iter().take(size) {
+                    black_box(map.insert(key.clone(), val.clone()));
                 }
+                black_box(&map);
             }
         });
     });
@@ -437,15 +380,12 @@ fn bench_insert_preallocated(c: &mut Criterion) {
     group.bench_function("hashbrown", |b| {
         b.iter(|| {
             for (i, &size) in target_sizes.iter().enumerate() {
-                let mut iterations = 0;
-                while iterations < max_target_size {
-                    let mut map: BenchHashbrownMap =
-                        hashbrown_with_capacity((preallocated_capacities[i] * 7 / 8).max(size));
-                    for (key, val) in combined.iter().take(size) {
-                        black_box(map.insert(key.clone(), val.clone()));
-                    }
-                    iterations += size;
+                let mut map: BenchHashbrownMap =
+                    hashbrown_with_capacity((preallocated_capacities[i] * 7 / 8).max(size));
+                for (key, val) in combined.iter().take(size) {
+                    black_box(map.insert(key.clone(), val.clone()));
                 }
+                black_box(&map);
             }
         });
     });
