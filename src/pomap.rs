@@ -498,13 +498,16 @@ impl<K: Key, V: Value, H: BuildHasher> PoMap<K, V, H> {
 
         // Scalar fast-path: check ideal slot first (displacement 0).
         let first_tag = unsafe { *tags_ptr.add(ideal_slot) };
-        let expected_first = target_sub; // make_tag(0, ...) = (0 << 4) | target_sub
-        if first_tag == expected_first {
+        if first_tag == VACANT_TAG {
+            return None;
+        }
+        if first_tag == target_sub {
             let entry = unsafe { &*entries_ptr.add(ideal_slot) };
             if unsafe { entry.key.assume_init_ref() } == key {
                 return Some(unsafe { entry.value.assume_init_ref() });
             }
-        } else if first_tag == VACANT_TAG {
+        } else if tag_displacement(first_tag) == 0 && tag_sub_bucket(first_tag) > target_sub {
+            // First entry in our bucket has higher sub — our entry can't exist.
             return None;
         }
 
@@ -1349,68 +1352,22 @@ impl<K: Key, V: Value, H: BuildHasher> PoMap<K, V, H> {
         let max_scan = self.max_scan();
         let tags_ptr = self.slots.tags_ptr();
         let entries_ptr = self.slots.entries_ptr();
-        let capacity = self.slots.capacity();
 
         let first_tag = unsafe { *tags_ptr.add(ideal_slot) };
         if first_tag == VACANT_TAG {
             return None;
         }
-
-        // Inline backshift helper: scan count, bulk-copy entries, fix tags.
-        #[inline(always)]
-        unsafe fn backshift_and_extract<K: Key, V: Value>(
-            tags_ptr: *mut u8,
-            entries_ptr: *mut SlotEntry<K, V>,
-            idx: usize,
-            capacity: usize,
-            len: &mut usize,
-        ) -> V {
-            let slot_entry = unsafe { &mut *entries_ptr.add(idx) };
-            let value = unsafe { slot_entry.value.assume_init_read() };
-            unsafe { slot_entry.key.assume_init_drop() };
-
-            let mut vacancy = idx;
-            let mut scan_pos = idx + 1;
-            while scan_pos < capacity {
-                let next_tag = unsafe { *tags_ptr.add(scan_pos) };
-                if next_tag == VACANT_TAG {
-                    break;
-                }
-                let next_ideal = scan_pos - tag_displacement(next_tag);
-                if next_ideal > vacancy {
-                    break;
-                }
-                vacancy += 1;
-                scan_pos += 1;
-            }
-            let count = scan_pos - idx - 1;
-            if count > 0 {
-                unsafe {
-                    ptr::copy(entries_ptr.add(idx + 1), entries_ptr.add(idx), count);
-                    for i in 0..count {
-                        let old_tag = *tags_ptr.add(idx + 1 + i);
-                        *tags_ptr.add(idx + i) = old_tag.wrapping_sub(0x10);
-                    }
-                }
-            }
-            unsafe { *tags_ptr.add(vacancy) = VACANT_TAG };
-            *len -= 1;
-            value
+        if tag_displacement(first_tag) == 0 && tag_sub_bucket(first_tag) > target_sub {
+            return None;
         }
 
         // Scalar fast-path: check ideal slot for exact match (displacement 0).
         if first_tag == target_sub {
             let slot_key = unsafe { (*entries_ptr.add(ideal_slot)).key.assume_init_ref() };
             if slot_key == key {
-                return Some(unsafe {
-                    backshift_and_extract(
-                        tags_ptr,
-                        entries_ptr,
-                        ideal_slot,
-                        capacity,
-                        &mut self.len,
-                    )
-                });
+                let (k, v) = self.remove_entry_at(ideal_slot);
+                drop(k);
+                return Some(v);
             }
         }
 
@@ -1424,11 +1381,11 @@ impl<K: Key, V: Value, H: BuildHasher> PoMap<K, V, H> {
             mask &= mask - 1;
 
             let idx = ideal_slot + offset;
-            let slot_key = unsafe { (*entries_ptr.add(idx)).key.assume_init_ref() };
+            let slot_key = unsafe { (*self.slots.entries_ptr().add(idx)).key.assume_init_ref() };
             if slot_key == key {
-                return Some(unsafe {
-                    backshift_and_extract(tags_ptr, entries_ptr, idx, capacity, &mut self.len)
-                });
+                let (k, v) = self.remove_entry_at(idx);
+                drop(k);
+                return Some(v);
             }
         }
 
