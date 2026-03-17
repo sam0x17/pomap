@@ -1356,41 +1356,68 @@ impl<K: Key, V: Value, H: BuildHasher> PoMap<K, V, H> {
             return None;
         }
 
+        // Inline backshift helper: scan count, bulk-copy entries, fix tags.
+        #[inline(always)]
+        unsafe fn backshift_and_extract<K: Key, V: Value>(
+            tags_ptr: *mut u8,
+            entries_ptr: *mut SlotEntry<K, V>,
+            idx: usize,
+            capacity: usize,
+            len: &mut usize,
+        ) -> V {
+            let slot_entry = unsafe { &mut *entries_ptr.add(idx) };
+            let value = unsafe { slot_entry.value.assume_init_read() };
+            unsafe { slot_entry.key.assume_init_drop() };
+
+            let mut vacancy = idx;
+            let mut scan_pos = idx + 1;
+            while scan_pos < capacity {
+                let next_tag = unsafe { *tags_ptr.add(scan_pos) };
+                if next_tag == VACANT_TAG {
+                    break;
+                }
+                let next_ideal = scan_pos - tag_displacement(next_tag);
+                if next_ideal > vacancy {
+                    break;
+                }
+                vacancy += 1;
+                scan_pos += 1;
+            }
+            let count = scan_pos - idx - 1;
+            if count > 0 {
+                unsafe {
+                    ptr::copy(entries_ptr.add(idx + 1), entries_ptr.add(idx), count);
+                    for i in 0..count {
+                        let old_tag = *tags_ptr.add(idx + 1 + i);
+                        *tags_ptr.add(idx + i) = old_tag.wrapping_sub(0x10);
+                    }
+                }
+            }
+            unsafe { *tags_ptr.add(vacancy) = VACANT_TAG };
+            *len -= 1;
+            value
+        }
+
         // Scalar fast-path: check ideal slot for exact match (displacement 0).
         if first_tag == target_sub {
             let slot_key = unsafe { (*entries_ptr.add(ideal_slot)).key.assume_init_ref() };
             if slot_key == key {
-                let slot_entry = unsafe { &mut *entries_ptr.add(ideal_slot) };
-                let value = unsafe { slot_entry.value.assume_init_read() };
-                unsafe { slot_entry.key.assume_init_drop() };
-
-                let mut vacancy = ideal_slot;
-                let mut scan_pos = ideal_slot + 1;
-                while scan_pos < capacity {
-                    let next_tag = unsafe { *tags_ptr.add(scan_pos) };
-                    if next_tag == VACANT_TAG { break; }
-                    let next_ideal = scan_pos - tag_displacement(next_tag);
-                    if next_ideal > vacancy { break; }
-                    unsafe {
-                        *tags_ptr.add(vacancy) = next_tag.wrapping_sub(0x10);
-                        core::ptr::write(
-                            entries_ptr.add(vacancy),
-                            core::ptr::read(entries_ptr.add(scan_pos)),
-                        );
-                    }
-                    vacancy += 1;
-                    scan_pos += 1;
-                }
-                unsafe { *tags_ptr.add(vacancy) = VACANT_TAG };
-                self.len -= 1;
-                return Some(value);
+                return Some(unsafe {
+                    backshift_and_extract(
+                        tags_ptr,
+                        entries_ptr,
+                        ideal_slot,
+                        capacity,
+                        &mut self.len,
+                    )
+                });
             }
         }
 
         // SIMD path for remaining candidates.
         let scan =
             unsafe { simd_scan(tags_ptr.add(ideal_slot) as *const u8, target_sub, max_scan) };
-        let mut mask = scan.candidate_mask & !1u32; // skip offset 0 (already checked)
+        let mut mask = scan.candidate_mask & !1u32;
 
         while mask != 0 {
             let offset = mask.trailing_zeros() as usize;
@@ -1399,30 +1426,9 @@ impl<K: Key, V: Value, H: BuildHasher> PoMap<K, V, H> {
             let idx = ideal_slot + offset;
             let slot_key = unsafe { (*entries_ptr.add(idx)).key.assume_init_ref() };
             if slot_key == key {
-                let slot_entry = unsafe { &mut *entries_ptr.add(idx) };
-                let value = unsafe { slot_entry.value.assume_init_read() };
-                unsafe { slot_entry.key.assume_init_drop() };
-
-                let mut vacancy = idx;
-                let mut scan_pos = idx + 1;
-                while scan_pos < capacity {
-                    let next_tag = unsafe { *tags_ptr.add(scan_pos) };
-                    if next_tag == VACANT_TAG { break; }
-                    let next_ideal = scan_pos - tag_displacement(next_tag);
-                    if next_ideal > vacancy { break; }
-                    unsafe {
-                        *tags_ptr.add(vacancy) = next_tag.wrapping_sub(0x10);
-                        core::ptr::write(
-                            entries_ptr.add(vacancy),
-                            core::ptr::read(entries_ptr.add(scan_pos)),
-                        );
-                    }
-                    vacancy += 1;
-                    scan_pos += 1;
-                }
-                unsafe { *tags_ptr.add(vacancy) = VACANT_TAG };
-                self.len -= 1;
-                return Some(value);
+                return Some(unsafe {
+                    backshift_and_extract(tags_ptr, entries_ptr, idx, capacity, &mut self.len)
+                });
             }
         }
 
@@ -1471,7 +1477,7 @@ impl<K: Key, V: Value, H: BuildHasher> PoMap<K, V, H> {
         let key = unsafe { entry.key.assume_init_read() };
         let value = unsafe { entry.value.assume_init_read() };
 
-        // Backshift-delete: shift subsequent entries left, adjusting displacement.
+        // Backshift-delete: determine shift count, bulk-copy entries, fix up tags.
         let mut vacancy = idx;
         let mut scan = idx + 1;
         while scan < capacity {
@@ -1479,21 +1485,25 @@ impl<K: Key, V: Value, H: BuildHasher> PoMap<K, V, H> {
             if next_tag == VACANT_TAG {
                 break;
             }
-            let next_disp = tag_displacement(next_tag);
-            let next_ideal = scan - next_disp;
+            let next_ideal = scan - tag_displacement(next_tag);
             if next_ideal > vacancy {
                 break;
             }
-            // Shift entry left: displacement decreases by 1
-            unsafe {
-                *tags_ptr.add(vacancy) = next_tag.wrapping_sub(0x10);
-                core::ptr::write(
-                    entries_ptr.add(vacancy),
-                    core::ptr::read(entries_ptr.add(scan)),
-                );
-            }
             vacancy += 1;
             scan += 1;
+        }
+
+        let count = scan - idx - 1;
+        if count > 0 {
+            unsafe {
+                // Bulk memmove for entries (the heavy data).
+                ptr::copy(entries_ptr.add(idx + 1), entries_ptr.add(idx), count);
+                // Fix up tags individually (1 byte each, displacement -= 1).
+                for i in 0..count {
+                    let old_tag = *tags_ptr.add(idx + 1 + i);
+                    *tags_ptr.add(idx + i) = old_tag.wrapping_sub(0x10);
+                }
+            }
         }
 
         unsafe { *tags_ptr.add(vacancy) = VACANT_TAG };
