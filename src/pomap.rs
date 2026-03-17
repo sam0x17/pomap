@@ -860,7 +860,7 @@ impl<K: Key, V: Value, H: BuildHasher> PoMap<K, V, H> {
             // ensuring all shifted entries can accommodate displacement + 1.
             let max_scan = self.max_scan();
             let mut search = idx + 1;
-            let mut shift_ok = tag_displacement(tag) < max_scan - 1;
+            let shift_ok = tag_displacement(tag) < max_scan - 1;
             while shift_ok && search < scan_end {
                 let cand_tag = unsafe { *tags_ptr.add(search) };
                 if cand_tag == VACANT_TAG {
@@ -872,7 +872,6 @@ impl<K: Key, V: Value, H: BuildHasher> PoMap<K, V, H> {
                     };
                 }
                 if tag_displacement(cand_tag) >= max_scan - 1 {
-                    shift_ok = false;
                     break;
                 }
                 search += 1;
@@ -1357,45 +1356,70 @@ impl<K: Key, V: Value, H: BuildHasher> PoMap<K, V, H> {
             return None;
         }
 
+        // Scalar fast-path: check ideal slot for exact match (displacement 0).
+        if first_tag == target_sub {
+            let slot_key = unsafe { (*entries_ptr.add(ideal_slot)).key.assume_init_ref() };
+            if slot_key == key {
+                let slot_entry = unsafe { &mut *entries_ptr.add(ideal_slot) };
+                let value = unsafe { slot_entry.value.assume_init_read() };
+                unsafe { slot_entry.key.assume_init_drop() };
+
+                let mut vacancy = ideal_slot;
+                let mut scan_pos = ideal_slot + 1;
+                while scan_pos < capacity {
+                    let next_tag = unsafe { *tags_ptr.add(scan_pos) };
+                    if next_tag == VACANT_TAG { break; }
+                    let next_ideal = scan_pos - tag_displacement(next_tag);
+                    if next_ideal > vacancy { break; }
+                    unsafe {
+                        *tags_ptr.add(vacancy) = next_tag.wrapping_sub(0x10);
+                        core::ptr::write(
+                            entries_ptr.add(vacancy),
+                            core::ptr::read(entries_ptr.add(scan_pos)),
+                        );
+                    }
+                    vacancy += 1;
+                    scan_pos += 1;
+                }
+                unsafe { *tags_ptr.add(vacancy) = VACANT_TAG };
+                self.len -= 1;
+                return Some(value);
+            }
+        }
+
+        // SIMD path for remaining candidates.
         let scan =
             unsafe { simd_scan(tags_ptr.add(ideal_slot) as *const u8, target_sub, max_scan) };
-        let mut mask = scan.candidate_mask;
+        let mut mask = scan.candidate_mask & !1u32; // skip offset 0 (already checked)
 
         while mask != 0 {
             let offset = mask.trailing_zeros() as usize;
             mask &= mask - 1;
 
             let idx = ideal_slot + offset;
-            let slot_entry = unsafe { &mut *entries_ptr.add(idx) };
-            let slot_key = unsafe { slot_entry.key.assume_init_ref() };
+            let slot_key = unsafe { (*entries_ptr.add(idx)).key.assume_init_ref() };
             if slot_key == key {
+                let slot_entry = unsafe { &mut *entries_ptr.add(idx) };
                 let value = unsafe { slot_entry.value.assume_init_read() };
                 unsafe { slot_entry.key.assume_init_drop() };
 
-                // Backshift-delete
                 let mut vacancy = idx;
-                let mut scan = idx + 1;
-                while scan < capacity {
-                    let next_tag = unsafe { *tags_ptr.add(scan) };
-                    if next_tag == VACANT_TAG {
-                        break;
-                    }
-                    let next_disp = tag_displacement(next_tag);
-                    let next_ideal = scan - next_disp;
-                    if next_ideal > vacancy {
-                        break;
-                    }
+                let mut scan_pos = idx + 1;
+                while scan_pos < capacity {
+                    let next_tag = unsafe { *tags_ptr.add(scan_pos) };
+                    if next_tag == VACANT_TAG { break; }
+                    let next_ideal = scan_pos - tag_displacement(next_tag);
+                    if next_ideal > vacancy { break; }
                     unsafe {
                         *tags_ptr.add(vacancy) = next_tag.wrapping_sub(0x10);
                         core::ptr::write(
                             entries_ptr.add(vacancy),
-                            core::ptr::read(entries_ptr.add(scan)),
+                            core::ptr::read(entries_ptr.add(scan_pos)),
                         );
                     }
                     vacancy += 1;
-                    scan += 1;
+                    scan_pos += 1;
                 }
-
                 unsafe { *tags_ptr.add(vacancy) = VACANT_TAG };
                 self.len -= 1;
                 return Some(value);
