@@ -41,7 +41,7 @@ const fn max_scan_for(ideal_range: usize) -> usize {
 
 /// Number of additional scan windows cascade displacement may search beyond the main window.
 /// The cascade search extends up to `CASCADE_WINDOWS * max_scan` slots past `scan_end`.
-const CASCADE_WINDOWS: usize = 1;
+const CASCADE_WINDOWS: usize = 2;
 
 /// Default build hasher for [`PoMap`], backed by [`AHasher`].
 #[derive(Clone, Default)]
@@ -493,23 +493,39 @@ impl<K: Key, V: Value, H: BuildHasher> PoMap<K, V, H> {
 
         for idx in ideal_slot..ideal_slot + self.max_scan() {
             let tag = unsafe { *tags_ptr.add(idx) };
-            if tag == VACANT_TAG { return None; }
+            if tag == VACANT_TAG {
+                return None;
+            }
             let offset = idx - ideal_slot;
             let disp = tag_displacement(tag);
-            if disp > offset { continue; }
-            if disp < offset { return None; }
+            if disp > offset {
+                continue;
+            }
+            if disp < offset {
+                return None;
+            }
             let sub = tag_sub_bucket(tag);
-            if sub < target_sub { continue; }
-            if sub > target_sub { return None; }
+            if sub < target_sub {
+                continue;
+            }
+            if sub > target_sub {
+                return None;
+            }
             let slot_entry = unsafe { &*entries_ptr.add(idx) };
             let slot_key = unsafe { slot_entry.key.assume_init_ref() };
             if slot_key == key {
                 return Some((slot_key, unsafe { slot_entry.value.assume_init_ref() }));
             }
             let slot_hash = encode_hash(self.hash_builder.hash_one(slot_key));
-            if slot_hash < hash { continue; }
-            if slot_hash > hash { return None; }
-            if slot_key > key { return None; }
+            if slot_hash < hash {
+                continue;
+            }
+            if slot_hash > hash {
+                return None;
+            }
+            if slot_key > key {
+                return None;
+            }
         }
         None
     }
@@ -526,14 +542,24 @@ impl<K: Key, V: Value, H: BuildHasher> PoMap<K, V, H> {
 
         for idx in ideal_slot..ideal_slot + self.max_scan() {
             let tag = unsafe { *tags_ptr.add(idx) };
-            if tag == VACANT_TAG { return None; }
+            if tag == VACANT_TAG {
+                return None;
+            }
             let offset = idx - ideal_slot;
             let disp = tag_displacement(tag);
-            if disp > offset { continue; }
-            if disp < offset { return None; }
+            if disp > offset {
+                continue;
+            }
+            if disp < offset {
+                return None;
+            }
             let sub = tag_sub_bucket(tag);
-            if sub < target_sub { continue; }
-            if sub > target_sub { return None; }
+            if sub < target_sub {
+                continue;
+            }
+            if sub > target_sub {
+                return None;
+            }
             // Same tag — check key match; must scan all entries with same tag
             let entry = unsafe { &*entries_ptr.add(idx) };
             let key = unsafe { entry.key.assume_init_ref() };
@@ -627,23 +653,39 @@ impl<K: Key, V: Value, H: BuildHasher> PoMap<K, V, H> {
 
         for idx in ideal_slot..ideal_slot + self.max_scan() {
             let tag = unsafe { *tags_ptr.add(idx) };
-            if tag == VACANT_TAG { return None; }
+            if tag == VACANT_TAG {
+                return None;
+            }
             let offset = idx - ideal_slot;
             let disp = tag_displacement(tag);
-            if disp > offset { continue; }
-            if disp < offset { return None; }
+            if disp > offset {
+                continue;
+            }
+            if disp < offset {
+                return None;
+            }
             let sub = tag_sub_bucket(tag);
-            if sub < target_sub { continue; }
-            if sub > target_sub { return None; }
+            if sub < target_sub {
+                continue;
+            }
+            if sub > target_sub {
+                return None;
+            }
             let slot_entry = unsafe { &mut *entries_ptr.add(idx) };
             let slot_key = unsafe { slot_entry.key.assume_init_ref() };
             if slot_key == key {
                 return Some(unsafe { slot_entry.value.assume_init_mut() });
             }
             let slot_hash = encode_hash(self.hash_builder.hash_one(slot_key));
-            if slot_hash < hash { continue; }
-            if slot_hash > hash { return None; }
-            if slot_key > key { return None; }
+            if slot_hash < hash {
+                continue;
+            }
+            if slot_hash > hash {
+                return None;
+            }
+            if slot_key > key {
+                return None;
+            }
         }
         None
     }
@@ -1185,14 +1227,26 @@ impl<K: Key, V: Value, H: BuildHasher> PoMap<K, V, H> {
         let mut idx = ideal_slot;
         while idx < ideal_slot + self.max_scan() {
             let tag = unsafe { *tags_ptr.add(idx) };
-            if tag == VACANT_TAG { return None; }
+            if tag == VACANT_TAG {
+                return None;
+            }
             let offset = idx - ideal_slot;
             let disp = tag_displacement(tag);
-            if disp > offset { idx += 1; continue; }
-            if disp < offset { return None; }
+            if disp > offset {
+                idx += 1;
+                continue;
+            }
+            if disp < offset {
+                return None;
+            }
             let sub = tag_sub_bucket(tag);
-            if sub < target_sub { idx += 1; continue; }
-            if sub > target_sub { return None; }
+            if sub < target_sub {
+                idx += 1;
+                continue;
+            }
+            if sub > target_sub {
+                return None;
+            }
 
             let slot_entry = unsafe { &mut *entries_ptr.add(idx) };
             let slot_key = unsafe { slot_entry.key.assume_init_ref() };
@@ -1205,10 +1259,14 @@ impl<K: Key, V: Value, H: BuildHasher> PoMap<K, V, H> {
                 let mut scan = idx + 1;
                 while scan < capacity {
                     let next_tag = unsafe { *tags_ptr.add(scan) };
-                    if next_tag == VACANT_TAG { break; }
+                    if next_tag == VACANT_TAG {
+                        break;
+                    }
                     let next_disp = tag_displacement(next_tag);
                     let next_ideal = scan - next_disp;
-                    if next_ideal > vacancy { break; }
+                    if next_ideal > vacancy {
+                        break;
+                    }
                     unsafe {
                         *tags_ptr.add(vacancy) = next_tag.wrapping_sub(0x10);
                         core::ptr::write(
@@ -1226,9 +1284,16 @@ impl<K: Key, V: Value, H: BuildHasher> PoMap<K, V, H> {
             }
 
             let slot_hash = encode_hash(self.hash_builder.hash_one(slot_key));
-            if slot_hash < hash { idx += 1; continue; }
-            if slot_hash > hash { return None; }
-            if slot_key > key { return None; }
+            if slot_hash < hash {
+                idx += 1;
+                continue;
+            }
+            if slot_hash > hash {
+                return None;
+            }
+            if slot_key > key {
+                return None;
+            }
             idx += 1;
         }
 
@@ -1245,14 +1310,26 @@ impl<K: Key, V: Value, H: BuildHasher> PoMap<K, V, H> {
         let mut idx = ideal_slot;
         while idx < ideal_slot + self.max_scan() {
             let tag = unsafe { *tags_ptr.add(idx) };
-            if tag == VACANT_TAG { return None; }
+            if tag == VACANT_TAG {
+                return None;
+            }
             let offset = idx - ideal_slot;
             let disp = tag_displacement(tag);
-            if disp > offset { idx += 1; continue; }
-            if disp < offset { return None; }
+            if disp > offset {
+                idx += 1;
+                continue;
+            }
+            if disp < offset {
+                return None;
+            }
             let sub = tag_sub_bucket(tag);
-            if sub < target_sub { idx += 1; continue; }
-            if sub > target_sub { return None; }
+            if sub < target_sub {
+                idx += 1;
+                continue;
+            }
+            if sub > target_sub {
+                return None;
+            }
 
             let slot_entry = unsafe { &*entries_ptr.add(idx) };
             let slot_key = unsafe { slot_entry.key.assume_init_ref() };
@@ -1260,9 +1337,16 @@ impl<K: Key, V: Value, H: BuildHasher> PoMap<K, V, H> {
                 return Some(self.remove_entry_at(idx));
             }
             let slot_hash = encode_hash(self.hash_builder.hash_one(slot_key));
-            if slot_hash < hash { idx += 1; continue; }
-            if slot_hash > hash { return None; }
-            if slot_key > key { return None; }
+            if slot_hash < hash {
+                idx += 1;
+                continue;
+            }
+            if slot_hash > hash {
+                return None;
+            }
+            if slot_key > key {
+                return None;
+            }
             idx += 1;
         }
 
@@ -1284,10 +1368,14 @@ impl<K: Key, V: Value, H: BuildHasher> PoMap<K, V, H> {
         let mut scan = idx + 1;
         while scan < capacity {
             let next_tag = unsafe { *tags_ptr.add(scan) };
-            if next_tag == VACANT_TAG { break; }
+            if next_tag == VACANT_TAG {
+                break;
+            }
             let next_disp = tag_displacement(next_tag);
             let next_ideal = scan - next_disp;
-            if next_ideal > vacancy { break; }
+            if next_ideal > vacancy {
+                break;
+            }
             // Shift entry left: displacement decreases by 1
             unsafe {
                 *tags_ptr.add(vacancy) = next_tag.wrapping_sub(0x10);
@@ -1324,8 +1412,14 @@ impl<K: Key, V: Value, H: BuildHasher> PoMap<K, V, H> {
         let mut old_slots = core::mem::replace(&mut self.slots, Slots::new(new_capacity));
 
         let mut cursor = 0usize;
-        let first_attempt =
-            Self::pack_from_slots(&mut self.slots, &new_meta, &mut cursor, &mut old_slots, 0, &self.hash_builder);
+        let first_attempt = Self::pack_from_slots(
+            &mut self.slots,
+            &new_meta,
+            &mut cursor,
+            &mut old_slots,
+            0,
+            &self.hash_builder,
+        );
         if first_attempt.is_ok() {
             self.meta = new_meta;
             return new_capacity;
@@ -1468,7 +1562,9 @@ impl<K: Key, V: Value, H: BuildHasher> PoMap<K, V, H> {
         let mut counts = alloc::vec![0usize; max_scan + 1];
         for i in 0..cap {
             let tag = unsafe { *tags_ptr.add(i) };
-            if tag == VACANT_TAG { continue; }
+            if tag == VACANT_TAG {
+                continue;
+            }
             let disp = tag_displacement(tag);
             if disp < counts.len() {
                 counts[disp] += 1;
@@ -1477,7 +1573,11 @@ impl<K: Key, V: Value, H: BuildHasher> PoMap<K, V, H> {
                 counts[last] += 1;
             }
         }
-        counts.into_iter().enumerate().filter(|(_, c)| *c > 0).collect()
+        counts
+            .into_iter()
+            .enumerate()
+            .filter(|(_, c)| *c > 0)
+            .collect()
     }
 
     /// Returns the index shift (64 - index_bits). Bits at positions >= index_shift
@@ -1543,11 +1643,16 @@ impl<K: Key, V: Value, H: BuildHasher> PoMap<K, V, H> {
             let tag = unsafe { *tags_ptr.add(idx) };
             probes += 1;
 
-            if tag == VACANT_TAG { return Some(probes); }
+            if tag == VACANT_TAG {
+                return Some(probes);
+            }
 
             let offset = idx - ideal_slot;
             let disp = tag_displacement(tag);
-            if disp > offset { idx += 1; continue; }
+            if disp > offset {
+                idx += 1;
+                continue;
+            }
             if disp < offset {
                 // Need shift — search for vacant
                 let mut search = idx + 1;
@@ -1568,9 +1673,13 @@ impl<K: Key, V: Value, H: BuildHasher> PoMap<K, V, H> {
                     while v < capacity && v < cascade_limit {
                         let v_tag = unsafe { *tags_ptr.add(v) };
                         probes += 1;
-                        if v_tag == VACANT_TAG { return Some(probes); }
+                        if v_tag == VACANT_TAG {
+                            return Some(probes);
+                        }
                         let v_ideal = v - tag_displacement(v_tag);
-                        if v + 1 >= v_ideal + max_scan { return None; }
+                        if v + 1 >= v_ideal + max_scan {
+                            return None;
+                        }
                         v += 1;
                     }
                 }
@@ -1578,11 +1687,19 @@ impl<K: Key, V: Value, H: BuildHasher> PoMap<K, V, H> {
             }
 
             let sub = tag_sub_bucket(tag);
-            if sub < target_sub { idx += 1; continue; }
+            if sub < target_sub {
+                idx += 1;
+                continue;
+            }
             if sub == target_sub {
                 let slot_key = unsafe { (*entries_ptr.add(idx)).key.assume_init_ref() };
-                if slot_key == key { return Some(probes); }
-                if slot_key < key { idx += 1; continue; }
+                if slot_key == key {
+                    return Some(probes);
+                }
+                if slot_key < key {
+                    idx += 1;
+                    continue;
+                }
             }
 
             // sub > target_sub or key mismatch — need shift
@@ -1604,9 +1721,13 @@ impl<K: Key, V: Value, H: BuildHasher> PoMap<K, V, H> {
                 while v < capacity && v < cascade_limit {
                     let v_tag = unsafe { *tags_ptr.add(v) };
                     probes += 1;
-                    if v_tag == VACANT_TAG { return Some(probes); }
+                    if v_tag == VACANT_TAG {
+                        return Some(probes);
+                    }
                     let v_ideal = v - tag_displacement(v_tag);
-                    if v + 1 >= v_ideal + max_scan { return None; }
+                    if v + 1 >= v_ideal + max_scan {
+                        return None;
+                    }
                     v += 1;
                 }
             }
