@@ -1382,6 +1382,29 @@ impl<K: Key, V: Value, H: BuildHasher> PoMap<K, V, H> {
         counts.into_iter().enumerate().filter(|(_, c)| *c > 0).collect()
     }
 
+    /// Returns the index shift (64 - index_bits). Bits at positions >= index_shift
+    /// are used for ideal_slot; bits below are sub-bucket bits.
+    #[inline]
+    pub const fn index_shift(&self) -> usize {
+        self.meta.index_shift
+    }
+
+    /// Returns `(slot_index, hash)` for every occupied slot, in slot order.
+    /// Vacant slots are omitted. Useful for analyzing bit-level hash distributions.
+    #[inline]
+    pub fn occupied_slot_hashes(&self) -> alloc::vec::Vec<(usize, u64)> {
+        let cap = self.slots.capacity();
+        let hashes_ptr = self.slots.hashes_ptr();
+        let mut out = alloc::vec::Vec::with_capacity(self.len);
+        for i in 0..cap {
+            let h = unsafe { *hashes_ptr.add(i) };
+            if h != VACANT_HASH {
+                out.push((i, h));
+            }
+        }
+        out
+    }
+
     /// Simulates the insert scan for `key` (without actually inserting) and returns
     /// the number of hash slots read. Counts the main window scan, the shift-vacant
     /// search, and any cascade probe. Returns `None` if the insert would trigger a grow
