@@ -272,8 +272,7 @@ fn bench_insert_allocate(c: &mut Criterion) {
     group.bench_function("pomap", |b| {
         b.iter(|| {
             for &size in &target_sizes {
-                let mut map: BenchPoMap =
-                    BenchPoMap::with_hasher(BenchHasherBuilder::default());
+                let mut map: BenchPoMap = BenchPoMap::with_hasher(BenchHasherBuilder::default());
                 for (key, val) in keys.iter().zip(values.iter()).take(size) {
                     black_box(map.insert(key.clone(), val.clone()));
                 }

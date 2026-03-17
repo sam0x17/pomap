@@ -15,8 +15,7 @@ type Map = PoMap<u64, u64, BuildHasherDefault<AHasher>>;
 
 fn main() {
     let sizes: Vec<usize> = vec![
-        100, 500, 1_000, 5_000, 10_000, 50_000,
-        100_000, 500_000, 1_000_000, 5_000_000, 10_000_000,
+        100, 500, 1_000, 5_000, 10_000, 50_000, 100_000, 500_000, 1_000_000, 5_000_000, 10_000_000,
     ];
 
     // =========================================================================
@@ -29,10 +28,10 @@ fn main() {
     println!("Displacement = p - ideal_slot. Must fit in the tag's displacement field.");
     println!();
 
-    println!("{:>12} {:>5} {:>4} | {:>5} {:>5} {:>5} | {:>6} {:>6}",
-        "entries", "ibits", "ms",
-        "p50", "p99", "max",
-        "fits4b", "fits3b");
+    println!(
+        "{:>12} {:>5} {:>4} | {:>5} {:>5} {:>5} | {:>6} {:>6}",
+        "entries", "ibits", "ms", "p50", "p99", "max", "fits4b", "fits3b"
+    );
     println!("{}", "-".repeat(70));
 
     for &n in &sizes {
@@ -61,11 +60,17 @@ fn main() {
         let fits_4bit = displacements.iter().filter(|&&d| d < 16).count();
         let fits_3bit = displacements.iter().filter(|&&d| d < 8).count();
 
-        println!("{:>12} {:>5} {:>4} | {:>5} {:>5} {:>5} | {:>5.1}% {:>5.1}%",
-            n, index_bits, max_scan,
-            p50, p99, max,
+        println!(
+            "{:>12} {:>5} {:>4} | {:>5} {:>5} {:>5} | {:>5.1}% {:>5.1}%",
+            n,
+            index_bits,
+            max_scan,
+            p50,
+            p99,
+            max,
             100.0 * fits_4bit as f64 / np as f64,
-            100.0 * fits_3bit as f64 / np as f64);
+            100.0 * fits_3bit as f64 / np as f64
+        );
     }
 
     // =========================================================================
@@ -85,10 +90,10 @@ fn main() {
     println!();
 
     let tag_configs: Vec<(usize, usize, &str)> = vec![
-        (4, 4,  " 1 byte "),
-        (4, 8,  "1.5 byte"),
+        (4, 4, " 1 byte "),
+        (4, 8, "1.5 byte"),
         (4, 12, " 2 bytes"),
-        (3, 5,  " 1 byte "),
+        (3, 5, " 1 byte "),
         (3, 13, " 2 bytes"),
     ];
 
@@ -104,10 +109,15 @@ fn main() {
         let ideal_range = map.capacity() - max_scan;
         let slots = map.occupied_slot_hashes();
 
-        println!("--- N={}, index_bits={}, pivot=bit {}, max_scan={} ---", n, index_bits, index_shift, max_scan);
+        println!(
+            "--- N={}, index_bits={}, pivot=bit {}, max_scan={} ---",
+            n, index_bits, index_shift, max_scan
+        );
         println!();
-        println!("  {:>2}D+{:<2}R {:>8} {:>5} | {:>10} {:>10} {:>10} | {:>10}",
-            "", "", "", "bits", "skip/stop%", "resolved%", "tiebreak%", "total_cmp");
+        println!(
+            "  {:>2}D+{:<2}R {:>8} {:>5} | {:>10} {:>10} {:>10} | {:>10}",
+            "", "", "", "bits", "skip/stop%", "resolved%", "tiebreak%", "total_cmp"
+        );
 
         for &(d_bits, r_bits, label) in &tag_configs {
             let d_max = (1usize << d_bits) - 1;
@@ -159,14 +169,25 @@ fn main() {
                 }
             }
 
-            if total == 0 { continue; }
-            println!("  {:>2}D+{:<2}R {} {:>5} | {:>9.4}% {:>9.4}% {:>9.4}% | {:>10}{}",
-                d_bits, r_bits, label, d_bits + r_bits,
+            if total == 0 {
+                continue;
+            }
+            println!(
+                "  {:>2}D+{:<2}R {} {:>5} | {:>9.4}% {:>9.4}% {:>9.4}% | {:>10}{}",
+                d_bits,
+                r_bits,
+                label,
+                d_bits + r_bits,
                 100.0 * skip_stop as f64 / total as f64,
                 100.0 * resolved as f64 / total as f64,
                 100.0 * tiebreak as f64 / total as f64,
                 total,
-                if d_overflow > 0 { format!("  ({}  disp overflow)", d_overflow) } else { String::new() });
+                if d_overflow > 0 {
+                    format!("  ({}  disp overflow)", d_overflow)
+                } else {
+                    String::new()
+                }
+            );
         }
         println!();
     }
@@ -219,9 +240,14 @@ fn main() {
             }
         }
 
-        println!("  N={:>10}  ibits={:>2}  ms={:>2}  same_bucket: {:>6.2}% of {} comparisons",
-            n, index_bits, max_scan,
-            100.0 * same_bucket as f64 / total as f64, total);
+        println!(
+            "  N={:>10}  ibits={:>2}  ms={:>2}  same_bucket: {:>6.2}% of {} comparisons",
+            n,
+            index_bits,
+            max_scan,
+            100.0 * same_bucket as f64 / total as f64,
+            total
+        );
     }
 
     // Detailed sub-bucket MSB distribution at 1M
@@ -261,20 +287,30 @@ fn main() {
         }
     }
 
-    println!("  pivot = bit {}, same-bucket comparisons = {}", index_shift, same_total);
+    println!(
+        "  pivot = bit {}, same-bucket comparisons = {}",
+        index_shift, same_total
+    );
     println!("  MSB of sub-bucket XOR (distance from pivot, geometric from top):");
     println!();
 
     let mut cumul = 0u64;
     for bit in (0..index_shift).rev() {
         let c = sub_msb_hist[bit];
-        if c == 0 { continue; }
+        if c == 0 {
+            continue;
+        }
         cumul += c;
         let dist = index_shift - 1 - bit; // 0 = top sub-bucket bit, 1 = next, etc.
         let bar = "#".repeat((60.0 * c as f64 / same_total as f64) as usize);
-        println!("    bit {:>2} (pivot-{:>2}): {:>7.3}%  (cumul {:>6.2}%)  {}",
-            bit, dist + 1, 100.0 * c as f64 / same_total as f64,
-            100.0 * cumul as f64 / same_total as f64, bar);
+        println!(
+            "    bit {:>2} (pivot-{:>2}): {:>7.3}%  (cumul {:>6.2}%)  {}",
+            bit,
+            dist + 1,
+            100.0 * c as f64 / same_total as f64,
+            100.0 * cumul as f64 / same_total as f64,
+            bar
+        );
     }
 
     // =========================================================================
@@ -297,12 +333,19 @@ fn main() {
     println!("Memory savings:");
     for &n in &[1_000_000usize, 10_000_000] {
         let mut map = Map::default();
-        for i in 0..n as u64 { map.insert(i, i); }
+        for i in 0..n as u64 {
+            map.insert(i, i);
+        }
         let cap = map.capacity();
         let hash8 = cap * 8;
         let tag2 = cap * 2;
-        println!("  N={:>10}  capacity={:>10}  8-byte hashes: {:>6} KB  2-byte tags: {:>6} KB  saving: {:.0}%",
-            n, cap, hash8 / 1024, tag2 / 1024,
-            100.0 * (1.0 - tag2 as f64 / hash8 as f64));
+        println!(
+            "  N={:>10}  capacity={:>10}  8-byte hashes: {:>6} KB  2-byte tags: {:>6} KB  saving: {:.0}%",
+            n,
+            cap,
+            hash8 / 1024,
+            tag2 / 1024,
+            100.0 * (1.0 - tag2 as f64 / hash8 as f64)
+        );
     }
 }

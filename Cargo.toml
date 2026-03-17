@@ -19,6 +19,7 @@ dots = []
 
 [dependencies]
 ahash = { version = "0.8", default-features = false }
+wide = { version = "0.7", default-features = false }
 
 [dev-dependencies]
 criterion = { git = "https://github.com/sam0x17/criterion.rs" }
