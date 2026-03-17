@@ -23,9 +23,9 @@ const HASH_BITS: usize = 64; // we use a 64-bit hashcode
 /// Hash Table implementations.
 const GROWTH_FACTOR: usize = 2;
 
-/// Sentinel hash value indicating a vacant slot. We use the max u64 value to avoid colliding with
-/// any valid hash, which is always less than u64::MAX due to the encoding in `encode_hash`.
-const VACANT_HASH: u64 = u64::MAX;
+/// Sentinel tag value indicating a vacant slot. Displacement nibble = 0xF (15) never occurs
+/// in practice because max_scan <= 14, so max displacement = max_scan - 1 = 13.
+const VACANT_TAG: u8 = 0xFF;
 
 /// Returns the scan window size for a given `ideal_range` (the power-of-two bucket count).
 /// Every entry resides within `[ideal_slot, ideal_slot + max_scan_for(ideal_range))`.
@@ -83,16 +83,49 @@ struct SlotEntry<K: Key, V: Value> {
 
 #[inline(always)]
 const fn encode_hash(h: u64) -> u64 {
-    // Ensure we never produce VACANT_HASH as a valid hash by shifting down by 1. This will
-    // cause an astronomically tiny bias in the hash distribution with 0 colliding with 1, but
-    // this is perfectly acceptable for our purposes
     h.saturating_sub(1)
+}
+
+/// Build a 1-byte tag: upper 4 bits = displacement, lower 4 bits = sub-bucket MSB.
+///
+/// `displacement` = position - ideal_slot (how far the entry is from its ideal position).
+/// `sub_bucket`   = top 4 bits of the hash below the pivot (index_shift).
+#[inline(always)]
+const fn make_tag(displacement: usize, hash: u64, index_shift: usize) -> u8 {
+    let sub = if index_shift >= 4 {
+        ((hash >> (index_shift - 4)) & 0xF) as u8
+    } else {
+        ((hash << (4 - index_shift)) & 0xF) as u8
+    };
+    ((displacement as u8) << 4) | sub
+}
+
+/// Extract the displacement nibble from a tag.
+#[inline(always)]
+const fn tag_displacement(tag: u8) -> usize {
+    (tag >> 4) as usize
+}
+
+/// Extract the sub-bucket nibble from a tag.
+#[inline(always)]
+const fn tag_sub_bucket(tag: u8) -> u8 {
+    tag & 0x0F
+}
+
+/// Extract the 4-bit sub-bucket MSB from a full hash for comparison with tag sub-bucket.
+#[inline(always)]
+const fn hash_sub_bucket(hash: u64, index_shift: usize) -> u8 {
+    if index_shift >= 4 {
+        ((hash >> (index_shift - 4)) & 0xF) as u8
+    } else {
+        ((hash << (4 - index_shift)) & 0xF) as u8
+    }
 }
 
 struct Slots<K: Key, V: Value> {
     ptr: NonNull<u8>,
     capacity: usize,
-    hashes: *mut u64,
+    tags: *mut u8,
     entries: *mut SlotEntry<K, V>,
     layout: Layout,
     _marker: PhantomData<SlotEntry<K, V>>,
@@ -101,11 +134,11 @@ struct Slots<K: Key, V: Value> {
 impl<K: Key, V: Value> Slots<K, V> {
     #[inline(always)]
     fn new(capacity: usize) -> Self {
-        let hashes_layout =
-            Layout::array::<u64>(capacity).expect("PoMap hash layout overflow on creation");
+        let tags_layout =
+            Layout::array::<u8>(capacity).expect("PoMap tag layout overflow on creation");
         let entries_layout = Layout::array::<SlotEntry<K, V>>(capacity)
             .expect("PoMap entry layout overflow on creation");
-        let (layout, entries_offset) = hashes_layout
+        let (layout, entries_offset) = tags_layout
             .extend(entries_layout)
             .expect("PoMap combined layout overflow on creation");
         let layout = layout.pad_to_align();
@@ -116,18 +149,17 @@ impl<K: Key, V: Value> Slots<K, V> {
             None => handle_alloc_error(layout),
         };
 
-        let hashes = ptr.as_ptr() as *mut u64;
+        let tags = ptr.as_ptr() as *mut u8;
         let entries = unsafe { ptr.as_ptr().add(entries_offset) as *mut SlotEntry<K, V> };
 
         unsafe {
-            // Mark all hashes as vacant.
-            ptr::write_bytes(hashes, 0xFF, capacity);
-            // SAFETY: ok to leave entries uninitialized
+            // Mark all tags as vacant.
+            ptr::write_bytes(tags, 0xFF, capacity);
         }
 
         Self {
             ptr,
-            hashes,
+            tags,
             entries,
             capacity,
             layout,
@@ -137,11 +169,11 @@ impl<K: Key, V: Value> Slots<K, V> {
 
     #[inline]
     fn try_new(capacity: usize) -> Result<Self, TryReserveError> {
-        let hashes_layout =
-            Layout::array::<u64>(capacity).map_err(|_| TryReserveError::CapacityOverflow)?;
+        let tags_layout =
+            Layout::array::<u8>(capacity).map_err(|_| TryReserveError::CapacityOverflow)?;
         let entries_layout = Layout::array::<SlotEntry<K, V>>(capacity)
             .map_err(|_| TryReserveError::CapacityOverflow)?;
-        let (layout, entries_offset) = hashes_layout
+        let (layout, entries_offset) = tags_layout
             .extend(entries_layout)
             .map_err(|_| TryReserveError::CapacityOverflow)?;
         let layout = layout.pad_to_align();
@@ -149,16 +181,16 @@ impl<K: Key, V: Value> Slots<K, V> {
         let ptr = unsafe { alloc(layout) };
         let ptr = NonNull::new(ptr).ok_or(TryReserveError::AllocError { layout })?;
 
-        let hashes = ptr.as_ptr() as *mut u64;
+        let tags = ptr.as_ptr() as *mut u8;
         let entries = unsafe { ptr.as_ptr().add(entries_offset) as *mut SlotEntry<K, V> };
 
         unsafe {
-            ptr::write_bytes(hashes, 0xFF, capacity);
+            ptr::write_bytes(tags, 0xFF, capacity);
         }
 
         Ok(Self {
             ptr,
-            hashes,
+            tags,
             entries,
             capacity,
             layout,
@@ -172,8 +204,8 @@ impl<K: Key, V: Value> Slots<K, V> {
     }
 
     #[inline(always)]
-    fn hashes_ptr(&self) -> *mut u64 {
-        self.hashes
+    fn tags_ptr(&self) -> *mut u8 {
+        self.tags
     }
 
     #[inline(always)]
@@ -182,20 +214,20 @@ impl<K: Key, V: Value> Slots<K, V> {
     }
 
     #[inline(always)]
-    unsafe fn set_hash(&mut self, idx: usize, hash: u64) {
+    unsafe fn set_tag(&mut self, idx: usize, tag: u8) {
         debug_assert!(idx < self.capacity);
-        unsafe { *self.hashes.add(idx) = hash };
+        unsafe { *self.tags.add(idx) = tag };
     }
 
     #[inline(always)]
     unsafe fn clear_slot(&mut self, idx: usize) {
-        unsafe { self.set_hash(idx, VACANT_HASH) };
+        unsafe { self.set_tag(idx, VACANT_TAG) };
     }
 
     #[inline(always)]
-    unsafe fn write_slot(&mut self, idx: usize, hash: u64, key: K, value: V) {
+    unsafe fn write_slot(&mut self, idx: usize, tag: u8, key: K, value: V) {
         unsafe {
-            self.set_hash(idx, hash);
+            self.set_tag(idx, tag);
             let entry = &mut *self.entries.add(idx);
             entry.key.write(key);
             entry.value.write(value);
@@ -206,9 +238,9 @@ impl<K: Key, V: Value> Slots<K, V> {
 impl<K: Key, V: Value> Drop for Slots<K, V> {
     fn drop(&mut self) {
         unsafe {
-            let hashes = slice::from_raw_parts(self.hashes, self.capacity);
-            for (idx, &hash) in hashes.iter().enumerate() {
-                if hash != VACANT_HASH {
+            let tags = slice::from_raw_parts(self.tags, self.capacity);
+            for (idx, &tag) in tags.iter().enumerate() {
+                if tag != VACANT_TAG {
                     let entry = &mut *self.entries.add(idx);
                     entry.key.assume_init_drop();
                     entry.value.assume_init_drop();
@@ -235,10 +267,11 @@ impl<K: Key, V: Value, H: BuildHasher> PoMap<K, V, H> {
         cursor: &mut usize,
         src: &mut Slots<K, V>,
         start_idx: usize,
+        hash_builder: &H,
     ) -> Result<(), usize> {
-        let dst_hashes = dst.hashes_ptr();
+        let dst_tags = dst.tags_ptr();
         let dst_entries = dst.entries_ptr();
-        let src_hashes = src.hashes_ptr();
+        let src_tags = src.tags_ptr();
         let src_entries = src.entries_ptr();
         let src_capacity = src.capacity();
         let max_scan = max_scan_for(1usize << meta.index_bits);
@@ -246,22 +279,30 @@ impl<K: Key, V: Value, H: BuildHasher> PoMap<K, V, H> {
 
         let mut idx = start_idx;
         while idx < src_capacity {
-            let hash = unsafe { *src_hashes.add(idx) };
-            if hash != VACANT_HASH {
-                let ideal_slot = (hash >> index_shift) as usize;
-                if *cursor < ideal_slot {
-                    *cursor = ideal_slot;
-                }
-                if *cursor >= ideal_slot + max_scan {
-                    return Err(idx);
-                }
+            let tag = unsafe { *src_tags.add(idx) };
+            if tag != VACANT_TAG {
                 unsafe {
                     let entry = &mut *src_entries.add(idx);
                     let key = entry.key.assume_init_read();
                     let value = entry.value.assume_init_read();
-                    *src_hashes.add(idx) = VACANT_HASH;
 
-                    *dst_hashes.add(*cursor) = hash;
+                    // Re-hash the key to get the full hash for the new layout
+                    let hash = encode_hash(hash_builder.hash_one(&key));
+                    let ideal_slot = (hash >> index_shift) as usize;
+                    if *cursor < ideal_slot {
+                        *cursor = ideal_slot;
+                    }
+                    if *cursor >= ideal_slot + max_scan {
+                        // Put the key/value back before returning error
+                        entry.key.write(key);
+                        entry.value.write(value);
+                        return Err(idx);
+                    }
+
+                    *src_tags.add(idx) = VACANT_TAG;
+
+                    let new_tag = make_tag(*cursor - ideal_slot, hash, index_shift);
+                    *dst_tags.add(*cursor) = new_tag;
                     let dst_entry = &mut *dst_entries.add(*cursor);
                     dst_entry.key.write(key);
                     dst_entry.value.write(value);
@@ -317,7 +358,7 @@ impl<K: Key, V: Value, H: BuildHasher> PoMap<K, V, H> {
         let capacity = self.capacity();
         let slots = Slots::new(capacity);
         unsafe {
-            ptr::copy_nonoverlapping(self.slots.hashes_ptr(), slots.hashes_ptr(), capacity);
+            ptr::copy_nonoverlapping(self.slots.tags_ptr(), slots.tags_ptr(), capacity);
             ptr::copy_nonoverlapping(self.slots.entries_ptr(), slots.entries_ptr(), capacity);
         }
 
@@ -394,24 +435,51 @@ impl<K: Key, V: Value, H: BuildHasher> PoMap<K, V, H> {
     #[inline(always)]
     pub fn _get_with_hash(&self, hash: u64, key: &K) -> Option<&V> {
         let ideal_slot = self.meta.ideal_slot(hash);
-        let scan_end = ideal_slot + self.max_scan();
-
-        // SAFETY: ideal_slot..scan_end is always in-bounds for the backing allocation.
-        let hashes_ptr = self.slots.hashes_ptr();
+        let target_sub = hash_sub_bucket(hash, self.meta.index_shift);
+        let tags_ptr = self.slots.tags_ptr();
         let entries_ptr = self.slots.entries_ptr();
 
-        for idx in ideal_slot..scan_end {
-            let slot_hash = unsafe { *hashes_ptr.add(idx) };
-
-            if slot_hash == hash {
-                let slot_entry = unsafe { &*entries_ptr.add(idx) };
-                if unsafe { slot_entry.key.assume_init_ref() } == key {
-                    return Some(unsafe { slot_entry.value.assume_init_ref() });
-                }
-                // hash collision: keep scanning
-            } else if slot_hash > hash {
-                return None; // also catches VACANT_HASH if VACANT_HASH > any valid hash
+        for idx in ideal_slot..ideal_slot + self.max_scan() {
+            let tag = unsafe { *tags_ptr.add(idx) };
+            if tag == VACANT_TAG {
+                return None;
             }
+            let offset = idx - ideal_slot;
+            let disp = tag_displacement(tag);
+            if disp > offset {
+                continue; // entry from earlier bucket
+            }
+            if disp < offset {
+                return None; // entry from later bucket
+            }
+            // Same bucket — compare sub-bucket
+            let sub = tag_sub_bucket(tag);
+            if sub < target_sub {
+                continue;
+            }
+            if sub > target_sub {
+                return None;
+            }
+            // Tag tiebreaker — compare key directly
+            let slot_entry = unsafe { &*entries_ptr.add(idx) };
+            let slot_key = unsafe { slot_entry.key.assume_init_ref() };
+            if slot_key == key {
+                return Some(unsafe { slot_entry.value.assume_init_ref() });
+            }
+            // Re-hash to determine ordering (can't use key ordering alone
+            // because hash ordering may differ from key ordering)
+            let slot_hash = encode_hash(self.hash_builder.hash_one(slot_key));
+            if slot_hash < hash {
+                continue;
+            }
+            if slot_hash > hash {
+                return None;
+            }
+            // Same hash, different key — use key ordering
+            if slot_key > key {
+                return None;
+            }
+            // slot_key < key: keep scanning
         }
         None
     }
@@ -419,25 +487,29 @@ impl<K: Key, V: Value, H: BuildHasher> PoMap<K, V, H> {
     #[inline(always)]
     fn _get_key_value_with_hash(&self, hash: u64, key: &K) -> Option<(&K, &V)> {
         let ideal_slot = self.meta.ideal_slot(hash);
-        let scan_end = ideal_slot + self.max_scan();
-
-        // SAFETY: ideal_slot..scan_end is always in-bounds for the backing allocation.
-        let hashes_ptr = self.slots.hashes_ptr();
+        let target_sub = hash_sub_bucket(hash, self.meta.index_shift);
+        let tags_ptr = self.slots.tags_ptr();
         let entries_ptr = self.slots.entries_ptr();
 
-        for idx in ideal_slot..scan_end {
-            let slot_hash = unsafe { *hashes_ptr.add(idx) };
-
-            if slot_hash == hash {
-                let slot_entry = unsafe { &*entries_ptr.add(idx) };
-                let slot_key = unsafe { slot_entry.key.assume_init_ref() };
-                if slot_key == key {
-                    return Some((slot_key, unsafe { slot_entry.value.assume_init_ref() }));
-                }
-                // hash collision: keep scanning
-            } else if slot_hash > hash {
-                return None; // also catches VACANT_HASH if VACANT_HASH > any valid hash
+        for idx in ideal_slot..ideal_slot + self.max_scan() {
+            let tag = unsafe { *tags_ptr.add(idx) };
+            if tag == VACANT_TAG { return None; }
+            let offset = idx - ideal_slot;
+            let disp = tag_displacement(tag);
+            if disp > offset { continue; }
+            if disp < offset { return None; }
+            let sub = tag_sub_bucket(tag);
+            if sub < target_sub { continue; }
+            if sub > target_sub { return None; }
+            let slot_entry = unsafe { &*entries_ptr.add(idx) };
+            let slot_key = unsafe { slot_entry.key.assume_init_ref() };
+            if slot_key == key {
+                return Some((slot_key, unsafe { slot_entry.value.assume_init_ref() }));
             }
+            let slot_hash = encode_hash(self.hash_builder.hash_one(slot_key));
+            if slot_hash < hash { continue; }
+            if slot_hash > hash { return None; }
+            if slot_key > key { return None; }
         }
         None
     }
@@ -448,21 +520,25 @@ impl<K: Key, V: Value, H: BuildHasher> PoMap<K, V, H> {
         F: FnMut(&K) -> bool,
     {
         let ideal_slot = self.meta.ideal_slot(hash);
-        let scan_end = ideal_slot + self.max_scan();
-
-        let hashes_ptr = self.slots.hashes_ptr();
+        let target_sub = hash_sub_bucket(hash, self.meta.index_shift);
+        let tags_ptr = self.slots.tags_ptr();
         let entries_ptr = self.slots.entries_ptr();
 
-        for idx in ideal_slot..scan_end {
-            let slot_hash = unsafe { *hashes_ptr.add(idx) };
-            if slot_hash == hash {
-                let entry = unsafe { &*entries_ptr.add(idx) };
-                let key = unsafe { entry.key.assume_init_ref() };
-                if is_match(key) {
-                    return Some(idx);
-                }
-            } else if slot_hash > hash {
-                return None;
+        for idx in ideal_slot..ideal_slot + self.max_scan() {
+            let tag = unsafe { *tags_ptr.add(idx) };
+            if tag == VACANT_TAG { return None; }
+            let offset = idx - ideal_slot;
+            let disp = tag_displacement(tag);
+            if disp > offset { continue; }
+            if disp < offset { return None; }
+            let sub = tag_sub_bucket(tag);
+            if sub < target_sub { continue; }
+            if sub > target_sub { return None; }
+            // Same tag — check key match; must scan all entries with same tag
+            let entry = unsafe { &*entries_ptr.add(idx) };
+            let key = unsafe { entry.key.assume_init_ref() };
+            if is_match(key) {
+                return Some(idx);
             }
         }
         None
@@ -545,24 +621,29 @@ impl<K: Key, V: Value, H: BuildHasher> PoMap<K, V, H> {
     #[inline(always)]
     fn _get_mut_with_hash(&mut self, hash: u64, key: &K) -> Option<&mut V> {
         let ideal_slot = self.meta.ideal_slot(hash);
-        let scan_end = ideal_slot + self.max_scan();
-
-        // SAFETY: ideal_slot..scan_end is always in-bounds for the backing allocation.
-        let hashes_ptr = self.slots.hashes_ptr();
+        let target_sub = hash_sub_bucket(hash, self.meta.index_shift);
+        let tags_ptr = self.slots.tags_ptr();
         let entries_ptr = self.slots.entries_ptr();
 
-        for idx in ideal_slot..scan_end {
-            let slot_hash = unsafe { *hashes_ptr.add(idx) };
-
-            if slot_hash == hash {
-                let slot_entry = unsafe { &mut *entries_ptr.add(idx) };
-                if unsafe { slot_entry.key.assume_init_ref() } == key {
-                    return Some(unsafe { slot_entry.value.assume_init_mut() });
-                }
-                // hash collision: keep scanning
-            } else if slot_hash > hash {
-                return None; // also catches VACANT_HASH if VACANT_HASH > any valid hash
+        for idx in ideal_slot..ideal_slot + self.max_scan() {
+            let tag = unsafe { *tags_ptr.add(idx) };
+            if tag == VACANT_TAG { return None; }
+            let offset = idx - ideal_slot;
+            let disp = tag_displacement(tag);
+            if disp > offset { continue; }
+            if disp < offset { return None; }
+            let sub = tag_sub_bucket(tag);
+            if sub < target_sub { continue; }
+            if sub > target_sub { return None; }
+            let slot_entry = unsafe { &mut *entries_ptr.add(idx) };
+            let slot_key = unsafe { slot_entry.key.assume_init_ref() };
+            if slot_key == key {
+                return Some(unsafe { slot_entry.value.assume_init_mut() });
             }
+            let slot_hash = encode_hash(self.hash_builder.hash_one(slot_key));
+            if slot_hash < hash { continue; }
+            if slot_hash > hash { return None; }
+            if slot_key > key { return None; }
         }
         None
     }
@@ -596,7 +677,7 @@ impl<K: Key, V: Value, H: BuildHasher> PoMap<K, V, H> {
     #[inline]
     pub fn iter(&self) -> Iter<'_, K, V> {
         Iter {
-            hashes: self.slots.hashes_ptr().cast_const(),
+            tags: self.slots.tags_ptr().cast_const(),
             entries: self.slots.entries_ptr().cast_const(),
             index: 0,
             capacity: self.slots.capacity(),
@@ -609,7 +690,7 @@ impl<K: Key, V: Value, H: BuildHasher> PoMap<K, V, H> {
     #[inline]
     pub fn iter_mut(&mut self) -> IterMut<'_, K, V> {
         IterMut {
-            hashes: self.slots.hashes_ptr().cast_const(),
+            tags: self.slots.tags_ptr().cast_const(),
             entries: self.slots.entries_ptr(),
             index: 0,
             capacity: self.slots.capacity(),
@@ -658,50 +739,79 @@ impl<K: Key, V: Value, H: BuildHasher> PoMap<K, V, H> {
     fn find_entry_location(&self, hash: u64, key: &K) -> EntryLocation {
         let ideal_slot = self.meta.ideal_slot(hash);
         let scan_end = ideal_slot + self.max_scan();
-
-        // SAFETY: ideal_slot..scan_end is always in-bounds for the backing allocation.
-        let hashes_ptr = self.slots.hashes_ptr();
+        let target_sub = hash_sub_bucket(hash, self.meta.index_shift);
+        let tags_ptr = self.slots.tags_ptr();
         let entries_ptr = self.slots.entries_ptr();
 
         let mut idx = ideal_slot;
         while idx < scan_end {
-            let slot_hash = unsafe { *hashes_ptr.add(idx) };
+            let tag = unsafe { *tags_ptr.add(idx) };
 
-            if slot_hash == VACANT_HASH {
+            if tag == VACANT_TAG {
                 return EntryLocation::Vacant {
                     insert: VacantInsert::Direct { index: idx },
                 };
             }
 
-            if slot_hash < hash {
+            let offset = idx - ideal_slot;
+            let disp = tag_displacement(tag);
+
+            if disp > offset {
+                // Entry from earlier bucket — skip
                 idx += 1;
                 continue;
             }
 
-            if slot_hash == hash {
-                let slot_entry = unsafe { &*entries_ptr.add(idx) };
-                let slot_key = unsafe { slot_entry.key.assume_init_ref() };
-                if slot_key == key {
-                    return EntryLocation::Occupied { index: idx };
-                }
-                if slot_key < key {
+            if disp < offset {
+                // Entry from later bucket — insert before here
+            } else {
+                // Same bucket — compare sub-bucket
+                let sub = tag_sub_bucket(tag);
+                if sub < target_sub {
                     idx += 1;
                     continue;
                 }
-                // slot_key > key → fall through to shift
+                if sub == target_sub {
+                    // Tag tiebreaker — re-hash stored key to determine ordering
+                    let slot_entry = unsafe { &*entries_ptr.add(idx) };
+                    let slot_key = unsafe { slot_entry.key.assume_init_ref() };
+                    if slot_key == key {
+                        return EntryLocation::Occupied { index: idx };
+                    }
+                    let slot_hash = encode_hash(self.hash_builder.hash_one(slot_key));
+                    if slot_hash < hash {
+                        idx += 1;
+                        continue;
+                    }
+                    if slot_hash == hash {
+                        if slot_key < key {
+                            idx += 1;
+                            continue;
+                        }
+                    }
+                    // slot_hash > hash or (same hash, slot_key > key) → fall through to shift
+                }
+                // sub > target_sub → fall through to shift
             }
 
-            // slot_hash > hash or slot_key > key → search for a vacant slot to shift into.
+            // Need to insert before idx. Search for a vacant slot to shift into,
+            // ensuring all shifted entries can accommodate displacement + 1.
+            let max_scan = self.max_scan();
             let mut search = idx + 1;
-            while search < scan_end {
-                let cand_hash = unsafe { *hashes_ptr.add(search) };
-                if cand_hash == VACANT_HASH {
+            let mut shift_ok = tag_displacement(tag) < max_scan - 1;
+            while shift_ok && search < scan_end {
+                let cand_tag = unsafe { *tags_ptr.add(search) };
+                if cand_tag == VACANT_TAG {
                     return EntryLocation::Vacant {
                         insert: VacantInsert::Shift {
                             insert_index: idx,
                             vacant_index: search,
                         },
                     };
+                }
+                if tag_displacement(cand_tag) >= max_scan - 1 {
+                    shift_ok = false;
+                    break;
                 }
                 search += 1;
             }
@@ -759,20 +869,23 @@ impl<K: Key, V: Value, H: BuildHasher> PoMap<K, V, H> {
         let mut grows = 0u32;
         loop {
             let ideal_slot = self.meta.ideal_slot(hash);
-            let scan_end = ideal_slot + self.max_scan();
+            let max_scan = self.max_scan();
+            let scan_end = ideal_slot + max_scan;
+            let index_shift = self.meta.index_shift;
+            let target_sub = hash_sub_bucket(hash, index_shift);
 
-            // SAFETY: ideal_slot..scan_end is always in-bounds for the backing allocation.
-            let hashes_ptr = self.slots.hashes_ptr();
+            let tags_ptr = self.slots.tags_ptr();
             let entries_ptr = self.slots.entries_ptr();
 
             let mut idx = ideal_slot;
             while idx < scan_end {
-                let slot_hash = unsafe { *hashes_ptr.add(idx) };
+                let tag = unsafe { *tags_ptr.add(idx) };
 
                 // Fast path: insert immediately into an empty slot.
-                if slot_hash == VACANT_HASH {
+                if tag == VACANT_TAG {
+                    let new_tag = make_tag(idx - ideal_slot, hash, index_shift);
                     unsafe {
-                        *hashes_ptr.add(idx) = hash;
+                        *tags_ptr.add(idx) = new_tag;
                         let entry = &mut *entries_ptr.add(idx);
                         entry.key.write(key);
                         entry.value.write(value);
@@ -781,55 +894,81 @@ impl<K: Key, V: Value, H: BuildHasher> PoMap<K, V, H> {
                     return InsertResult::Inserted { index: idx };
                 }
 
-                // Common scan: skip hashes below the insertion point.
-                if slot_hash < hash {
+                let offset = idx - ideal_slot;
+                let disp = tag_displacement(tag);
+
+                if disp > offset {
                     idx += 1;
-                    continue;
+                    continue; // entry from earlier bucket
                 }
 
-                // Now slot_hash >= hash and occupied.
-                if slot_hash == hash {
-                    let slot = unsafe { &mut *entries_ptr.add(idx) };
-                    let slot_key = unsafe { slot.key.assume_init_ref() };
-                    if slot_key == &key {
-                        // Key already exists; replace value.
-                        let old_value = if core::mem::needs_drop::<V>() {
-                            core::mem::replace(unsafe { slot.value.assume_init_mut() }, value)
-                        } else {
-                            // For POD values, avoid drop glue by doing a raw read+write.
-                            unsafe {
-                                let old = slot.value.assume_init_read();
-                                slot.value.write(value);
-                                old
-                            }
-                        };
-                        return InsertResult::Replaced {
-                            index: idx,
-                            old: old_value,
-                        };
-                    }
-                    if slot_key < &key {
+                if disp < offset {
+                    // entry from later bucket — insert before here
+                } else {
+                    // Same bucket
+                    let sub = tag_sub_bucket(tag);
+                    if sub < target_sub {
                         idx += 1;
                         continue;
                     }
-                    // slot_key > key → fall through to shift
+                    if sub == target_sub {
+                        let slot = unsafe { &mut *entries_ptr.add(idx) };
+                        let slot_key = unsafe { slot.key.assume_init_ref() };
+                        if slot_key == &key {
+                            let old_value = if core::mem::needs_drop::<V>() {
+                                core::mem::replace(unsafe { slot.value.assume_init_mut() }, value)
+                            } else {
+                                unsafe {
+                                    let old = slot.value.assume_init_read();
+                                    slot.value.write(value);
+                                    old
+                                }
+                            };
+                            return InsertResult::Replaced {
+                                index: idx,
+                                old: old_value,
+                            };
+                        }
+                        let slot_hash = encode_hash(self.hash_builder.hash_one(slot_key));
+                        if slot_hash < hash {
+                            idx += 1;
+                            continue;
+                        }
+                        if slot_hash == hash && slot_key < &key {
+                            idx += 1;
+                            continue;
+                        }
+                        // slot_hash > hash or (same hash, slot_key > key) → shift
+                    }
+                    // sub > target_sub → fall through to shift
                 }
 
-                // slot_hash > hash or slot_key > key → fall through to shift
-
                 // Here: (hash, key) should be inserted before this slot.
-                // Search for a Vacant in (idx, scan_end).
+                // Search for a vacant slot in (idx, scan_end), ensuring all
+                // entries being shifted can accommodate displacement + 1.
                 let mut search = idx + 1;
+                let mut shift_ok = true;
                 while search < scan_end {
-                    let cand_hash = unsafe { *hashes_ptr.add(search) };
-                    if cand_hash == VACANT_HASH {
-                        // Rotate [idx..=search] right by 1 and drop new element at idx.
+                    let cand_tag = unsafe { *tags_ptr.add(search) };
+                    if cand_tag == VACANT_TAG {
+                        break;
+                    }
+                    // Entry at search-1 will shift to search; check the entry
+                    // we're about to pass can handle displacement + 1
+                    if tag_displacement(cand_tag) >= max_scan - 1 {
+                        break;
+                    }
+                    search += 1;
+                }
+
+                if shift_ok && search < scan_end && unsafe { *tags_ptr.add(search) } == VACANT_TAG {
+                    // Also check the entry at idx (it shifts from idx to idx+1)
+                    if tag_displacement(tag) < max_scan - 1 {
                         unsafe {
-                            // Shift [idx..search) right by 1 into the vacant at `search`.
-                            // Do it backwards to avoid overlap issues.
                             let mut i = search;
                             while i > idx {
-                                *hashes_ptr.add(i) = *hashes_ptr.add(i - 1);
+                                let prev_tag = *tags_ptr.add(i - 1);
+                                *tags_ptr.add(i) = prev_tag.wrapping_add(0x10);
                                 core::ptr::write(
                                     entries_ptr.add(i),
                                     core::ptr::read(entries_ptr.add(i - 1)),
@@ -837,7 +976,8 @@ impl<K: Key, V: Value, H: BuildHasher> PoMap<K, V, H> {
                                 i -= 1;
                             }
 
-                            *hashes_ptr.add(idx) = hash;
+                            let new_tag = make_tag(idx - ideal_slot, hash, index_shift);
+                            *tags_ptr.add(idx) = new_tag;
                             let entry = &mut *entries_ptr.add(idx);
                             entry.key.write(key);
                             entry.value.write(value);
@@ -845,34 +985,14 @@ impl<K: Key, V: Value, H: BuildHasher> PoMap<K, V, H> {
                         self.len += 1;
                         return InsertResult::Inserted { index: idx };
                     }
-                    search += 1;
                 }
 
-                // No room in this window; try cascade displacement before growing.
-                //
-                // Cascade lets us absorb the overflow without a grow by borrowing space
-                // from neighboring windows. The idea:
-                //
-                //   1. The last entry in [idx, scan_end) has the highest hash in the run.
-                //      If its ideal_slot > ideal_slot_x, its window extends past scan_end,
-                //      meaning it is legally allowed to live one slot to the right.
-                //
-                //   2. We scan forward from scan_end looking for a free slot v such that
-                //      every entry in [scan_end, v) can also shift right (none of them is
-                //      already at the last valid position of its own window).
-                //
-                //   3. We shift [idx, v-1] right by one and place X at idx. Because each
-                //      shifted entry stays within its own scan window, all invariants hold.
-                //
-                // The cascade search is capped at scan_end + CASCADE_WINDOWS * max_scan
-                // (= ideal_slot + (1 + CASCADE_WINDOWS) * max_scan). This bounds both the
-                // search and the subsequent shift to O(max_scan), keeping insert worst-case
-                // O(1). In practice the cascade terminates well within this limit at the
-                // first vacant slot or pinned entry.
-                let ideal_slot_x = scan_end - self.max_scan();
-                let cascade_limit = scan_end + CASCADE_WINDOWS * self.max_scan();
-                let last_hash = unsafe { *hashes_ptr.add(scan_end - 1) };
-                let last_ideal = (last_hash >> self.meta.index_shift) as usize;
+                // No room in this window; try cascade displacement.
+                let ideal_slot_x = scan_end - max_scan;
+                let cascade_limit = scan_end + CASCADE_WINDOWS * max_scan;
+                let last_tag = unsafe { *tags_ptr.add(scan_end - 1) };
+                let last_disp = tag_displacement(last_tag);
+                let last_ideal = (scan_end - 1) - last_disp;
 
                 if last_ideal > ideal_slot_x {
                     let capacity = self.slots.capacity();
@@ -880,37 +1000,37 @@ impl<K: Key, V: Value, H: BuildHasher> PoMap<K, V, H> {
                     let mut cascade_ok = true;
 
                     while v < capacity && v < cascade_limit {
-                        let v_hash = unsafe { *hashes_ptr.add(v) };
-                        if v_hash == VACANT_HASH {
-                            break; // found the destination vacancy
+                        let v_tag = unsafe { *tags_ptr.add(v) };
+                        if v_tag == VACANT_TAG {
+                            break;
                         }
-                        // Entry at v must be able to shift right to v+1.
-                        // Condition: v+1 < ideal_slot(v_hash) + index_bits
-                        let v_ideal = (v_hash >> self.meta.index_shift) as usize;
-                        if v + 1 >= v_ideal + self.max_scan() {
-                            cascade_ok = false; // entry pinned to last valid position
+                        let v_disp = tag_displacement(v_tag);
+                        let v_ideal = v - v_disp;
+                        if v + 1 >= v_ideal + max_scan {
+                            cascade_ok = false;
                             break;
                         }
                         v += 1;
                     }
-                    // If the loop exited because we hit the cap (not a VACANT), cancel.
                     if v >= cascade_limit {
                         cascade_ok = false;
                     }
 
                     if cascade_ok && v < capacity {
-                        // Shift [idx, v-1] right by 1 and insert X at idx.
+                        // Shift [idx, v-1] right by 1, adjusting displacement.
                         unsafe {
                             let mut i = v;
                             while i > idx {
-                                *hashes_ptr.add(i) = *hashes_ptr.add(i - 1);
+                                let prev_tag = *tags_ptr.add(i - 1);
+                                *tags_ptr.add(i) = prev_tag.wrapping_add(0x10);
                                 core::ptr::write(
                                     entries_ptr.add(i),
                                     core::ptr::read(entries_ptr.add(i - 1)),
                                 );
                                 i -= 1;
                             }
-                            *hashes_ptr.add(idx) = hash;
+                            let new_tag = make_tag(idx - ideal_slot, hash, index_shift);
+                            *tags_ptr.add(idx) = new_tag;
                             let entry = &mut *entries_ptr.add(idx);
                             entry.key.write(key);
                             entry.value.write(value);
@@ -920,16 +1040,9 @@ impl<K: Key, V: Value, H: BuildHasher> PoMap<K, V, H> {
                     }
                 }
 
-                // No cascade possible; grow and retry.
                 break;
             }
 
-            // If we make it here, we either ran out of room in the scan window
-            // or the table is saturated for this hash window. Grow and retry.
-            #[cfg(feature = "resize-logging")]
-            let old_cap = self.slots.capacity();
-            #[cfg(feature = "resize-logging")]
-            let load_factor = self.len as f64 / old_cap as f64;
             let ideal_range = self.slots.capacity() - self.max_scan();
             let target_capacity = ideal_range.saturating_mul(GROWTH_FACTOR);
             self.reserve_for_capacity(target_capacity);
@@ -939,15 +1052,6 @@ impl<K: Key, V: Value, H: BuildHasher> PoMap<K, V, H> {
                 "PoMap: bucket overflow — more than {} entries hash to the same slot. \
                  This indicates a degenerate hash function.",
                 self.max_scan()
-            );
-            #[cfg(feature = "resize-logging")]
-            let new_cap = self.slots.capacity();
-            #[cfg(feature = "resize-logging")]
-            let new_load_factor = self.len as f64 / new_cap as f64;
-            #[cfg(feature = "resize-logging")]
-            println!(
-                "PoMap resized from {} to {} (load factor {:.2}), {:.2} after",
-                old_cap, new_cap, load_factor, new_load_factor
             );
         }
     }
@@ -981,18 +1085,18 @@ impl<K: Key, V: Value, H: BuildHasher> PoMap<K, V, H> {
             return;
         }
 
-        let hashes_ptr = self.slots.hashes_ptr();
+        let tags_ptr = self.slots.tags_ptr();
         let entries_ptr = self.slots.entries_ptr();
         let capacity = self.slots.capacity();
 
         for idx in 0..capacity {
-            let hash = unsafe { *hashes_ptr.add(idx) };
-            if hash != VACANT_HASH {
+            let tag = unsafe { *tags_ptr.add(idx) };
+            if tag != VACANT_TAG {
                 unsafe {
                     let entry = &mut *entries_ptr.add(idx);
                     entry.key.assume_init_drop();
                     entry.value.assume_init_drop();
-                    *hashes_ptr.add(idx) = VACANT_HASH;
+                    *tags_ptr.add(idx) = VACANT_TAG;
                 }
             }
         }
@@ -1013,13 +1117,13 @@ impl<K: Key, V: Value, H: BuildHasher> PoMap<K, V, H> {
         }
 
         let capacity = self.slots.capacity();
-        let hashes_ptr = self.slots.hashes_ptr();
+        let tags_ptr = self.slots.tags_ptr();
         let entries_ptr = self.slots.entries_ptr();
 
         let mut idx = 0usize;
         while idx < capacity {
-            let hash = unsafe { *hashes_ptr.add(idx) };
-            if hash == VACANT_HASH {
+            let tag = unsafe { *tags_ptr.add(idx) };
+            if tag == VACANT_TAG {
                 idx += 1;
                 continue;
             }
@@ -1059,7 +1163,7 @@ impl<K: Key, V: Value, H: BuildHasher> PoMap<K, V, H> {
         let remaining = self.len;
         self.len = 0;
         Drain {
-            hashes: self.slots.hashes_ptr(),
+            tags: self.slots.tags_ptr(),
             entries: self.slots.entries_ptr(),
             index: 0,
             capacity: self.slots.capacity(),
@@ -1073,63 +1177,58 @@ impl<K: Key, V: Value, H: BuildHasher> PoMap<K, V, H> {
     #[inline(always)]
     fn _remove_with_hash(&mut self, hash: u64, key: &K) -> Option<V> {
         let ideal_slot = self.meta.ideal_slot(hash);
-        let scan_end = ideal_slot + self.max_scan();
-
-        // SAFETY: ideal_slot..scan_end is always in-bounds for the backing allocation.
-        let hashes_ptr = self.slots.hashes_ptr();
+        let target_sub = hash_sub_bucket(hash, self.meta.index_shift);
+        let tags_ptr = self.slots.tags_ptr();
         let entries_ptr = self.slots.entries_ptr();
         let capacity = self.slots.capacity();
 
         let mut idx = ideal_slot;
-        while idx < scan_end {
-            let slot_hash = unsafe { *hashes_ptr.add(idx) };
+        while idx < ideal_slot + self.max_scan() {
+            let tag = unsafe { *tags_ptr.add(idx) };
+            if tag == VACANT_TAG { return None; }
+            let offset = idx - ideal_slot;
+            let disp = tag_displacement(tag);
+            if disp > offset { idx += 1; continue; }
+            if disp < offset { return None; }
+            let sub = tag_sub_bucket(tag);
+            if sub < target_sub { idx += 1; continue; }
+            if sub > target_sub { return None; }
 
-            if slot_hash == hash {
-                let slot_entry = unsafe { &mut *entries_ptr.add(idx) };
-                let slot_key = unsafe { slot_entry.key.assume_init_ref() };
-                if slot_key == key {
-                    // Found the entry. Extract the value and drop the key.
-                    let value = unsafe { slot_entry.value.assume_init_read() };
-                    unsafe { slot_entry.key.assume_init_drop() };
+            let slot_entry = unsafe { &mut *entries_ptr.add(idx) };
+            let slot_key = unsafe { slot_entry.key.assume_init_ref() };
+            if slot_key == key {
+                let value = unsafe { slot_entry.value.assume_init_read() };
+                unsafe { slot_entry.key.assume_init_drop() };
 
-                    // Backshift-delete: move subsequent entries left while they can
-                    // legally occupy the vacancy.
-                    let mut vacancy = idx;
-                    let mut scan = idx + 1;
-                    while scan < capacity {
-                        let next_hash = unsafe { *hashes_ptr.add(scan) };
-                        if next_hash == VACANT_HASH {
-                            break;
-                        }
-                        let next_ideal = self.meta.ideal_slot(next_hash);
-                        if next_ideal > vacancy {
-                            break;
-                        }
-                        vacancy += 1;
-                        scan += 1;
+                // Backshift-delete: shift subsequent entries left, adjusting displacement.
+                let mut vacancy = idx;
+                let mut scan = idx + 1;
+                while scan < capacity {
+                    let next_tag = unsafe { *tags_ptr.add(scan) };
+                    if next_tag == VACANT_TAG { break; }
+                    let next_disp = tag_displacement(next_tag);
+                    let next_ideal = scan - next_disp;
+                    if next_ideal > vacancy { break; }
+                    unsafe {
+                        *tags_ptr.add(vacancy) = next_tag.wrapping_sub(0x10);
+                        core::ptr::write(
+                            entries_ptr.add(vacancy),
+                            core::ptr::read(entries_ptr.add(scan)),
+                        );
                     }
-
-                    if scan > idx + 1 {
-                        let count = scan - (idx + 1);
-                        unsafe {
-                            ptr::copy(hashes_ptr.add(idx + 1), hashes_ptr.add(idx), count);
-                            ptr::copy(entries_ptr.add(idx + 1), entries_ptr.add(idx), count);
-                        }
-                    }
-
-                    unsafe { *hashes_ptr.add(vacancy) = VACANT_HASH };
-                    self.len -= 1;
-                    return Some(value);
+                    vacancy += 1;
+                    scan += 1;
                 }
 
-                // Hash collision, but key order lets us stop early.
-                if slot_key > key {
-                    return None;
-                }
-            } else if slot_hash > hash {
-                return None; // also catches VACANT_HASH if VACANT_HASH > any valid hash
+                unsafe { *tags_ptr.add(vacancy) = VACANT_TAG };
+                self.len -= 1;
+                return Some(value);
             }
 
+            let slot_hash = encode_hash(self.hash_builder.hash_one(slot_key));
+            if slot_hash < hash { idx += 1; continue; }
+            if slot_hash > hash { return None; }
+            if slot_key > key { return None; }
             idx += 1;
         }
 
@@ -1139,31 +1238,31 @@ impl<K: Key, V: Value, H: BuildHasher> PoMap<K, V, H> {
     #[inline(always)]
     fn _remove_entry_with_hash(&mut self, hash: u64, key: &K) -> Option<(K, V)> {
         let ideal_slot = self.meta.ideal_slot(hash);
-        let scan_end = ideal_slot + self.max_scan();
-
-        // SAFETY: ideal_slot..scan_end is always in-bounds for the backing allocation.
-        let hashes_ptr = self.slots.hashes_ptr();
+        let target_sub = hash_sub_bucket(hash, self.meta.index_shift);
+        let tags_ptr = self.slots.tags_ptr();
         let entries_ptr = self.slots.entries_ptr();
 
         let mut idx = ideal_slot;
-        while idx < scan_end {
-            let slot_hash = unsafe { *hashes_ptr.add(idx) };
+        while idx < ideal_slot + self.max_scan() {
+            let tag = unsafe { *tags_ptr.add(idx) };
+            if tag == VACANT_TAG { return None; }
+            let offset = idx - ideal_slot;
+            let disp = tag_displacement(tag);
+            if disp > offset { idx += 1; continue; }
+            if disp < offset { return None; }
+            let sub = tag_sub_bucket(tag);
+            if sub < target_sub { idx += 1; continue; }
+            if sub > target_sub { return None; }
 
-            if slot_hash == hash {
-                let slot_entry = unsafe { &*entries_ptr.add(idx) };
-                let slot_key = unsafe { slot_entry.key.assume_init_ref() };
-                if slot_key == key {
-                    return Some(self.remove_entry_at(idx));
-                }
-
-                // Hash collision, but key order lets us stop early.
-                if slot_key > key {
-                    return None;
-                }
-            } else if slot_hash > hash {
-                return None; // also catches VACANT_HASH if VACANT_HASH > any valid hash
+            let slot_entry = unsafe { &*entries_ptr.add(idx) };
+            let slot_key = unsafe { slot_entry.key.assume_init_ref() };
+            if slot_key == key {
+                return Some(self.remove_entry_at(idx));
             }
-
+            let slot_hash = encode_hash(self.hash_builder.hash_one(slot_key));
+            if slot_hash < hash { idx += 1; continue; }
+            if slot_hash > hash { return None; }
+            if slot_key > key { return None; }
             idx += 1;
         }
 
@@ -1172,8 +1271,7 @@ impl<K: Key, V: Value, H: BuildHasher> PoMap<K, V, H> {
 
     #[inline(always)]
     fn remove_entry_at(&mut self, idx: usize) -> (K, V) {
-        // SAFETY: idx is a valid occupied slot when called.
-        let hashes_ptr = self.slots.hashes_ptr();
+        let tags_ptr = self.slots.tags_ptr();
         let entries_ptr = self.slots.entries_ptr();
         let capacity = self.slots.capacity();
 
@@ -1181,32 +1279,28 @@ impl<K: Key, V: Value, H: BuildHasher> PoMap<K, V, H> {
         let key = unsafe { entry.key.assume_init_read() };
         let value = unsafe { entry.value.assume_init_read() };
 
-        // Backshift-delete: move subsequent entries left while they can
-        // legally occupy the vacancy.
+        // Backshift-delete: shift subsequent entries left, adjusting displacement.
         let mut vacancy = idx;
         let mut scan = idx + 1;
         while scan < capacity {
-            let next_hash = unsafe { *hashes_ptr.add(scan) };
-            if next_hash == VACANT_HASH {
-                break;
-            }
-            let next_ideal = self.meta.ideal_slot(next_hash);
-            if next_ideal > vacancy {
-                break;
+            let next_tag = unsafe { *tags_ptr.add(scan) };
+            if next_tag == VACANT_TAG { break; }
+            let next_disp = tag_displacement(next_tag);
+            let next_ideal = scan - next_disp;
+            if next_ideal > vacancy { break; }
+            // Shift entry left: displacement decreases by 1
+            unsafe {
+                *tags_ptr.add(vacancy) = next_tag.wrapping_sub(0x10);
+                core::ptr::write(
+                    entries_ptr.add(vacancy),
+                    core::ptr::read(entries_ptr.add(scan)),
+                );
             }
             vacancy += 1;
             scan += 1;
         }
 
-        if scan > idx + 1 {
-            let count = scan - (idx + 1);
-            unsafe {
-                ptr::copy(hashes_ptr.add(idx + 1), hashes_ptr.add(idx), count);
-                ptr::copy(entries_ptr.add(idx + 1), entries_ptr.add(idx), count);
-            }
-        }
-
-        unsafe { *hashes_ptr.add(vacancy) = VACANT_HASH };
+        unsafe { *tags_ptr.add(vacancy) = VACANT_TAG };
         self.len -= 1;
 
         (key, value)
@@ -1231,7 +1325,7 @@ impl<K: Key, V: Value, H: BuildHasher> PoMap<K, V, H> {
 
         let mut cursor = 0usize;
         let first_attempt =
-            Self::pack_from_slots(&mut self.slots, &new_meta, &mut cursor, &mut old_slots, 0);
+            Self::pack_from_slots(&mut self.slots, &new_meta, &mut cursor, &mut old_slots, 0, &self.hash_builder);
         if first_attempt.is_ok() {
             self.meta = new_meta;
             return new_capacity;
@@ -1254,6 +1348,7 @@ impl<K: Key, V: Value, H: BuildHasher> PoMap<K, V, H> {
                 &mut bump_cursor,
                 &mut self.slots,
                 0,
+                &self.hash_builder,
             );
 
             match bump_prefix {
@@ -1264,6 +1359,7 @@ impl<K: Key, V: Value, H: BuildHasher> PoMap<K, V, H> {
                         &mut bump_cursor,
                         &mut old_slots,
                         failed_idx,
+                        &self.hash_builder,
                     );
 
                     if bump_old.is_ok() {
@@ -1281,6 +1377,7 @@ impl<K: Key, V: Value, H: BuildHasher> PoMap<K, V, H> {
                         &mut final_cursor,
                         &mut bumped_slots,
                         0,
+                        &self.hash_builder,
                     )
                     .expect("repack into current capacity failed");
                     Self::pack_from_slots(
@@ -1289,6 +1386,7 @@ impl<K: Key, V: Value, H: BuildHasher> PoMap<K, V, H> {
                         &mut final_cursor,
                         &mut old_slots,
                         failed_old_idx,
+                        &self.hash_builder,
                     )
                     .expect("repack into current capacity failed");
                     self.slots = final_slots;
@@ -1303,6 +1401,7 @@ impl<K: Key, V: Value, H: BuildHasher> PoMap<K, V, H> {
                         &mut final_cursor,
                         &mut bumped_slots,
                         0,
+                        &self.hash_builder,
                     )
                     .expect("repack into current capacity failed");
                     Self::pack_from_slots(
@@ -1311,6 +1410,7 @@ impl<K: Key, V: Value, H: BuildHasher> PoMap<K, V, H> {
                         &mut final_cursor,
                         &mut self.slots,
                         failed_prefix_idx,
+                        &self.hash_builder,
                     )
                     .expect("repack into current capacity failed");
                     Self::pack_from_slots(
@@ -1319,6 +1419,7 @@ impl<K: Key, V: Value, H: BuildHasher> PoMap<K, V, H> {
                         &mut final_cursor,
                         &mut old_slots,
                         failed_idx,
+                        &self.hash_builder,
                     )
                     .expect("repack into current capacity failed");
                     self.slots = final_slots;
@@ -1335,6 +1436,7 @@ impl<K: Key, V: Value, H: BuildHasher> PoMap<K, V, H> {
             &mut final_cursor,
             &mut self.slots,
             0,
+            &self.hash_builder,
         )
         .expect("repack into current capacity failed");
         Self::pack_from_slots(
@@ -1343,6 +1445,7 @@ impl<K: Key, V: Value, H: BuildHasher> PoMap<K, V, H> {
             &mut final_cursor,
             &mut old_slots,
             failed_idx,
+            &self.hash_builder,
         )
         .expect("repack into current capacity failed");
         self.slots = final_slots;
@@ -1356,25 +1459,20 @@ impl<K: Key, V: Value, H: BuildHasher> PoMap<K, V, H> {
     }
 
     /// Returns `(displacement, count)` pairs describing how far each occupied slot
-    /// is from its ideal slot. Displacement 0 means the entry sits exactly at its
-    /// ideal slot. Only useful for diagnostics / benchmarks.
+    /// is from its ideal slot. Displacement is read directly from the tag.
     #[inline]
     pub fn displacement_histogram(&self) -> alloc::vec::Vec<(usize, usize)> {
         let cap = self.slots.capacity();
-        let hashes_ptr = self.slots.hashes_ptr();
+        let tags_ptr = self.slots.tags_ptr();
         let max_scan = self.max_scan();
         let mut counts = alloc::vec![0usize; max_scan + 1];
         for i in 0..cap {
-            let h = unsafe { *hashes_ptr.add(i) };
-            if h == VACANT_HASH {
-                continue;
-            }
-            let ideal = self.meta.ideal_slot(h);
-            let disp = i.saturating_sub(ideal);
+            let tag = unsafe { *tags_ptr.add(i) };
+            if tag == VACANT_TAG { continue; }
+            let disp = tag_displacement(tag);
             if disp < counts.len() {
                 counts[disp] += 1;
             } else {
-                // shouldn't happen, but be safe
                 let last = counts.len() - 1;
                 counts[last] += 1;
             }
@@ -1389,26 +1487,42 @@ impl<K: Key, V: Value, H: BuildHasher> PoMap<K, V, H> {
         self.meta.index_shift
     }
 
-    /// Returns `(slot_index, hash)` for every occupied slot, in slot order.
-    /// Vacant slots are omitted. Useful for analyzing bit-level hash distributions.
+    /// Returns `(slot_index, tag)` for every occupied slot, in slot order.
+    #[inline]
+    pub fn occupied_slot_tags(&self) -> alloc::vec::Vec<(usize, u8)> {
+        let cap = self.slots.capacity();
+        let tags_ptr = self.slots.tags_ptr();
+        let mut out = alloc::vec::Vec::with_capacity(self.len);
+        for i in 0..cap {
+            let tag = unsafe { *tags_ptr.add(i) };
+            if tag != VACANT_TAG {
+                out.push((i, tag));
+            }
+        }
+        out
+    }
+
+    /// Returns `(slot_index, hash)` for every occupied slot by re-hashing each key.
     #[inline]
     pub fn occupied_slot_hashes(&self) -> alloc::vec::Vec<(usize, u64)> {
         let cap = self.slots.capacity();
-        let hashes_ptr = self.slots.hashes_ptr();
+        let tags_ptr = self.slots.tags_ptr();
+        let entries_ptr = self.slots.entries_ptr();
         let mut out = alloc::vec::Vec::with_capacity(self.len);
         for i in 0..cap {
-            let h = unsafe { *hashes_ptr.add(i) };
-            if h != VACANT_HASH {
-                out.push((i, h));
+            let tag = unsafe { *tags_ptr.add(i) };
+            if tag != VACANT_TAG {
+                let entry = unsafe { &*entries_ptr.add(i) };
+                let key = unsafe { entry.key.assume_init_ref() };
+                let hash = encode_hash(self.hash_builder.hash_one(key));
+                out.push((i, hash));
             }
         }
         out
     }
 
     /// Simulates the insert scan for `key` (without actually inserting) and returns
-    /// the number of hash slots read. Counts the main window scan, the shift-vacant
-    /// search, and any cascade probe. Returns `None` if the insert would trigger a grow
-    /// (meaning the scan exhausted all available slots).
+    /// the number of tag slots read.
     #[inline]
     pub fn insert_probe_count(&self, key: &K) -> Option<usize>
     where
@@ -1416,75 +1530,90 @@ impl<K: Key, V: Value, H: BuildHasher> PoMap<K, V, H> {
     {
         let hash = encode_hash(self.hash_builder.hash_one(key));
         let ideal_slot = self.meta.ideal_slot(hash);
+        let target_sub = hash_sub_bucket(hash, self.meta.index_shift);
         let max_scan = self.max_scan();
         let scan_end = ideal_slot + max_scan;
-        let hashes_ptr = self.slots.hashes_ptr();
+        let tags_ptr = self.slots.tags_ptr();
         let entries_ptr = self.slots.entries_ptr();
 
         let mut probes = 0usize;
         let mut idx = ideal_slot;
 
-        // Phase 1: main window scan
         while idx < scan_end {
-            let slot_hash = unsafe { *hashes_ptr.add(idx) };
+            let tag = unsafe { *tags_ptr.add(idx) };
             probes += 1;
 
-            if slot_hash == VACANT_HASH {
-                return Some(probes); // direct insert
-            }
-            if slot_hash < hash {
-                idx += 1;
-                continue;
-            }
-            if slot_hash == hash {
-                let slot_key = unsafe { (*entries_ptr.add(idx)).key.assume_init_ref() };
-                if slot_key == key {
-                    return Some(probes); // would replace
+            if tag == VACANT_TAG { return Some(probes); }
+
+            let offset = idx - ideal_slot;
+            let disp = tag_displacement(tag);
+            if disp > offset { idx += 1; continue; }
+            if disp < offset {
+                // Need shift — search for vacant
+                let mut search = idx + 1;
+                while search < scan_end {
+                    probes += 1;
+                    if unsafe { *tags_ptr.add(search) } == VACANT_TAG {
+                        return Some(probes);
+                    }
+                    search += 1;
                 }
-                if slot_key < key {
-                    idx += 1;
-                    continue;
+                // Cascade probe
+                let last_tag = unsafe { *tags_ptr.add(scan_end - 1) };
+                let last_ideal = (scan_end - 1) - tag_displacement(last_tag);
+                if last_ideal > ideal_slot {
+                    let capacity = self.slots.capacity();
+                    let cascade_limit = scan_end + CASCADE_WINDOWS * max_scan;
+                    let mut v = scan_end;
+                    while v < capacity && v < cascade_limit {
+                        let v_tag = unsafe { *tags_ptr.add(v) };
+                        probes += 1;
+                        if v_tag == VACANT_TAG { return Some(probes); }
+                        let v_ideal = v - tag_displacement(v_tag);
+                        if v + 1 >= v_ideal + max_scan { return None; }
+                        v += 1;
+                    }
                 }
+                return None;
             }
 
-            // Phase 2: shift-vacant search within main window
+            let sub = tag_sub_bucket(tag);
+            if sub < target_sub { idx += 1; continue; }
+            if sub == target_sub {
+                let slot_key = unsafe { (*entries_ptr.add(idx)).key.assume_init_ref() };
+                if slot_key == key { return Some(probes); }
+                if slot_key < key { idx += 1; continue; }
+            }
+
+            // sub > target_sub or key mismatch — need shift
             let mut search = idx + 1;
             while search < scan_end {
-                let cand_hash = unsafe { *hashes_ptr.add(search) };
                 probes += 1;
-                if cand_hash == VACANT_HASH {
-                    return Some(probes); // shift insert
+                if unsafe { *tags_ptr.add(search) } == VACANT_TAG {
+                    return Some(probes);
                 }
                 search += 1;
             }
-
-            // Phase 3: cascade probe
-            let ideal_slot_x = scan_end - max_scan;
-            let cascade_limit = scan_end + CASCADE_WINDOWS * max_scan;
-            let last_hash = unsafe { *hashes_ptr.add(scan_end - 1) };
-            let last_ideal = (last_hash >> self.meta.index_shift) as usize;
-
-            if last_ideal > ideal_slot_x {
+            // Cascade
+            let last_tag = unsafe { *tags_ptr.add(scan_end - 1) };
+            let last_ideal = (scan_end - 1) - tag_displacement(last_tag);
+            if last_ideal > ideal_slot {
                 let capacity = self.slots.capacity();
+                let cascade_limit = scan_end + CASCADE_WINDOWS * max_scan;
                 let mut v = scan_end;
                 while v < capacity && v < cascade_limit {
-                    let v_hash = unsafe { *hashes_ptr.add(v) };
+                    let v_tag = unsafe { *tags_ptr.add(v) };
                     probes += 1;
-                    if v_hash == VACANT_HASH {
-                        return Some(probes); // cascade insert
-                    }
-                    let v_ideal = (v_hash >> self.meta.index_shift) as usize;
-                    if v + 1 >= v_ideal + max_scan {
-                        return None; // pinned, would grow
-                    }
+                    if v_tag == VACANT_TAG { return Some(probes); }
+                    let v_ideal = v - tag_displacement(v_tag);
+                    if v + 1 >= v_ideal + max_scan { return None; }
                     v += 1;
                 }
             }
-
-            return None; // would grow
+            return None;
         }
 
-        None // window exhausted, would grow
+        None
     }
 
     /// Reserve capacity for at least `additional` more elements.
@@ -1564,36 +1693,32 @@ impl<K: Key, V: Value, H: BuildHasher> PoMap<K, V, H> {
         // The bump is safe: at resize time the old map has ~index_bits total vacant slots, and
         // the 4× growth factor guarantees every entry still lands within its new scan window.
         let mut cursor = 0;
-        let hashes_ptr = old_slots.hashes_ptr();
+        let tags_ptr = old_slots.tags_ptr();
         let entries_ptr = old_slots.entries_ptr();
+        let new_index_shift = new_meta.index_shift;
         for idx in 0..current_capacity {
-            let hash = unsafe { *hashes_ptr.add(idx) };
-            if hash == VACANT_HASH {
-                cursor += 1; // preserve inter-run spacing in the new map (see comment above)
+            let tag = unsafe { *tags_ptr.add(idx) };
+            if tag == VACANT_TAG {
                 continue;
             }
-
-            let ideal_slot = new_meta.ideal_slot(hash);
-            cursor = ideal_slot.max(cursor);
 
             let entry = unsafe { &mut *entries_ptr.add(idx) };
             let key = unsafe { entry.key.assume_init_read() };
             let value = unsafe { entry.value.assume_init_read() };
 
-            // Prevent the old slot from dropping the moved value on destruction.
+            let hash = encode_hash(self.hash_builder.hash_one(&key));
+            let ideal_slot = new_meta.ideal_slot(hash);
+            cursor = ideal_slot.max(cursor);
+
+            let new_tag = make_tag(cursor - ideal_slot, hash, new_index_shift);
+
             unsafe { old_slots.clear_slot(idx) };
-            unsafe { self.slots.write_slot(cursor, hash, key, value) };
+            unsafe { self.slots.write_slot(cursor, new_tag, key, value) };
 
             cursor += 1;
         }
 
-        // apply the new meta
         self.meta = new_meta;
-
-        /*println!(
-            "PoMap::reserve requested={} resulting_capacity={}",
-            requested_capacity, new_vec_capacity
-        );*/
 
         new_vec_capacity
     }
@@ -1616,24 +1741,26 @@ impl<K: Key, V: Value, H: BuildHasher> PoMap<K, V, H> {
 
         // Same packing logic as reserve_for_capacity; see that function for commentary.
         let mut cursor = 0;
-        let hashes_ptr = old_slots.hashes_ptr();
+        let tags_ptr = old_slots.tags_ptr();
         let entries_ptr = old_slots.entries_ptr();
+        let new_index_shift = new_meta.index_shift;
         for idx in 0..current_capacity {
-            let hash = unsafe { *hashes_ptr.add(idx) };
-            if hash == VACANT_HASH {
-                cursor += 1; // preserve inter-run spacing in the new map
+            let tag = unsafe { *tags_ptr.add(idx) };
+            if tag == VACANT_TAG {
                 continue;
             }
-
-            let ideal_slot = new_meta.ideal_slot(hash);
-            cursor = ideal_slot.max(cursor);
 
             let entry = unsafe { &mut *entries_ptr.add(idx) };
             let key = unsafe { entry.key.assume_init_read() };
             let value = unsafe { entry.value.assume_init_read() };
 
+            let hash = encode_hash(self.hash_builder.hash_one(&key));
+            let ideal_slot = new_meta.ideal_slot(hash);
+            cursor = ideal_slot.max(cursor);
+
+            let new_tag = make_tag(cursor - ideal_slot, hash, new_index_shift);
             unsafe { old_slots.clear_slot(idx) };
-            unsafe { self.slots.write_slot(cursor, hash, key, value) };
+            unsafe { self.slots.write_slot(cursor, new_tag, key, value) };
             cursor += 1;
         }
 
@@ -1664,7 +1791,7 @@ impl<K: Key, V: Value, H: BuildHasher + Default> PoMap<K, V, H> {
 /// Iterator over shared references to key-value pairs in deterministic order.
 #[must_use]
 pub struct Iter<'a, K: Key, V: Value> {
-    hashes: *const u64,
+    tags: *const u8,
     entries: *const SlotEntry<K, V>,
     index: usize,
     capacity: usize,
@@ -1676,7 +1803,7 @@ impl<'a, K: Key, V: Value> Clone for Iter<'a, K, V> {
     #[inline]
     fn clone(&self) -> Self {
         Self {
-            hashes: self.hashes,
+            tags: self.tags,
             entries: self.entries,
             index: self.index,
             capacity: self.capacity,
@@ -1694,8 +1821,8 @@ impl<'a, K: Key, V: Value> Iterator for Iter<'a, K, V> {
         while self.index < self.capacity {
             let idx = self.index;
             self.index += 1;
-            let hash = unsafe { *self.hashes.add(idx) };
-            if hash == VACANT_HASH {
+            let tag = unsafe { *self.tags.add(idx) };
+            if tag == VACANT_TAG {
                 continue;
             }
             self.remaining -= 1;
@@ -1725,7 +1852,7 @@ impl<'a, K: Key, V: Value> FusedIterator for Iter<'a, K, V> {}
 /// Iterator over mutable references to values in deterministic order.
 #[must_use]
 pub struct IterMut<'a, K: Key, V: Value> {
-    hashes: *const u64,
+    tags: *const u8,
     entries: *mut SlotEntry<K, V>,
     index: usize,
     capacity: usize,
@@ -1741,8 +1868,8 @@ impl<'a, K: Key, V: Value> Iterator for IterMut<'a, K, V> {
         while self.index < self.capacity {
             let idx = self.index;
             self.index += 1;
-            let hash = unsafe { *self.hashes.add(idx) };
-            if hash == VACANT_HASH {
+            let tag = unsafe { *self.tags.add(idx) };
+            if tag == VACANT_TAG {
                 continue;
             }
             self.remaining -= 1;
@@ -1888,18 +2015,18 @@ impl<K: Key, V: Value> Iterator for IntoIter<K, V> {
 
     #[inline]
     fn next(&mut self) -> Option<Self::Item> {
-        let hashes_ptr = self.slots.hashes_ptr();
+        let tags_ptr = self.slots.tags_ptr();
         let entries_ptr = self.slots.entries_ptr();
 
         while self.index < self.capacity {
             let idx = self.index;
             self.index += 1;
-            let hash = unsafe { *hashes_ptr.add(idx) };
-            if hash == VACANT_HASH {
+            let tag = unsafe { *tags_ptr.add(idx) };
+            if tag == VACANT_TAG {
                 continue;
             }
             self.remaining -= 1;
-            unsafe { *hashes_ptr.add(idx) = VACANT_HASH };
+            unsafe { *tags_ptr.add(idx) = VACANT_TAG };
             let entry = unsafe { &mut *entries_ptr.add(idx) };
             let key = unsafe { entry.key.assume_init_read() };
             let value = unsafe { entry.value.assume_init_read() };
@@ -1926,7 +2053,7 @@ impl<K: Key, V: Value> FusedIterator for IntoIter<K, V> {}
 /// Draining iterator over key-value pairs in deterministic order.
 #[must_use]
 pub struct Drain<'a, K: Key, V: Value> {
-    hashes: *mut u64,
+    tags: *mut u8,
     entries: *mut SlotEntry<K, V>,
     index: usize,
     capacity: usize,
@@ -1942,12 +2069,12 @@ impl<'a, K: Key, V: Value> Iterator for Drain<'a, K, V> {
         while self.index < self.capacity {
             let idx = self.index;
             self.index += 1;
-            let hash = unsafe { *self.hashes.add(idx) };
-            if hash == VACANT_HASH {
+            let tag = unsafe { *self.tags.add(idx) };
+            if tag == VACANT_TAG {
                 continue;
             }
             self.remaining -= 1;
-            unsafe { *self.hashes.add(idx) = VACANT_HASH };
+            unsafe { *self.tags.add(idx) = VACANT_TAG };
             let entry = unsafe { &mut *self.entries.add(idx) };
             let key = unsafe { entry.key.assume_init_read() };
             let value = unsafe { entry.value.assume_init_read() };
@@ -1976,11 +2103,11 @@ impl<'a, K: Key, V: Value> Drop for Drain<'a, K, V> {
         while self.index < self.capacity {
             let idx = self.index;
             self.index += 1;
-            let hash = unsafe { *self.hashes.add(idx) };
-            if hash == VACANT_HASH {
+            let tag = unsafe { *self.tags.add(idx) };
+            if tag == VACANT_TAG {
                 continue;
             }
-            unsafe { *self.hashes.add(idx) = VACANT_HASH };
+            unsafe { *self.tags.add(idx) = VACANT_TAG };
             let entry = unsafe { &mut *self.entries.add(idx) };
             unsafe {
                 entry.key.assume_init_drop();
@@ -2007,13 +2134,13 @@ where
 
     fn next(&mut self) -> Option<Self::Item> {
         let capacity = self.map.slots.capacity();
-        let hashes_ptr = self.map.slots.hashes_ptr();
+        let tags_ptr = self.map.slots.tags_ptr();
         let entries_ptr = self.map.slots.entries_ptr();
 
         while self.index < capacity {
             let idx = self.index;
-            let hash = unsafe { *hashes_ptr.add(idx) };
-            if hash == VACANT_HASH {
+            let tag = unsafe { *tags_ptr.add(idx) };
+            if tag == VACANT_TAG {
                 self.index += 1;
                 continue;
             }
@@ -2352,12 +2479,16 @@ impl<'a, K: Key, V: Value, H: BuildHasher> VacantEntry<'a, K, V, H> {
         let map = self.map;
         let insert = self.insert;
 
+        let ideal_slot = map.meta.ideal_slot(hash);
+        let index_shift = map.meta.index_shift;
+
         let index = match insert {
             VacantInsert::Direct { index } => {
-                let hashes_ptr = map.slots.hashes_ptr();
+                let tags_ptr = map.slots.tags_ptr();
                 let entries_ptr = map.slots.entries_ptr();
+                let new_tag = make_tag(index - ideal_slot, hash, index_shift);
                 unsafe {
-                    *hashes_ptr.add(index) = hash;
+                    *tags_ptr.add(index) = new_tag;
                     let entry = &mut *entries_ptr.add(index);
                     entry.key.write(key);
                     entry.value.write(value);
@@ -2369,12 +2500,13 @@ impl<'a, K: Key, V: Value, H: BuildHasher> VacantEntry<'a, K, V, H> {
                 insert_index,
                 vacant_index,
             } => {
-                let hashes_ptr = map.slots.hashes_ptr();
+                let tags_ptr = map.slots.tags_ptr();
                 let entries_ptr = map.slots.entries_ptr();
                 unsafe {
                     let mut i = vacant_index;
                     while i > insert_index {
-                        *hashes_ptr.add(i) = *hashes_ptr.add(i - 1);
+                        let prev_tag = *tags_ptr.add(i - 1);
+                        *tags_ptr.add(i) = prev_tag.wrapping_add(0x10); // disp += 1
                         core::ptr::write(
                             entries_ptr.add(i),
                             core::ptr::read(entries_ptr.add(i - 1)),
@@ -2382,7 +2514,8 @@ impl<'a, K: Key, V: Value, H: BuildHasher> VacantEntry<'a, K, V, H> {
                         i -= 1;
                     }
 
-                    *hashes_ptr.add(insert_index) = hash;
+                    let new_tag = make_tag(insert_index - ideal_slot, hash, index_shift);
+                    *tags_ptr.add(insert_index) = new_tag;
                     let entry = &mut *entries_ptr.add(insert_index);
                     entry.key.write(key);
                     entry.value.write(value);
@@ -2706,18 +2839,18 @@ impl<K: Key, V: Value, H: BuildHasher + Clone> Clone for PoMap<K, V, H> {
         let capacity = self.capacity();
         let mut slots = Slots::new(capacity);
 
-        let hashes_ptr = self.slots.hashes_ptr();
+        let tags_ptr = self.slots.tags_ptr();
         let entries_ptr = self.slots.entries_ptr();
 
         for idx in 0..capacity {
-            let hash = unsafe { *hashes_ptr.add(idx) };
-            if hash == VACANT_HASH {
+            let tag = unsafe { *tags_ptr.add(idx) };
+            if tag == VACANT_TAG {
                 continue;
             }
             let entry = unsafe { &*entries_ptr.add(idx) };
             let key = unsafe { entry.key.assume_init_ref().clone() };
             let value = unsafe { entry.value.assume_init_ref().clone() };
-            unsafe { slots.write_slot(idx, hash, key, value) };
+            unsafe { slots.write_slot(idx, tag, key, value) };
         }
 
         Self {
