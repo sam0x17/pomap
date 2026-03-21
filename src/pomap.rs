@@ -1353,7 +1353,24 @@ impl<K: Key, V: Value, H: BuildHasher> PoMap<K, V, H> {
         let tags_ptr = self.slots.tags_ptr();
         let entries_ptr = self.slots.entries_ptr();
 
-        for offset in 0..max_scan {
+        // Scalar fast-path: check ideal slot (displacement 0) with simplified tag check.
+        let first_tag = unsafe { *tags_ptr.add(ideal_slot) };
+        if first_tag == VACANT_TAG {
+            return None;
+        }
+        if first_tag == target_sub {
+            let slot_key = unsafe { (*entries_ptr.add(ideal_slot)).key.assume_init_ref() };
+            if slot_key == key {
+                let (k, v) = self.remove_entry_at(ideal_slot);
+                drop(k);
+                return Some(v);
+            }
+        } else if tag_displacement(first_tag) == 0 && tag_sub_bucket(first_tag) > target_sub {
+            return None;
+        }
+
+        // Scalar ordering loop for remaining slots (efficient early exit for misses).
+        for offset in 1..max_scan {
             let idx = ideal_slot + offset;
             let tag = unsafe { *tags_ptr.add(idx) };
             if tag == VACANT_TAG {
@@ -1392,7 +1409,22 @@ impl<K: Key, V: Value, H: BuildHasher> PoMap<K, V, H> {
         let tags_ptr = self.slots.tags_ptr();
         let entries_ptr = self.slots.entries_ptr();
 
-        for offset in 0..max_scan {
+        // Scalar fast-path: check ideal slot (displacement 0) with simplified tag check.
+        let first_tag = unsafe { *tags_ptr.add(ideal_slot) };
+        if first_tag == VACANT_TAG {
+            return None;
+        }
+        if first_tag == target_sub {
+            let slot_key = unsafe { (*entries_ptr.add(ideal_slot)).key.assume_init_ref() };
+            if slot_key == key {
+                return Some(self.remove_entry_at(ideal_slot));
+            }
+        } else if tag_displacement(first_tag) == 0 && tag_sub_bucket(first_tag) > target_sub {
+            return None;
+        }
+
+        // Scalar ordering loop for remaining slots (efficient early exit for misses).
+        for offset in 1..max_scan {
             let idx = ideal_slot + offset;
             let tag = unsafe { *tags_ptr.add(idx) };
             if tag == VACANT_TAG {
