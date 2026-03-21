@@ -1353,11 +1353,15 @@ impl<K: Key, V: Value, H: BuildHasher> PoMap<K, V, H> {
         let tags_ptr = self.slots.tags_ptr();
         let entries_ptr = self.slots.entries_ptr();
 
-        // Scalar fast-path: check ideal slot (displacement 0) with simplified tag check.
         let first_tag = unsafe { *tags_ptr.add(ideal_slot) };
         if first_tag == VACANT_TAG {
             return None;
         }
+        if tag_displacement(first_tag) == 0 && tag_sub_bucket(first_tag) > target_sub {
+            return None;
+        }
+
+        // Scalar fast-path: check ideal slot for exact match (displacement 0).
         if first_tag == target_sub {
             let slot_key = unsafe { (*entries_ptr.add(ideal_slot)).key.assume_init_ref() };
             if slot_key == key {
@@ -1365,32 +1369,19 @@ impl<K: Key, V: Value, H: BuildHasher> PoMap<K, V, H> {
                 drop(k);
                 return Some(v);
             }
-        } else if tag_displacement(first_tag) == 0 && tag_sub_bucket(first_tag) > target_sub {
-            return None;
         }
 
-        // Scalar ordering loop for remaining slots (efficient early exit for misses).
-        for offset in 1..max_scan {
+        // SIMD path for remaining candidates.
+        let scan =
+            unsafe { simd_scan(tags_ptr.add(ideal_slot) as *const u8, target_sub, max_scan) };
+        let mut mask = scan.candidate_mask & !1u32;
+
+        while mask != 0 {
+            let offset = mask.trailing_zeros() as usize;
+            mask &= mask - 1;
+
             let idx = ideal_slot + offset;
-            let tag = unsafe { *tags_ptr.add(idx) };
-            if tag == VACANT_TAG {
-                return None;
-            }
-            let disp = tag_displacement(tag);
-            if disp < offset {
-                return None;
-            }
-            if disp > offset {
-                continue;
-            }
-            let sub = tag_sub_bucket(tag);
-            if sub > target_sub {
-                return None;
-            }
-            if sub < target_sub {
-                continue;
-            }
-            let slot_key = unsafe { (*entries_ptr.add(idx)).key.assume_init_ref() };
+            let slot_key = unsafe { (*self.slots.entries_ptr().add(idx)).key.assume_init_ref() };
             if slot_key == key {
                 let (k, v) = self.remove_entry_at(idx);
                 drop(k);
@@ -1407,44 +1398,24 @@ impl<K: Key, V: Value, H: BuildHasher> PoMap<K, V, H> {
         let target_sub = hash_sub_bucket(hash, self.meta.index_shift);
         let max_scan = self.max_scan();
         let tags_ptr = self.slots.tags_ptr();
-        let entries_ptr = self.slots.entries_ptr();
 
-        // Scalar fast-path: check ideal slot (displacement 0) with simplified tag check.
         let first_tag = unsafe { *tags_ptr.add(ideal_slot) };
         if first_tag == VACANT_TAG {
             return None;
         }
-        if first_tag == target_sub {
-            let slot_key = unsafe { (*entries_ptr.add(ideal_slot)).key.assume_init_ref() };
-            if slot_key == key {
-                return Some(self.remove_entry_at(ideal_slot));
-            }
-        } else if tag_displacement(first_tag) == 0 && tag_sub_bucket(first_tag) > target_sub {
-            return None;
-        }
 
-        // Scalar ordering loop for remaining slots (efficient early exit for misses).
-        for offset in 1..max_scan {
+        let scan =
+            unsafe { simd_scan(tags_ptr.add(ideal_slot) as *const u8, target_sub, max_scan) };
+        let mut mask = scan.candidate_mask;
+
+        while mask != 0 {
+            let offset = mask.trailing_zeros() as usize;
+            mask &= mask - 1;
+
             let idx = ideal_slot + offset;
-            let tag = unsafe { *tags_ptr.add(idx) };
-            if tag == VACANT_TAG {
-                return None;
-            }
-            let disp = tag_displacement(tag);
-            if disp < offset {
-                return None;
-            }
-            if disp > offset {
-                continue;
-            }
-            let sub = tag_sub_bucket(tag);
-            if sub > target_sub {
-                return None;
-            }
-            if sub < target_sub {
-                continue;
-            }
-            let slot_key = unsafe { (*entries_ptr.add(idx)).key.assume_init_ref() };
+            let entries_ptr = self.slots.entries_ptr();
+            let slot_entry = unsafe { &*entries_ptr.add(idx) };
+            let slot_key = unsafe { slot_entry.key.assume_init_ref() };
             if slot_key == key {
                 return Some(self.remove_entry_at(idx));
             }
@@ -1463,7 +1434,7 @@ impl<K: Key, V: Value, H: BuildHasher> PoMap<K, V, H> {
         let key = unsafe { entry.key.assume_init_read() };
         let value = unsafe { entry.value.assume_init_read() };
 
-        // Backshift-delete: shift subsequent entries left one at a time.
+        // Backshift-delete: determine shift count, bulk-copy entries, fix up tags.
         let mut vacancy = idx;
         let mut scan = idx + 1;
         while scan < capacity {
@@ -1471,20 +1442,25 @@ impl<K: Key, V: Value, H: BuildHasher> PoMap<K, V, H> {
             if next_tag == VACANT_TAG {
                 break;
             }
-            let next_disp = tag_displacement(next_tag);
-            let next_ideal = scan - next_disp;
+            let next_ideal = scan - tag_displacement(next_tag);
             if next_ideal > vacancy {
                 break;
             }
-            unsafe {
-                *tags_ptr.add(vacancy) = next_tag.wrapping_sub(0x10);
-                core::ptr::write(
-                    entries_ptr.add(vacancy),
-                    core::ptr::read(entries_ptr.add(scan)),
-                );
-            }
             vacancy += 1;
             scan += 1;
+        }
+
+        let count = scan - idx - 1;
+        if count > 0 {
+            unsafe {
+                // Bulk memmove for entries (the heavy data).
+                ptr::copy(entries_ptr.add(idx + 1), entries_ptr.add(idx), count);
+                // Fix up tags individually (1 byte each, displacement -= 1).
+                for i in 0..count {
+                    let old_tag = *tags_ptr.add(idx + 1 + i);
+                    *tags_ptr.add(idx + i) = old_tag.wrapping_sub(0x10);
+                }
+            }
         }
 
         unsafe { *tags_ptr.add(vacancy) = VACANT_TAG };
