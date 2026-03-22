@@ -93,14 +93,11 @@ const fn encode_hash(h: u64) -> u64 {
 /// Build a 1-byte tag: upper 4 bits = displacement, lower 4 bits = sub-bucket MSB.
 ///
 /// `displacement` = position - ideal_slot (how far the entry is from its ideal position).
-/// `sub_bucket`   = top 4 bits of the hash below the pivot (index_shift).
+/// `sub_bucket`   = top 4 bits of the hash below the pivot.
+/// `sub_shift`    = precomputed `index_shift - 4` for sub-bucket extraction.
 #[inline(always)]
-const fn make_tag(displacement: usize, hash: u64, index_shift: usize) -> u8 {
-    let sub = if index_shift >= 4 {
-        ((hash >> (index_shift - 4)) & 0xF) as u8
-    } else {
-        ((hash << (4 - index_shift)) & 0xF) as u8
-    };
+const fn make_tag(displacement: usize, hash: u64, sub_shift: usize) -> u8 {
+    let sub = ((hash >> sub_shift) & 0xF) as u8;
     ((displacement as u8) << 4) | sub
 }
 
@@ -117,13 +114,10 @@ const fn tag_sub_bucket(tag: u8) -> u8 {
 }
 
 /// Extract the 4-bit sub-bucket MSB from a full hash for comparison with tag sub-bucket.
+/// `sub_shift` = precomputed `index_shift - 4`.
 #[inline(always)]
-const fn hash_sub_bucket(hash: u64, index_shift: usize) -> u8 {
-    if index_shift >= 4 {
-        ((hash >> (index_shift - 4)) & 0xF) as u8
-    } else {
-        ((hash << (4 - index_shift)) & 0xF) as u8
-    }
+const fn hash_sub_bucket(hash: u64, sub_shift: usize) -> u8 {
+    ((hash >> sub_shift) & 0xF) as u8
 }
 
 /// Build expected-tag vector for a scan window. Lane `i` contains the tag that
@@ -331,7 +325,7 @@ impl<K: Key, V: Value, H: BuildHasher> PoMap<K, V, H> {
         let src_entries = src.entries_ptr();
         let src_capacity = src.capacity();
         let max_scan = max_scan_for(1usize << meta.index_bits);
-        let index_shift = meta.index_shift;
+        let sub_shift = meta.sub_shift;
 
         let mut idx = start_idx;
         while idx < src_capacity {
@@ -344,7 +338,7 @@ impl<K: Key, V: Value, H: BuildHasher> PoMap<K, V, H> {
 
                     // Re-hash the key to get the full hash for the new layout
                     let hash = encode_hash(hash_builder.hash_one(&key));
-                    let ideal_slot = (hash >> index_shift) as usize;
+                    let ideal_slot = meta.ideal_slot(hash);
                     if *cursor < ideal_slot {
                         *cursor = ideal_slot;
                     }
@@ -357,7 +351,7 @@ impl<K: Key, V: Value, H: BuildHasher> PoMap<K, V, H> {
 
                     *src_tags.add(idx) = VACANT_TAG;
 
-                    let new_tag = make_tag(*cursor - ideal_slot, hash, index_shift);
+                    let new_tag = make_tag(*cursor - ideal_slot, hash, sub_shift);
                     *dst_tags.add(*cursor) = new_tag;
                     let dst_entry = &mut *dst_entries.add(*cursor);
                     dst_entry.key.write(key);
@@ -491,7 +485,7 @@ impl<K: Key, V: Value, H: BuildHasher> PoMap<K, V, H> {
     #[inline(always)]
     pub fn _get_with_hash(&self, hash: u64, key: &K) -> Option<&V> {
         let ideal_slot = self.meta.ideal_slot(hash);
-        let target_sub = hash_sub_bucket(hash, self.meta.index_shift);
+        let target_sub = hash_sub_bucket(hash, self.meta.sub_shift);
         let max_scan = self.max_scan();
         let tags_ptr = self.slots.tags_ptr();
         let entries_ptr = self.slots.entries_ptr();
@@ -532,7 +526,7 @@ impl<K: Key, V: Value, H: BuildHasher> PoMap<K, V, H> {
     #[inline(always)]
     fn _get_key_value_with_hash(&self, hash: u64, key: &K) -> Option<(&K, &V)> {
         let ideal_slot = self.meta.ideal_slot(hash);
-        let target_sub = hash_sub_bucket(hash, self.meta.index_shift);
+        let target_sub = hash_sub_bucket(hash, self.meta.sub_shift);
         let max_scan = self.max_scan();
         let tags_ptr = self.slots.tags_ptr();
         let entries_ptr = self.slots.entries_ptr();
@@ -572,7 +566,7 @@ impl<K: Key, V: Value, H: BuildHasher> PoMap<K, V, H> {
         F: FnMut(&K) -> bool,
     {
         let ideal_slot = self.meta.ideal_slot(hash);
-        let target_sub = hash_sub_bucket(hash, self.meta.index_shift);
+        let target_sub = hash_sub_bucket(hash, self.meta.sub_shift);
         let max_scan = self.max_scan();
         let tags_ptr = self.slots.tags_ptr();
         let entries_ptr = self.slots.entries_ptr();
@@ -681,7 +675,7 @@ impl<K: Key, V: Value, H: BuildHasher> PoMap<K, V, H> {
     #[inline(always)]
     fn _get_mut_with_hash(&mut self, hash: u64, key: &K) -> Option<&mut V> {
         let ideal_slot = self.meta.ideal_slot(hash);
-        let target_sub = hash_sub_bucket(hash, self.meta.index_shift);
+        let target_sub = hash_sub_bucket(hash, self.meta.sub_shift);
         let max_scan = self.max_scan();
         let tags_ptr = self.slots.tags_ptr();
         let entries_ptr = self.slots.entries_ptr();
@@ -804,7 +798,7 @@ impl<K: Key, V: Value, H: BuildHasher> PoMap<K, V, H> {
     fn find_entry_location(&self, hash: u64, key: &K) -> EntryLocation {
         let ideal_slot = self.meta.ideal_slot(hash);
         let scan_end = ideal_slot + self.max_scan();
-        let target_sub = hash_sub_bucket(hash, self.meta.index_shift);
+        let target_sub = hash_sub_bucket(hash, self.meta.sub_shift);
         let tags_ptr = self.slots.tags_ptr();
         let entries_ptr = self.slots.entries_ptr();
 
@@ -935,8 +929,8 @@ impl<K: Key, V: Value, H: BuildHasher> PoMap<K, V, H> {
             let ideal_slot = self.meta.ideal_slot(hash);
             let max_scan = self.max_scan();
             let scan_end = ideal_slot + max_scan;
-            let index_shift = self.meta.index_shift;
-            let target_sub = hash_sub_bucket(hash, index_shift);
+            let sub_shift = self.meta.sub_shift;
+            let target_sub = hash_sub_bucket(hash, sub_shift);
 
             let tags_ptr = self.slots.tags_ptr();
             let entries_ptr = self.slots.entries_ptr();
@@ -944,7 +938,7 @@ impl<K: Key, V: Value, H: BuildHasher> PoMap<K, V, H> {
             // Scalar fast-path: ideal slot vacant → direct insert.
             let first_tag = unsafe { *tags_ptr.add(ideal_slot) };
             if first_tag == VACANT_TAG {
-                let new_tag = make_tag(0, hash, index_shift);
+                let new_tag = make_tag(0, hash, sub_shift);
                 unsafe {
                     *tags_ptr.add(ideal_slot) = new_tag;
                     let entry = &mut *entries_ptr.add(ideal_slot);
@@ -1032,7 +1026,7 @@ impl<K: Key, V: Value, H: BuildHasher> PoMap<K, V, H> {
 
                 if insert_point == vacant_idx {
                     // Append at vacant — direct insert, no shift needed.
-                    let new_tag = make_tag(first_vacant, hash, index_shift);
+                    let new_tag = make_tag(first_vacant, hash, sub_shift);
                     unsafe {
                         *tags_ptr.add(vacant_idx) = new_tag;
                         let entry = &mut *entries_ptr.add(vacant_idx);
@@ -1066,7 +1060,7 @@ impl<K: Key, V: Value, H: BuildHasher> PoMap<K, V, H> {
                             i -= 1;
                         }
 
-                        let new_tag = make_tag(insert_point - ideal_slot, hash, index_shift);
+                        let new_tag = make_tag(insert_point - ideal_slot, hash, sub_shift);
                         *tags_ptr.add(insert_point) = new_tag;
                         let entry = &mut *entries_ptr.add(insert_point);
                         entry.key.write(key);
@@ -1120,7 +1114,7 @@ impl<K: Key, V: Value, H: BuildHasher> PoMap<K, V, H> {
                                 );
                                 i -= 1;
                             }
-                            let new_tag = make_tag(idx - ideal_slot, hash, index_shift);
+                            let new_tag = make_tag(idx - ideal_slot, hash, sub_shift);
                             *tags_ptr.add(idx) = new_tag;
                             let entry = &mut *entries_ptr.add(idx);
                             entry.key.write(key);
@@ -1201,7 +1195,7 @@ impl<K: Key, V: Value, H: BuildHasher> PoMap<K, V, H> {
                                 );
                                 i -= 1;
                             }
-                            let new_tag = make_tag(idx - ideal_slot, hash, index_shift);
+                            let new_tag = make_tag(idx - ideal_slot, hash, sub_shift);
                             *tags_ptr.add(idx) = new_tag;
                             let entry = &mut *entries_ptr.add(idx);
                             entry.key.write(key);
@@ -1348,7 +1342,7 @@ impl<K: Key, V: Value, H: BuildHasher> PoMap<K, V, H> {
     #[inline(always)]
     fn _remove_with_hash(&mut self, hash: u64, key: &K) -> Option<V> {
         let ideal_slot = self.meta.ideal_slot(hash);
-        let target_sub = hash_sub_bucket(hash, self.meta.index_shift);
+        let target_sub = hash_sub_bucket(hash, self.meta.sub_shift);
         let max_scan = self.max_scan();
         let tags_ptr = self.slots.tags_ptr();
         let entries_ptr = self.slots.entries_ptr();
@@ -1395,7 +1389,7 @@ impl<K: Key, V: Value, H: BuildHasher> PoMap<K, V, H> {
     #[inline(always)]
     fn _remove_entry_with_hash(&mut self, hash: u64, key: &K) -> Option<(K, V)> {
         let ideal_slot = self.meta.ideal_slot(hash);
-        let target_sub = hash_sub_bucket(hash, self.meta.index_shift);
+        let target_sub = hash_sub_bucket(hash, self.meta.sub_shift);
         let max_scan = self.max_scan();
         let tags_ptr = self.slots.tags_ptr();
 
@@ -1705,7 +1699,7 @@ impl<K: Key, V: Value, H: BuildHasher> PoMap<K, V, H> {
     {
         let hash = encode_hash(self.hash_builder.hash_one(key));
         let ideal_slot = self.meta.ideal_slot(hash);
-        let target_sub = hash_sub_bucket(hash, self.meta.index_shift);
+        let target_sub = hash_sub_bucket(hash, self.meta.sub_shift);
         let max_scan = self.max_scan();
         let scan_end = ideal_slot + max_scan;
         let tags_ptr = self.slots.tags_ptr();
@@ -1891,7 +1885,7 @@ impl<K: Key, V: Value, H: BuildHasher> PoMap<K, V, H> {
         let mut cursor = 0;
         let tags_ptr = old_slots.tags_ptr();
         let entries_ptr = old_slots.entries_ptr();
-        let new_index_shift = new_meta.index_shift;
+        let new_sub_shift = new_meta.sub_shift;
         for idx in 0..current_capacity {
             let tag = unsafe { *tags_ptr.add(idx) };
             if tag == VACANT_TAG {
@@ -1906,7 +1900,7 @@ impl<K: Key, V: Value, H: BuildHasher> PoMap<K, V, H> {
             let ideal_slot = new_meta.ideal_slot(hash);
             cursor = ideal_slot.max(cursor);
 
-            let new_tag = make_tag(cursor - ideal_slot, hash, new_index_shift);
+            let new_tag = make_tag(cursor - ideal_slot, hash, new_sub_shift);
 
             unsafe { old_slots.clear_slot(idx) };
             unsafe { self.slots.write_slot(cursor, new_tag, key, value) };
@@ -1939,7 +1933,7 @@ impl<K: Key, V: Value, H: BuildHasher> PoMap<K, V, H> {
         let mut cursor = 0;
         let tags_ptr = old_slots.tags_ptr();
         let entries_ptr = old_slots.entries_ptr();
-        let new_index_shift = new_meta.index_shift;
+        let new_sub_shift = new_meta.sub_shift;
         for idx in 0..current_capacity {
             let tag = unsafe { *tags_ptr.add(idx) };
             if tag == VACANT_TAG {
@@ -1954,7 +1948,7 @@ impl<K: Key, V: Value, H: BuildHasher> PoMap<K, V, H> {
             let ideal_slot = new_meta.ideal_slot(hash);
             cursor = ideal_slot.max(cursor);
 
-            let new_tag = make_tag(cursor - ideal_slot, hash, new_index_shift);
+            let new_tag = make_tag(cursor - ideal_slot, hash, new_sub_shift);
             unsafe { old_slots.clear_slot(idx) };
             unsafe { self.slots.write_slot(cursor, new_tag, key, value) };
             cursor += 1;
@@ -2676,13 +2670,13 @@ impl<'a, K: Key, V: Value, H: BuildHasher> VacantEntry<'a, K, V, H> {
         let insert = self.insert;
 
         let ideal_slot = map.meta.ideal_slot(hash);
-        let index_shift = map.meta.index_shift;
+        let sub_shift = map.meta.sub_shift;
 
         let index = match insert {
             VacantInsert::Direct { index } => {
                 let tags_ptr = map.slots.tags_ptr();
                 let entries_ptr = map.slots.entries_ptr();
-                let new_tag = make_tag(index - ideal_slot, hash, index_shift);
+                let new_tag = make_tag(index - ideal_slot, hash, sub_shift);
                 unsafe {
                     *tags_ptr.add(index) = new_tag;
                     let entry = &mut *entries_ptr.add(index);
@@ -2710,7 +2704,7 @@ impl<'a, K: Key, V: Value, H: BuildHasher> VacantEntry<'a, K, V, H> {
                         i -= 1;
                     }
 
-                    let new_tag = make_tag(insert_index - ideal_slot, hash, index_shift);
+                    let new_tag = make_tag(insert_index - ideal_slot, hash, sub_shift);
                     *tags_ptr.add(insert_index) = new_tag;
                     let entry = &mut *entries_ptr.add(insert_index);
                     entry.key.write(key);
@@ -3183,6 +3177,10 @@ struct PoMapMeta {
     /// Shift to extract the top-m bits from the 64-bit hash:
     ///   ideal_slot = (hash >> index_shift)
     index_shift: usize,
+
+    /// Precomputed `index_shift - 4` for sub-bucket extraction.
+    /// Used to combine ideal_slot and sub_bucket computation into fewer shifts.
+    sub_shift: usize,
 }
 
 impl PoMapMeta {
@@ -3215,6 +3213,7 @@ impl PoMapMeta {
             Self {
                 index_bits,
                 index_shift,
+                sub_shift: index_shift - 4,
             },
             ideal_range + {
                 let ms = max_scan_for(ideal_range);
