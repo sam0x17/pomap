@@ -514,7 +514,8 @@ impl<K: Key, V: Value, H: BuildHasher> PoMap<K, V, H> {
         // SIMD path for remaining slots.
         let scan =
             unsafe { simd_scan(tags_ptr.add(ideal_slot) as *const u8, target_sub, max_scan) };
-        let mut mask = scan.candidate_mask & !1u32; // skip offset 0 (already checked)
+        let vacant_trim = (1u32 << scan.first_vacant) - 1;
+        let mut mask = scan.candidate_mask & vacant_trim & !1u32; // skip offset 0, trim past vacant
 
         while mask != 0 {
             let offset = mask.trailing_zeros() as usize;
@@ -546,11 +547,15 @@ impl<K: Key, V: Value, H: BuildHasher> PoMap<K, V, H> {
             }
         } else if first_tag == VACANT_TAG {
             return None;
+        } else if tag_displacement(first_tag) == 0 && tag_sub_bucket(first_tag) > target_sub {
+            return None;
         }
 
+        // SIMD path for remaining slots.
         let scan =
             unsafe { simd_scan(tags_ptr.add(ideal_slot) as *const u8, target_sub, max_scan) };
-        let mut mask = scan.candidate_mask & !1u32;
+        let vacant_trim = (1u32 << scan.first_vacant) - 1;
+        let mut mask = scan.candidate_mask & vacant_trim & !1u32; // skip offset 0, trim past vacant
 
         while mask != 0 {
             let offset = mask.trailing_zeros() as usize;
@@ -585,11 +590,15 @@ impl<K: Key, V: Value, H: BuildHasher> PoMap<K, V, H> {
             }
         } else if first_tag == VACANT_TAG {
             return None;
+        } else if tag_displacement(first_tag) == 0 && tag_sub_bucket(first_tag) > target_sub {
+            return None;
         }
 
+        // SIMD path for remaining slots.
         let scan =
             unsafe { simd_scan(tags_ptr.add(ideal_slot) as *const u8, target_sub, max_scan) };
-        let mut mask = scan.candidate_mask & !1u32;
+        let vacant_trim = (1u32 << scan.first_vacant) - 1;
+        let mut mask = scan.candidate_mask & vacant_trim & !1u32; // skip offset 0, trim past vacant
 
         while mask != 0 {
             let offset = mask.trailing_zeros() as usize;
@@ -694,11 +703,15 @@ impl<K: Key, V: Value, H: BuildHasher> PoMap<K, V, H> {
             }
         } else if first_tag == VACANT_TAG {
             return None;
+        } else if tag_displacement(first_tag) == 0 && tag_sub_bucket(first_tag) > target_sub {
+            return None;
         }
 
+        // SIMD path for remaining slots.
         let scan =
             unsafe { simd_scan(tags_ptr.add(ideal_slot) as *const u8, target_sub, max_scan) };
-        let mut mask = scan.candidate_mask & !1u32;
+        let vacant_trim = (1u32 << scan.first_vacant) - 1;
+        let mut mask = scan.candidate_mask & vacant_trim & !1u32; // skip offset 0, trim past vacant
 
         while mask != 0 {
             let offset = mask.trailing_zeros() as usize;
