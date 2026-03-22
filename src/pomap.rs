@@ -31,6 +31,18 @@ const GROWTH_FACTOR: usize = 2;
 /// in practice because max_scan <= 14, so max displacement = max_scan - 1 = 13.
 const VACANT_TAG: u8 = 0xFF;
 
+/// Sentinel tag value indicating a tombstoned (removed) slot. Like VACANT, the slot holds no
+/// entry data, but unlike VACANT, subsequent entries may still exist in the scan window.
+/// Tombstones are reused as available slots during insert.
+const TOMBSTONE_TAG: u8 = 0xFE;
+
+/// Returns `true` if the tag indicates an available (unoccupied) slot:
+/// either vacant (`0xFF`) or tombstone (`0xFE`).
+#[inline(always)]
+const fn is_available(tag: u8) -> bool {
+    tag >= TOMBSTONE_TAG
+}
+
 /// Returns the scan window size for a given `ideal_range` (the power-of-two bucket count).
 /// Every entry resides within `[ideal_slot, ideal_slot + max_scan_for(ideal_range))`.
 ///
@@ -122,7 +134,9 @@ const fn hash_sub_bucket(hash: u64, sub_shift: usize) -> u8 {
 
 /// Build expected-tag vector for a scan window. Lane `i` contains the tag that
 /// an entry with displacement `i` and the given `target_sub` would have.
-/// Lanes >= max_scan use 0xFE (never matches any real tag or VACANT_TAG).
+/// Lanes >= max_scan use TOMBSTONE_TAG (0xFE) as a "don't match" sentinel.
+/// This works because displacement 15 never occurs (max displacement = max_scan - 1 ≤ 13),
+/// so 0xFE never appears as a valid entry tag.
 #[inline(always)]
 const fn build_expected_tags(target_sub: u8, max_scan: usize) -> [u8; 16] {
     let mut buf = [0xFEu8; 16];
@@ -134,14 +148,15 @@ const fn build_expected_tags(target_sub: u8, max_scan: usize) -> [u8; 16] {
     buf
 }
 
-/// Result of a SIMD tag scan: candidate and vacant bitmasks from a single load.
+/// Result of a SIMD tag scan: candidate and available-slot bitmasks from a single load.
 struct SimdScan {
     candidate_mask: u32,
-    first_vacant: usize,
+    first_available: usize,
     tags: [u8; 16],
 }
 
-/// One unaligned 16-byte load, two comparisons: candidates + vacants.
+/// One unaligned 16-byte load, two comparisons: candidates + available slots.
+/// Available = VACANT (0xFF) or TOMBSTONE (0xFE), detected via `(tag | 0x01) == 0xFF`.
 /// Caller must ensure 16 bytes are readable from `ptr` (guaranteed by SIMD_LANE_WIDTH padding).
 #[inline(always)]
 unsafe fn simd_scan(ptr: *const u8, target_sub: u8, max_scan: usize) -> SimdScan {
@@ -150,7 +165,6 @@ unsafe fn simd_scan(ptr: *const u8, target_sub: u8, max_scan: usize) -> SimdScan
     let tags_vec = u8x16::new(tags);
 
     let expected = u8x16::new(build_expected_tags(target_sub, max_scan));
-    let vacant_vec = u8x16::new([VACANT_TAG; 16]);
 
     let scan_mask = if max_scan >= 16 {
         0xFFFF_u32
@@ -158,16 +172,20 @@ unsafe fn simd_scan(ptr: *const u8, target_sub: u8, max_scan: usize) -> SimdScan
         (1u32 << max_scan) - 1
     };
     let candidate_mask = (tags_vec.cmp_eq(expected).move_mask() as u32) & scan_mask;
-    let vacant_mask = (tags_vec.cmp_eq(vacant_vec).move_mask() as u32) & scan_mask;
-    let first_vacant = if vacant_mask != 0 {
-        vacant_mask.trailing_zeros() as usize
+    // Detect available slots: (tag | 0x01) == 0xFF matches both 0xFE and 0xFF.
+    let available_mask = ((tags_vec | u8x16::new([0x01; 16]))
+        .cmp_eq(u8x16::new([0xFF; 16]))
+        .move_mask() as u32)
+        & scan_mask;
+    let first_available = if available_mask != 0 {
+        available_mask.trailing_zeros() as usize
     } else {
         max_scan
     };
 
     SimdScan {
         candidate_mask,
-        first_vacant,
+        first_available,
         tags,
     }
 }
@@ -290,7 +308,7 @@ impl<K: Key, V: Value> Drop for Slots<K, V> {
         unsafe {
             let tags = slice::from_raw_parts(self.tags, self.capacity);
             for (idx, &tag) in tags.iter().enumerate() {
-                if tag != VACANT_TAG {
+                if !is_available(tag) {
                     let entry = &mut *self.entries.add(idx);
                     entry.key.assume_init_drop();
                     entry.value.assume_init_drop();
@@ -330,7 +348,7 @@ impl<K: Key, V: Value, H: BuildHasher> PoMap<K, V, H> {
         let mut idx = start_idx;
         while idx < src_capacity {
             let tag = unsafe { *src_tags.add(idx) };
-            if tag != VACANT_TAG {
+            if !is_available(tag) {
                 unsafe {
                     let entry = &mut *src_entries.add(idx);
                     let key = entry.key.assume_init_read();
@@ -806,7 +824,7 @@ impl<K: Key, V: Value, H: BuildHasher> PoMap<K, V, H> {
         while idx < scan_end {
             let tag = unsafe { *tags_ptr.add(idx) };
 
-            if tag == VACANT_TAG {
+            if is_available(tag) {
                 return EntryLocation::Vacant {
                     insert: VacantInsert::Direct { index: idx },
                 };
@@ -853,14 +871,14 @@ impl<K: Key, V: Value, H: BuildHasher> PoMap<K, V, H> {
                 // sub > target_sub → fall through to shift
             }
 
-            // Need to insert before idx. Search for a vacant slot to shift into,
+            // Need to insert before idx. Search for an available slot to shift into,
             // ensuring all shifted entries can accommodate displacement + 1.
             let max_scan = self.max_scan();
             let mut search = idx + 1;
             let shift_ok = tag_displacement(tag) < max_scan - 1;
             while shift_ok && search < scan_end {
                 let cand_tag = unsafe { *tags_ptr.add(search) };
-                if cand_tag == VACANT_TAG {
+                if is_available(cand_tag) {
                     return EntryLocation::Vacant {
                         insert: VacantInsert::Shift {
                             insert_index: idx,
@@ -935,9 +953,9 @@ impl<K: Key, V: Value, H: BuildHasher> PoMap<K, V, H> {
             let tags_ptr = self.slots.tags_ptr();
             let entries_ptr = self.slots.entries_ptr();
 
-            // Scalar fast-path: ideal slot vacant → direct insert.
+            // Scalar fast-path: ideal slot available (vacant or tombstone) → direct insert.
             let first_tag = unsafe { *tags_ptr.add(ideal_slot) };
-            if first_tag == VACANT_TAG {
+            if is_available(first_tag) {
                 let new_tag = make_tag(0, hash, sub_shift);
                 unsafe {
                     *tags_ptr.add(ideal_slot) = new_tag;
@@ -949,7 +967,7 @@ impl<K: Key, V: Value, H: BuildHasher> PoMap<K, V, H> {
                 return InsertResult::Inserted { index: ideal_slot };
             }
 
-            // SIMD: one load, two comparisons — candidates + vacants.
+            // SIMD: one load, two comparisons — candidates + available slots.
             let scan =
                 unsafe { simd_scan(tags_ptr.add(ideal_slot) as *const u8, target_sub, max_scan) };
 
@@ -981,17 +999,17 @@ impl<K: Key, V: Value, H: BuildHasher> PoMap<K, V, H> {
                 }
             }
 
-            // Insert new entry. Use SIMD-determined first vacant.
-            let first_vacant = scan.first_vacant;
+            // Insert new entry. Use SIMD-determined first available slot (vacant or tombstone).
+            let first_available = scan.first_available;
 
-            if first_vacant < max_scan {
-                // There's a vacant slot in the window. Scalar-scan the loaded tags
+            if first_available < max_scan {
+                // There's an available slot in the window. Scalar-scan the loaded tags
                 // to find the insertion point (first position where our entry belongs).
-                let vacant_idx = ideal_slot + first_vacant;
+                let available_idx = ideal_slot + first_available;
                 let mut idx = ideal_slot;
-                let mut insert_point = vacant_idx; // default: append at vacant
+                let mut insert_point = available_idx; // default: append at available slot
 
-                while idx < vacant_idx {
+                while idx < available_idx {
                     let tag = scan.tags[idx - ideal_slot];
                     let offset = idx - ideal_slot;
                     let disp = tag_displacement(tag);
@@ -1024,23 +1042,25 @@ impl<K: Key, V: Value, H: BuildHasher> PoMap<K, V, H> {
                     break;
                 }
 
-                if insert_point == vacant_idx {
-                    // Append at vacant — direct insert, no shift needed.
-                    let new_tag = make_tag(first_vacant, hash, sub_shift);
+                if insert_point == available_idx {
+                    // Append at available slot — direct insert, no shift needed.
+                    let new_tag = make_tag(first_available, hash, sub_shift);
                     unsafe {
-                        *tags_ptr.add(vacant_idx) = new_tag;
-                        let entry = &mut *entries_ptr.add(vacant_idx);
+                        *tags_ptr.add(available_idx) = new_tag;
+                        let entry = &mut *entries_ptr.add(available_idx);
                         entry.key.write(key);
                         entry.value.write(value);
                     }
                     self.len += 1;
-                    return InsertResult::Inserted { index: vacant_idx };
+                    return InsertResult::Inserted {
+                        index: available_idx,
+                    };
                 }
 
-                // Need to shift [insert_point, vacant_idx) right by 1.
+                // Need to shift [insert_point, available_idx) right by 1.
                 // Check displacement bounds using the already-loaded tags.
                 let mut can_shift = true;
-                for check in (insert_point - ideal_slot)..first_vacant {
+                for check in (insert_point - ideal_slot)..first_available {
                     if tag_displacement(scan.tags[check]) >= max_scan - 1 {
                         can_shift = false;
                         break;
@@ -1049,7 +1069,7 @@ impl<K: Key, V: Value, H: BuildHasher> PoMap<K, V, H> {
 
                 if can_shift {
                     unsafe {
-                        let mut i = vacant_idx;
+                        let mut i = available_idx;
                         while i > insert_point {
                             let prev_tag = *tags_ptr.add(i - 1);
                             *tags_ptr.add(i) = prev_tag.wrapping_add(0x10);
@@ -1087,7 +1107,7 @@ impl<K: Key, V: Value, H: BuildHasher> PoMap<K, V, H> {
 
                     while v < capacity && v < cascade_limit {
                         let v_tag = unsafe { *tags_ptr.add(v) };
-                        if v_tag == VACANT_TAG {
+                        if is_available(v_tag) {
                             break;
                         }
                         let v_disp = tag_displacement(v_tag);
@@ -1125,7 +1145,7 @@ impl<K: Key, V: Value, H: BuildHasher> PoMap<K, V, H> {
                     }
                 }
             } else {
-                // No vacant in window. Try cascade from the end.
+                // No available slot in window. Try cascade from the end.
                 // Find insertion point in the full window.
                 let mut idx = ideal_slot;
                 while idx < scan_end {
@@ -1168,7 +1188,7 @@ impl<K: Key, V: Value, H: BuildHasher> PoMap<K, V, H> {
 
                     while v < capacity && v < cascade_limit {
                         let v_tag = unsafe { *tags_ptr.add(v) };
-                        if v_tag == VACANT_TAG {
+                        if is_available(v_tag) {
                             break;
                         }
                         let v_disp = tag_displacement(v_tag);
@@ -1256,16 +1276,17 @@ impl<K: Key, V: Value, H: BuildHasher> PoMap<K, V, H> {
 
         for idx in 0..capacity {
             let tag = unsafe { *tags_ptr.add(idx) };
-            if tag != VACANT_TAG {
+            if !is_available(tag) {
                 unsafe {
                     let entry = &mut *entries_ptr.add(idx);
                     entry.key.assume_init_drop();
                     entry.value.assume_init_drop();
-                    *tags_ptr.add(idx) = VACANT_TAG;
                 }
             }
         }
-
+        unsafe {
+            ptr::write_bytes(tags_ptr, 0xFF, capacity);
+        }
         self.len = 0;
     }
 
@@ -1288,7 +1309,7 @@ impl<K: Key, V: Value, H: BuildHasher> PoMap<K, V, H> {
         let mut idx = 0usize;
         while idx < capacity {
             let tag = unsafe { *tags_ptr.add(idx) };
-            if tag == VACANT_TAG {
+            if is_available(tag) {
                 idx += 1;
                 continue;
             }
@@ -1422,42 +1443,15 @@ impl<K: Key, V: Value, H: BuildHasher> PoMap<K, V, H> {
     fn remove_entry_at(&mut self, idx: usize) -> (K, V) {
         let tags_ptr = self.slots.tags_ptr();
         let entries_ptr = self.slots.entries_ptr();
-        let capacity = self.slots.capacity();
 
         let entry = unsafe { &mut *entries_ptr.add(idx) };
         let key = unsafe { entry.key.assume_init_read() };
         let value = unsafe { entry.value.assume_init_read() };
 
-        // Backshift-delete: determine shift count, bulk-copy entries, fix up tags.
-        let mut vacancy = idx;
-        let mut scan = idx + 1;
-        while scan < capacity {
-            let next_tag = unsafe { *tags_ptr.add(scan) };
-            if next_tag == VACANT_TAG {
-                break;
-            }
-            let next_ideal = scan - tag_displacement(next_tag);
-            if next_ideal > vacancy {
-                break;
-            }
-            vacancy += 1;
-            scan += 1;
-        }
-
-        let count = scan - idx - 1;
-        if count > 0 {
-            unsafe {
-                // Bulk memmove for entries (the heavy data).
-                ptr::copy(entries_ptr.add(idx + 1), entries_ptr.add(idx), count);
-                // Fix up tags individually (1 byte each, displacement -= 1).
-                for i in 0..count {
-                    let old_tag = *tags_ptr.add(idx + 1 + i);
-                    *tags_ptr.add(idx + i) = old_tag.wrapping_sub(0x10);
-                }
-            }
-        }
-
-        unsafe { *tags_ptr.add(vacancy) = VACANT_TAG };
+        // Tombstone-delete: mark the slot as tombstone instead of backshifting.
+        // The SIMD scan naturally skips tombstones (tag 0xFE never matches any expected tag),
+        // and the insert path detects tombstones as available slots for reuse.
+        unsafe { *tags_ptr.add(idx) = TOMBSTONE_TAG };
         self.len -= 1;
 
         (key, value)
@@ -1631,7 +1625,7 @@ impl<K: Key, V: Value, H: BuildHasher> PoMap<K, V, H> {
         let mut counts = alloc::vec![0usize; max_scan + 1];
         for i in 0..cap {
             let tag = unsafe { *tags_ptr.add(i) };
-            if tag == VACANT_TAG {
+            if is_available(tag) {
                 continue;
             }
             let disp = tag_displacement(tag);
@@ -1664,7 +1658,7 @@ impl<K: Key, V: Value, H: BuildHasher> PoMap<K, V, H> {
         let mut out = alloc::vec::Vec::with_capacity(self.len);
         for i in 0..cap {
             let tag = unsafe { *tags_ptr.add(i) };
-            if tag != VACANT_TAG {
+            if !is_available(tag) {
                 out.push((i, tag));
             }
         }
@@ -1680,7 +1674,7 @@ impl<K: Key, V: Value, H: BuildHasher> PoMap<K, V, H> {
         let mut out = alloc::vec::Vec::with_capacity(self.len);
         for i in 0..cap {
             let tag = unsafe { *tags_ptr.add(i) };
-            if tag != VACANT_TAG {
+            if !is_available(tag) {
                 let entry = unsafe { &*entries_ptr.add(i) };
                 let key = unsafe { entry.key.assume_init_ref() };
                 let hash = encode_hash(self.hash_builder.hash_one(key));
@@ -1712,7 +1706,7 @@ impl<K: Key, V: Value, H: BuildHasher> PoMap<K, V, H> {
             let tag = unsafe { *tags_ptr.add(idx) };
             probes += 1;
 
-            if tag == VACANT_TAG {
+            if is_available(tag) {
                 return Some(probes);
             }
 
@@ -1723,11 +1717,11 @@ impl<K: Key, V: Value, H: BuildHasher> PoMap<K, V, H> {
                 continue;
             }
             if disp < offset {
-                // Need shift — search for vacant
+                // Need shift — search for available slot
                 let mut search = idx + 1;
                 while search < scan_end {
                     probes += 1;
-                    if unsafe { *tags_ptr.add(search) } == VACANT_TAG {
+                    if is_available(unsafe { *tags_ptr.add(search) }) {
                         return Some(probes);
                     }
                     search += 1;
@@ -1742,7 +1736,7 @@ impl<K: Key, V: Value, H: BuildHasher> PoMap<K, V, H> {
                     while v < capacity && v < cascade_limit {
                         let v_tag = unsafe { *tags_ptr.add(v) };
                         probes += 1;
-                        if v_tag == VACANT_TAG {
+                        if is_available(v_tag) {
                             return Some(probes);
                         }
                         let v_ideal = v - tag_displacement(v_tag);
@@ -1775,7 +1769,7 @@ impl<K: Key, V: Value, H: BuildHasher> PoMap<K, V, H> {
             let mut search = idx + 1;
             while search < scan_end {
                 probes += 1;
-                if unsafe { *tags_ptr.add(search) } == VACANT_TAG {
+                if is_available(unsafe { *tags_ptr.add(search) }) {
                     return Some(probes);
                 }
                 search += 1;
@@ -1790,7 +1784,7 @@ impl<K: Key, V: Value, H: BuildHasher> PoMap<K, V, H> {
                 while v < capacity && v < cascade_limit {
                     let v_tag = unsafe { *tags_ptr.add(v) };
                     probes += 1;
-                    if v_tag == VACANT_TAG {
+                    if is_available(v_tag) {
                         return Some(probes);
                     }
                     let v_ideal = v - tag_displacement(v_tag);
@@ -1862,8 +1856,8 @@ impl<K: Key, V: Value, H: BuildHasher> PoMap<K, V, H> {
         // Re-pack all live entries from the old map into the new map. Each entry is placed at
         // max(ideal_slot_new, cursor) so that entries always move forward and never collide.
         //
-        // When we encounter a VACANT slot in the old map we bump cursor by 1. This preserves a
-        // trace of the gap that existed between two runs in the old map, which improves insert
+        // When we encounter an available slot (VACANT or tombstone) in the old map, we skip it.
+        // This naturally preserves the gap that existed between two runs, which improves insert
         // performance after the resize by pre-creating open slots at the ideal positions of the
         // next run. Concretely:
         //
@@ -1871,7 +1865,7 @@ impl<K: Key, V: Value, H: BuildHasher> PoMap<K, V, H> {
         //   slot:  [ 0 ][ 1 ][ 2 ][ 3 ][ 4 ][ 5 ]
         //           A0   A1   A2   A3   --   B0
         //   ideal:   0    0    0    0        1
-        //                                ↑ VACANT: bucket A ended here
+        //                                ↑ available: bucket A ended here
         //
         //   WITHOUT bump            WITH bump
         //   [A0][A1][A2][A3][B0]    [A0][A1][A2][A3][ ][B0]
@@ -1880,15 +1874,15 @@ impl<K: Key, V: Value, H: BuildHasher> PoMap<K, V, H> {
         //              own ideal slot          next insert is direct,
         //                                      no displacement needed
         //
-        // The bump is safe: at resize time the old map has ~index_bits total vacant slots, and
-        // the 4× growth factor guarantees every entry still lands within its new scan window.
+        // The skip is safe: at resize time the old map has ~index_bits total available slots,
+        // and the 4× growth factor guarantees every entry still lands within its new scan window.
         let mut cursor = 0;
         let tags_ptr = old_slots.tags_ptr();
         let entries_ptr = old_slots.entries_ptr();
         let new_sub_shift = new_meta.sub_shift;
         for idx in 0..current_capacity {
             let tag = unsafe { *tags_ptr.add(idx) };
-            if tag == VACANT_TAG {
+            if is_available(tag) {
                 continue;
             }
 
@@ -1936,7 +1930,7 @@ impl<K: Key, V: Value, H: BuildHasher> PoMap<K, V, H> {
         let new_sub_shift = new_meta.sub_shift;
         for idx in 0..current_capacity {
             let tag = unsafe { *tags_ptr.add(idx) };
-            if tag == VACANT_TAG {
+            if is_available(tag) {
                 continue;
             }
 
@@ -2012,7 +2006,7 @@ impl<'a, K: Key, V: Value> Iterator for Iter<'a, K, V> {
             let idx = self.index;
             self.index += 1;
             let tag = unsafe { *self.tags.add(idx) };
-            if tag == VACANT_TAG {
+            if is_available(tag) {
                 continue;
             }
             self.remaining -= 1;
@@ -2059,7 +2053,7 @@ impl<'a, K: Key, V: Value> Iterator for IterMut<'a, K, V> {
             let idx = self.index;
             self.index += 1;
             let tag = unsafe { *self.tags.add(idx) };
-            if tag == VACANT_TAG {
+            if is_available(tag) {
                 continue;
             }
             self.remaining -= 1;
@@ -2212,7 +2206,7 @@ impl<K: Key, V: Value> Iterator for IntoIter<K, V> {
             let idx = self.index;
             self.index += 1;
             let tag = unsafe { *tags_ptr.add(idx) };
-            if tag == VACANT_TAG {
+            if is_available(tag) {
                 continue;
             }
             self.remaining -= 1;
@@ -2260,7 +2254,7 @@ impl<'a, K: Key, V: Value> Iterator for Drain<'a, K, V> {
             let idx = self.index;
             self.index += 1;
             let tag = unsafe { *self.tags.add(idx) };
-            if tag == VACANT_TAG {
+            if is_available(tag) {
                 continue;
             }
             self.remaining -= 1;
@@ -2294,7 +2288,7 @@ impl<'a, K: Key, V: Value> Drop for Drain<'a, K, V> {
             let idx = self.index;
             self.index += 1;
             let tag = unsafe { *self.tags.add(idx) };
-            if tag == VACANT_TAG {
+            if is_available(tag) {
                 continue;
             }
             unsafe { *self.tags.add(idx) = VACANT_TAG };
@@ -2330,7 +2324,7 @@ where
         while self.index < capacity {
             let idx = self.index;
             let tag = unsafe { *tags_ptr.add(idx) };
-            if tag == VACANT_TAG {
+            if is_available(tag) {
                 self.index += 1;
                 continue;
             }
@@ -3034,7 +3028,7 @@ impl<K: Key, V: Value, H: BuildHasher + Clone> Clone for PoMap<K, V, H> {
 
         for idx in 0..capacity {
             let tag = unsafe { *tags_ptr.add(idx) };
-            if tag == VACANT_TAG {
+            if is_available(tag) {
                 continue;
             }
             let entry = unsafe { &*entries_ptr.add(idx) };
@@ -3836,7 +3830,7 @@ mod tests {
     }
 
     #[test]
-    fn remove_backshifts_contiguous_run() {
+    fn remove_preserves_remaining_entries() {
         let mut map: PoMap<u64, u64> = PoMap::with_capacity(8);
         let keys = find_keys_with_same_slot(&map.meta, 3);
         let ordered = order_by_hash_then_key(&keys);
@@ -3858,7 +3852,7 @@ mod tests {
     }
 
     #[test]
-    fn remove_compacts_middle_of_run() {
+    fn remove_middle_preserves_surrounding_entries() {
         let mut map: PoMap<u64, u64> = PoMap::with_capacity(8);
         let keys = find_keys_with_same_slot(&map.meta, 3);
         let ordered = order_by_hash_then_key(&keys);
