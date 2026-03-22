@@ -456,15 +456,6 @@ impl<K: Key, V: Value, H: BuildHasher> PoMap<K, V, H> {
         max_scan_for(1usize << self.meta.index_bits)
     }
 
-    /// Returns the ideal range (the power-of-two bucket count, `2^index_bits`).
-    ///
-    /// This is the number of distinct ideal-slot positions. The total backing capacity
-    /// is `ideal_range() + max(max_scan(), SIMD_LANE_WIDTH)`.
-    #[inline(always)]
-    pub const fn ideal_range(&self) -> usize {
-        1usize << self.meta.index_bits
-    }
-
     /// Current number of occupied entries.
     #[inline(always)]
     pub const fn len(&self) -> usize {

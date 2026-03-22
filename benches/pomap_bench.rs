@@ -320,39 +320,15 @@ fn bench_insert_preallocated(c: &mut Criterion) {
         .into_iter()
         .zip(values.into_iter())
         .collect::<Vec<(BenchKey, BenchValue)>>();
-    // Pre-compute the capacity pomap needs so that inserting `size` entries causes zero
-    // grows. Then give all three implementations the same capacity so they compete on
-    // equal memory footprints. For pomap, grows are driven by window overflow (not load
-    // factor), so we iteratively insert-and-grow until the capacity stabilizes.
-    let preallocated_capacities: Vec<usize> = target_sizes
-        .iter()
-        .map(|&size| {
-            let mut requested = size;
-            loop {
-                let mut map: BenchPoMap =
-                    BenchPoMap::with_capacity_and_hasher(requested, BenchHasherBuilder::default());
-                let cap_before = map.capacity();
-                for (key, val) in combined.iter().take(size) {
-                    map.insert(key.clone(), val.clone());
-                }
-                let cap_after = map.capacity();
-                if cap_after == cap_before {
-                    return map.ideal_range();
-                }
-                requested = map.ideal_range();
-            }
-        })
-        .collect();
+    // Each implementation pre-allocates for `size` entries using its own strategy.
+    // This is the fairest comparison: each decides its own allocation for the workload.
     let mut group = c.comparison_benchmark_group("insert_preallocated");
 
-    // std/hashbrown interpret with_capacity(N) as "hold N elements before growing",
-    // internally allocating ~N*8/7 slots. To match pomap's slot count we request N*7/8,
-    // but never less than `size` (so they don't grow when pomap wouldn't).
     group.bench_function("pomap", |b| {
         b.iter(|| {
-            for (i, &size) in target_sizes.iter().enumerate() {
+            for &size in &target_sizes {
                 let mut map: BenchPoMap = BenchPoMap::with_capacity_and_hasher(
-                    preallocated_capacities[i],
+                    size,
                     BenchHasherBuilder::default(),
                 );
                 for (key, val) in combined.iter().take(size) {
@@ -365,9 +341,8 @@ fn bench_insert_preallocated(c: &mut Criterion) {
 
     group.bench_function("std_hashmap", |b| {
         b.iter(|| {
-            for (i, &size) in target_sizes.iter().enumerate() {
-                let mut map: BenchHashMap =
-                    std_hashmap_with_capacity((preallocated_capacities[i] * 7 / 8).max(size));
+            for &size in &target_sizes {
+                let mut map: BenchHashMap = std_hashmap_with_capacity(size);
                 for (key, val) in combined.iter().take(size) {
                     black_box(map.insert(key.clone(), val.clone()));
                 }
@@ -378,9 +353,8 @@ fn bench_insert_preallocated(c: &mut Criterion) {
 
     group.bench_function("hashbrown", |b| {
         b.iter(|| {
-            for (i, &size) in target_sizes.iter().enumerate() {
-                let mut map: BenchHashbrownMap =
-                    hashbrown_with_capacity((preallocated_capacities[i] * 7 / 8).max(size));
+            for &size in &target_sizes {
+                let mut map: BenchHashbrownMap = hashbrown_with_capacity(size);
                 for (key, val) in combined.iter().take(size) {
                     black_box(map.insert(key.clone(), val.clone()));
                 }
