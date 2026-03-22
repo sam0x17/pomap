@@ -49,10 +49,8 @@ const fn is_available(tag: u8) -> bool {
 /// Change only this function to experiment with different scan window strategies
 /// (constant, ilog2-based, etc.). When the body returns a constant, the optimizer
 /// eliminates the `ideal_range` parameter entirely.
-const fn max_scan_for(ideal_range: usize) -> usize {
-    let tz = ideal_range.trailing_zeros() as usize;
-    let half = tz / 2;
-    if half > 4 { half } else { 4 }
+const fn max_scan_for(_ideal_range: usize) -> usize {
+    14
 }
 
 /// Number of additional scan windows cascade displacement may search beyond the main window.
@@ -1228,7 +1226,7 @@ impl<K: Key, V: Value, H: BuildHasher> PoMap<K, V, H> {
             }
 
             // No room; grow and retry.
-            let ideal_range = self.slots.capacity() - self.max_scan();
+            let ideal_range = 1usize << self.meta.index_bits;
             let target_capacity = ideal_range.saturating_mul(GROWTH_FACTOR);
             self.reserve_for_capacity(target_capacity);
             grows += 1;
@@ -1850,39 +1848,19 @@ impl<K: Key, V: Value, H: BuildHasher> PoMap<K, V, H> {
             return current_capacity;
         }
 
-        // allocate new slots and keep the old ones for re-distribution.
+        // Allocate new slots and re-pack all live entries. Each entry is placed at
+        // max(ideal_slot_new, cursor) so that entries always move forward and never collide.
+        // With 2× growth the repack is guaranteed to fit: every old bucket splits into two
+        // new buckets, so max displacement roughly halves.
         let mut old_slots = core::mem::replace(&mut self.slots, Slots::new(new_vec_capacity));
 
-        // Re-pack all live entries from the old map into the new map. Each entry is placed at
-        // max(ideal_slot_new, cursor) so that entries always move forward and never collide.
-        //
-        // When we encounter an available slot (VACANT or tombstone) in the old map, we skip it.
-        // This naturally preserves the gap that existed between two runs, which improves insert
-        // performance after the resize by pre-creating open slots at the ideal positions of the
-        // next run. Concretely:
-        //
-        //   OLD MAP  (ideal_range=4, index_bits=4)
-        //   slot:  [ 0 ][ 1 ][ 2 ][ 3 ][ 4 ][ 5 ]
-        //           A0   A1   A2   A3   --   B0
-        //   ideal:   0    0    0    0        1
-        //                                ↑ available: bucket A ended here
-        //
-        //   WITHOUT bump            WITH bump
-        //   [A0][A1][A2][A3][B0]    [A0][A1][A2][A3][ ][B0]
-        //                    ↑                       ↑
-        //              B0 blocks its           ideal slot left open:
-        //              own ideal slot          next insert is direct,
-        //                                      no displacement needed
-        //
-        // The skip is safe: at resize time the old map has ~index_bits total available slots,
-        // and the 4× growth factor guarantees every entry still lands within its new scan window.
         let mut cursor = 0;
         let tags_ptr = old_slots.tags_ptr();
         let entries_ptr = old_slots.entries_ptr();
         let new_sub_shift = new_meta.sub_shift;
         for idx in 0..current_capacity {
             let tag = unsafe { *tags_ptr.add(idx) };
-            if is_available(tag) {
+            if tag == VACANT_TAG {
                 continue;
             }
 
