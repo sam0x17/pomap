@@ -694,6 +694,8 @@ impl<K: Key, V: Value, H: BuildHasher> PoMap<K, V, H> {
             }
         } else if first_tag == VACANT_TAG {
             return None;
+        } else if tag_displacement(first_tag) == 0 && tag_sub_bucket(first_tag) > target_sub {
+            return None;
         }
 
         let scan =
@@ -1054,16 +1056,23 @@ impl<K: Key, V: Value, H: BuildHasher> PoMap<K, V, H> {
                 }
 
                 if can_shift {
+                    let shift_count = vacant_idx - insert_point;
                     unsafe {
-                        let mut i = vacant_idx;
-                        while i > insert_point {
-                            let prev_tag = *tags_ptr.add(i - 1);
-                            *tags_ptr.add(i) = prev_tag.wrapping_add(0x10);
-                            core::ptr::write(
-                                entries_ptr.add(i),
-                                core::ptr::read(entries_ptr.add(i - 1)),
-                            );
-                            i -= 1;
+                        // Bulk shift entries right by 1 (ptr::copy handles overlap).
+                        ptr::copy(
+                            entries_ptr.add(insert_point),
+                            entries_ptr.add(insert_point + 1),
+                            shift_count,
+                        );
+                        // Shift tags right by 1 and bump displacement.
+                        ptr::copy(
+                            tags_ptr.add(insert_point),
+                            tags_ptr.add(insert_point + 1),
+                            shift_count,
+                        );
+                        for i in 0..shift_count {
+                            let t = tags_ptr.add(insert_point + 1 + i);
+                            *t = (*t).wrapping_add(0x10);
                         }
 
                         let new_tag = make_tag(insert_point - ideal_slot, hash, index_shift);
@@ -1109,16 +1118,13 @@ impl<K: Key, V: Value, H: BuildHasher> PoMap<K, V, H> {
                     }
 
                     if cascade_ok && v < capacity {
+                        let shift_count = v - idx;
                         unsafe {
-                            let mut i = v;
-                            while i > idx {
-                                let prev_tag = *tags_ptr.add(i - 1);
-                                *tags_ptr.add(i) = prev_tag.wrapping_add(0x10);
-                                core::ptr::write(
-                                    entries_ptr.add(i),
-                                    core::ptr::read(entries_ptr.add(i - 1)),
-                                );
-                                i -= 1;
+                            ptr::copy(entries_ptr.add(idx), entries_ptr.add(idx + 1), shift_count);
+                            ptr::copy(tags_ptr.add(idx), tags_ptr.add(idx + 1), shift_count);
+                            for i in 0..shift_count {
+                                let t = tags_ptr.add(idx + 1 + i);
+                                *t = (*t).wrapping_add(0x10);
                             }
                             let new_tag = make_tag(idx - ideal_slot, hash, index_shift);
                             *tags_ptr.add(idx) = new_tag;
@@ -1190,16 +1196,13 @@ impl<K: Key, V: Value, H: BuildHasher> PoMap<K, V, H> {
                     }
 
                     if cascade_ok && v < capacity {
+                        let shift_count = v - idx;
                         unsafe {
-                            let mut i = v;
-                            while i > idx {
-                                let prev_tag = *tags_ptr.add(i - 1);
-                                *tags_ptr.add(i) = prev_tag.wrapping_add(0x10);
-                                core::ptr::write(
-                                    entries_ptr.add(i),
-                                    core::ptr::read(entries_ptr.add(i - 1)),
-                                );
-                                i -= 1;
+                            ptr::copy(entries_ptr.add(idx), entries_ptr.add(idx + 1), shift_count);
+                            ptr::copy(tags_ptr.add(idx), tags_ptr.add(idx + 1), shift_count);
+                            for i in 0..shift_count {
+                                let t = tags_ptr.add(idx + 1 + i);
+                                *t = (*t).wrapping_add(0x10);
                             }
                             let new_tag = make_tag(idx - ideal_slot, hash, index_shift);
                             *tags_ptr.add(idx) = new_tag;
@@ -1455,10 +1458,11 @@ impl<K: Key, V: Value, H: BuildHasher> PoMap<K, V, H> {
             unsafe {
                 // Bulk memmove for entries (the heavy data).
                 ptr::copy(entries_ptr.add(idx + 1), entries_ptr.add(idx), count);
-                // Fix up tags individually (1 byte each, displacement -= 1).
+                // Bulk memmove tags left by 1, then subtract 0x10 in-place.
+                ptr::copy(tags_ptr.add(idx + 1), tags_ptr.add(idx), count);
                 for i in 0..count {
-                    let old_tag = *tags_ptr.add(idx + 1 + i);
-                    *tags_ptr.add(idx + i) = old_tag.wrapping_sub(0x10);
+                    let t = tags_ptr.add(idx + i);
+                    *t = (*t).wrapping_sub(0x10);
                 }
             }
         }
