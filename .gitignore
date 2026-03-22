@@ -2,4 +2,5 @@
 get_graph.csv
 insert_graph.csv
 insert_hot_graph.csv
-/.claude
+/.claude/*
+!/.claude/skills/
