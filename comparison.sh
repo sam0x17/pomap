@@ -7,3 +7,4 @@ cargo bench --bench pomap_bench --color=always 2>&1 \
       else printf "\033[31m%s\033[0m\n", $0;
       fflush();
     }'
+./memory.sh
