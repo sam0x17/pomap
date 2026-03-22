@@ -55,7 +55,7 @@ const fn max_scan_for(_ideal_range: usize) -> usize {
 
 /// Number of additional scan windows cascade displacement may search beyond the main window.
 /// The cascade search extends up to `CASCADE_WINDOWS * max_scan` slots past `scan_end`.
-const CASCADE_WINDOWS: usize = 2;
+const CASCADE_WINDOWS: usize = 4;
 
 /// Default build hasher for [`PoMap`], backed by [`AHasher`].
 #[derive(Clone, Default)]
@@ -454,6 +454,15 @@ impl<K: Key, V: Value, H: BuildHasher> PoMap<K, V, H> {
     /// cascade terminates well within this limit.
     pub const fn max_scan(&self) -> usize {
         max_scan_for(1usize << self.meta.index_bits)
+    }
+
+    /// Returns the ideal range (the power-of-two bucket count, `2^index_bits`).
+    ///
+    /// This is the number of distinct ideal-slot positions. The total backing capacity
+    /// is `ideal_range() + max(max_scan(), SIMD_LANE_WIDTH)`.
+    #[inline(always)]
+    pub const fn ideal_range(&self) -> usize {
+        1usize << self.meta.index_bits
     }
 
     /// Current number of occupied entries.
@@ -1852,33 +1861,66 @@ impl<K: Key, V: Value, H: BuildHasher> PoMap<K, V, H> {
         // max(ideal_slot_new, cursor) so that entries always move forward and never collide.
         // With 2× growth the repack is guaranteed to fit: every old bucket splits into two
         // new buckets, so max displacement roughly halves.
-        let mut old_slots = core::mem::replace(&mut self.slots, Slots::new(new_vec_capacity));
+        let old_slots = core::mem::replace(&mut self.slots, Slots::new(new_vec_capacity));
 
         let mut cursor = 0;
         let tags_ptr = old_slots.tags_ptr();
         let entries_ptr = old_slots.entries_ptr();
         let new_sub_shift = new_meta.sub_shift;
-        for idx in 0..current_capacity {
-            let tag = unsafe { *tags_ptr.add(idx) };
-            if tag == VACANT_TAG {
-                continue;
+
+        // SIMD-accelerated iteration: process 16 tag bytes at a time,
+        // using a bitmask to skip vacant groups and iterate only occupied entries.
+        let vacant_vec = u8x16::new([VACANT_TAG; 16]);
+        let mut base = 0usize;
+        while base + 16 <= current_capacity {
+            let chunk = unsafe { ptr::read_unaligned(tags_ptr.add(base) as *const [u8; 16]) };
+            let occupied = !(u8x16::new(chunk).cmp_eq(vacant_vec).move_mask() as u32) & 0xFFFF;
+            let mut mask = occupied;
+            while mask != 0 {
+                let offset = mask.trailing_zeros() as usize;
+                mask &= mask - 1;
+                let idx = base + offset;
+
+                let entry = unsafe { &*entries_ptr.add(idx) };
+                let key = unsafe { ptr::read(&entry.key).assume_init() };
+                let value = unsafe { ptr::read(&entry.value).assume_init() };
+
+                let hash = encode_hash(self.hash_builder.hash_one(&key));
+                let ideal_slot = new_meta.ideal_slot(hash);
+                cursor = ideal_slot.max(cursor);
+
+                let new_tag = make_tag(cursor - ideal_slot, hash, new_sub_shift);
+                unsafe { self.slots.write_slot(cursor, new_tag, key, value) };
+                cursor += 1;
             }
-
-            let entry = unsafe { &mut *entries_ptr.add(idx) };
-            let key = unsafe { entry.key.assume_init_read() };
-            let value = unsafe { entry.value.assume_init_read() };
-
-            let hash = encode_hash(self.hash_builder.hash_one(&key));
-            let ideal_slot = new_meta.ideal_slot(hash);
-            cursor = ideal_slot.max(cursor);
-
-            let new_tag = make_tag(cursor - ideal_slot, hash, new_sub_shift);
-
-            unsafe { old_slots.clear_slot(idx) };
-            unsafe { self.slots.write_slot(cursor, new_tag, key, value) };
-
-            cursor += 1;
+            base += 16;
         }
+        // Handle remaining slots.
+        while base < current_capacity {
+            let tag = unsafe { *tags_ptr.add(base) };
+            if tag != VACANT_TAG {
+                let entry = unsafe { &*entries_ptr.add(base) };
+                let key = unsafe { ptr::read(&entry.key).assume_init() };
+                let value = unsafe { ptr::read(&entry.value).assume_init() };
+
+                let hash = encode_hash(self.hash_builder.hash_one(&key));
+                let ideal_slot = new_meta.ideal_slot(hash);
+                cursor = ideal_slot.max(cursor);
+
+                let new_tag = make_tag(cursor - ideal_slot, hash, new_sub_shift);
+                unsafe { self.slots.write_slot(cursor, new_tag, key, value) };
+                cursor += 1;
+            }
+            base += 1;
+        }
+
+        // All entries have been moved to the new slots. Skip the Slots::Drop
+        // (which would scan tags and try to drop already-moved entries) and
+        // just free the raw memory directly.
+        let old_layout = old_slots.layout;
+        let old_ptr = old_slots.ptr;
+        core::mem::forget(old_slots);
+        unsafe { dealloc(old_ptr.as_ptr(), old_layout) };
 
         self.meta = new_meta;
 

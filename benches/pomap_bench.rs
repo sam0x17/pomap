@@ -337,9 +337,9 @@ fn bench_insert_preallocated(c: &mut Criterion) {
                 }
                 let cap_after = map.capacity();
                 if cap_after == cap_before {
-                    return cap_after - map.max_scan();
+                    return map.ideal_range();
                 }
-                requested = cap_after - map.max_scan();
+                requested = map.ideal_range();
             }
         })
         .collect();
