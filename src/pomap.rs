@@ -1056,14 +1056,21 @@ impl<K: Key, V: Value, H: BuildHasher> PoMap<K, V, H> {
                 }
 
                 // Need to shift [insert_point, available_idx) right by 1.
-                // Check displacement bounds using the already-loaded tags.
-                let mut can_shift = true;
-                for check in (insert_point - ideal_slot)..first_available {
-                    if tag_displacement(scan.tags[check]) >= max_scan - 1 {
-                        can_shift = false;
-                        break;
+                // Check displacement bounds: no tag in the shift range may have
+                // displacement >= max_scan - 1, or the shift would overflow.
+                // Use the available_mask from the SIMD scan: tags with upper nibble
+                // 0xD or 0xE are at displacement 13-14, which blocks shifting.
+                // (Tags 0xFx are available slots, already excluded from the range.)
+                let can_shift = {
+                    let shift_start = insert_point - ideal_slot;
+                    let mut overflow = false;
+                    let mut c = shift_start;
+                    while c < first_available {
+                        overflow |= scan.tags[c] >= 0xD0;
+                        c += 1;
                     }
-                }
+                    !overflow
+                };
 
                 if can_shift {
                     unsafe {
