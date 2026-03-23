@@ -3,15 +3,20 @@ use std::{
     collections::HashMap,
     hash::BuildHasherDefault,
     hint::black_box,
-    io::{self, Write as _},
-    sync::{
-        Arc,
-        atomic::{AtomicBool, AtomicUsize, Ordering},
-    },
-    time::{Duration, Instant},
+    io::Write as _,
+    sync::atomic::{AtomicUsize, Ordering},
+    time::Instant,
+};
+
+#[cfg(feature = "tui")]
+use std::{
+    io,
+    sync::{Arc, atomic::AtomicBool},
+    time::Duration,
 };
 
 use ahash::AHasher;
+#[cfg(feature = "tui")]
 use crossterm::{
     event::{self, Event, KeyCode},
     execute,
@@ -20,6 +25,7 @@ use crossterm::{
 use hashbrown::HashMap as HashbrownMap;
 use pomap::PoMap;
 use rand::{Rng, SeedableRng, rngs::StdRng, seq::SliceRandom};
+#[cfg(feature = "tui")]
 use ratatui::{
     Terminal,
     backend::CrosstermBackend,
@@ -148,12 +154,14 @@ fn insert_target_sizes() -> Vec<usize> {
 // TUI drawing
 // ---------------------------------------------------------------------------
 
+#[cfg(feature = "tui")]
 const IMPL_COLORS: [(&str, Color); 3] = [
     ("pomap", Color::Green),
     ("std_hashmap", Color::Yellow),
     ("hashbrown", Color::Red),
 ];
 
+#[cfg(feature = "tui")]
 fn draw_tui(
     terminal: &mut Terminal<CrosstermBackend<io::Stderr>>,
     chart_data: &HashMap<&str, Vec<(f64, f64)>>,
@@ -275,16 +283,22 @@ fn main() {
         .expect("failed to create insert_hot_graph.csv");
     writeln!(file, "map_size,impl,per_insert_ns").unwrap();
 
-    // TUI setup
+    // --- TUI setup (when enabled) ---
+    #[cfg(feature = "tui")]
     let original_hook = std::panic::take_hook();
+    #[cfg(feature = "tui")]
     std::panic::set_hook(Box::new(move |info| {
         let _ = disable_raw_mode();
         let _ = execute!(io::stderr(), LeaveAlternateScreen);
         original_hook(info);
     }));
+    #[cfg(feature = "tui")]
     enable_raw_mode().unwrap();
+    #[cfg(feature = "tui")]
     execute!(io::stderr(), EnterAlternateScreen).unwrap();
+    #[cfg(feature = "tui")]
     let backend = CrosstermBackend::new(io::stderr());
+    #[cfg(feature = "tui")]
     let mut terminal = Terminal::new(backend).unwrap();
 
     // impl_name -> Vec<(log10_size, per_insert_ns)>
@@ -321,9 +335,11 @@ fn main() {
         }};
     }
 
-    // Background thread for quit on 'q' or Ctrl+C.
+    #[cfg(feature = "tui")]
     let quit = Arc::new(AtomicBool::new(false));
+    #[cfg(feature = "tui")]
     let quit_bg = quit.clone();
+    #[cfg(feature = "tui")]
     let _input_thread = std::thread::spawn(move || {
         loop {
             if event::poll(Duration::from_millis(50)).unwrap_or(false) {
@@ -345,21 +361,20 @@ fn main() {
         }
     });
 
-    #[allow(unused_assignments)]
-    let mut status = String::new();
     let bench_start = Instant::now();
     let total_steps = target_sizes.len() * 3;
     let mut completed_steps = 0usize;
 
     let mut order_rng = StdRng::seed_from_u64(0x105E27);
 
-    'outer: for &size in &target_sizes {
+    for &size in &target_sizes {
         let mut order = [0u8, 1, 2];
         order.shuffle(&mut order_rng);
 
         for &idx in &order {
+            #[cfg(feature = "tui")]
             if quit.load(Ordering::Relaxed) {
-                break 'outer;
+                break;
             }
 
             let impl_name = match idx {
@@ -382,15 +397,21 @@ fn main() {
             } else {
                 "...".to_string()
             };
-            status = format!(
-                " size={:<6} | {} | {}/{} | ETA {} | 'q' or Ctrl+C to stop",
+
+            let status = format!(
+                "size={:<10} | {:12} | {}/{} | ETA {}",
                 size,
                 impl_name,
                 completed_steps + 1,
                 total_steps,
                 eta
             );
-            draw_tui(&mut terminal, &chart_data, &status);
+
+            #[cfg(feature = "tui")]
+            draw_tui(&mut terminal, &chart_data, &format!(" {} | 'q' or Ctrl+C to stop", status));
+
+            #[cfg(not(feature = "tui"))]
+            eprint!("\r{}", status);
 
             match idx {
                 0 => time_inserts!(
@@ -414,13 +435,18 @@ fn main() {
         }
     }
 
-    if !quit.load(Ordering::Relaxed) {
-        draw_tui(&mut terminal, &chart_data, " Done! Press any key to exit.");
-        while !quit.load(Ordering::Relaxed) {
-            std::thread::sleep(Duration::from_millis(50));
-        }
-    }
+    #[cfg(not(feature = "tui"))]
+    eprintln!("\rDone! ({} steps)                              ", completed_steps);
 
-    disable_raw_mode().unwrap();
-    execute!(terminal.backend_mut(), LeaveAlternateScreen).unwrap();
+    #[cfg(feature = "tui")]
+    {
+        if !quit.load(Ordering::Relaxed) {
+            draw_tui(&mut terminal, &chart_data, " Done! Press any key to exit.");
+            while !quit.load(Ordering::Relaxed) {
+                std::thread::sleep(Duration::from_millis(50));
+            }
+        }
+        disable_raw_mode().unwrap();
+        execute!(terminal.backend_mut(), LeaveAlternateScreen).unwrap();
+    }
 }

@@ -3,15 +3,20 @@ use std::{
     collections::{HashMap, HashSet},
     hash::BuildHasherDefault,
     hint::black_box,
-    io::{self, Write as _},
-    sync::{
-        Arc,
-        atomic::{AtomicBool, AtomicUsize, Ordering},
-    },
-    time::{Duration, Instant},
+    io::Write as _,
+    sync::atomic::{AtomicUsize, Ordering},
+    time::Instant,
+};
+
+#[cfg(feature = "tui")]
+use std::{
+    io,
+    sync::{Arc, atomic::AtomicBool},
+    time::Duration,
 };
 
 use ahash::AHasher;
+#[cfg(feature = "tui")]
 use crossterm::{
     event::{self, Event, KeyCode},
     execute,
@@ -20,6 +25,7 @@ use crossterm::{
 use hashbrown::HashMap as HashbrownMap;
 use pomap::PoMap;
 use rand::{Rng, SeedableRng, rngs::StdRng, seq::SliceRandom};
+#[cfg(feature = "tui")]
 use ratatui::{
     Terminal,
     backend::CrosstermBackend,
@@ -182,13 +188,16 @@ fn build_hashbrown_maps(
 // TUI drawing
 // ---------------------------------------------------------------------------
 
+#[cfg(feature = "tui")]
 const BENCH_NAMES: [&str; 3] = ["get_hits", "get_misses", "get_hotset"];
+#[cfg(feature = "tui")]
 const IMPL_COLORS: [(&str, Color); 3] = [
     ("pomap", Color::Green),
     ("std_hashmap", Color::Yellow),
     ("hashbrown", Color::Red),
 ];
 
+#[cfg(feature = "tui")]
 fn draw_tui(
     terminal: &mut Terminal<CrosstermBackend<io::Stderr>>,
     chart_data: &HashMap<(&str, &str), Vec<(f64, f64)>>,
@@ -360,16 +369,22 @@ fn main() {
     let mut file = std::fs::File::create("get_graph.csv").expect("failed to create get_graph.csv");
     writeln!(file, "gets_per_round,bench,impl,map_size,per_get_ns").unwrap();
 
-    // TUI setup
+    // --- TUI setup (when enabled) ---
+    #[cfg(feature = "tui")]
     let original_hook = std::panic::take_hook();
+    #[cfg(feature = "tui")]
     std::panic::set_hook(Box::new(move |info| {
         let _ = disable_raw_mode();
         let _ = execute!(io::stderr(), LeaveAlternateScreen);
         original_hook(info);
     }));
+    #[cfg(feature = "tui")]
     enable_raw_mode().unwrap();
+    #[cfg(feature = "tui")]
     execute!(io::stderr(), EnterAlternateScreen).unwrap();
+    #[cfg(feature = "tui")]
     let backend = CrosstermBackend::new(io::stderr());
+    #[cfg(feature = "tui")]
     let mut terminal = Terminal::new(backend).unwrap();
 
     let mut chart_data: HashMap<(&str, &str), Vec<(f64, f64)>> = HashMap::new();
@@ -409,9 +424,11 @@ fn main() {
         }};
     }
 
-    // Background thread for quit on 'q' or Ctrl+C.
+    #[cfg(feature = "tui")]
     let quit = Arc::new(AtomicBool::new(false));
+    #[cfg(feature = "tui")]
     let quit_bg = quit.clone();
+    #[cfg(feature = "tui")]
     let _input_thread = std::thread::spawn(move || {
         loop {
             if event::poll(Duration::from_millis(50)).unwrap_or(false) {
@@ -433,8 +450,6 @@ fn main() {
         }
     });
 
-    #[allow(unused_assignments)]
-    let mut status = String::new();
     let bench_start = Instant::now();
     let total_steps = gpr_values.len() * 9;
     let mut completed_steps = 0usize;
@@ -455,11 +470,14 @@ fn main() {
             } else {
                 "...".to_string()
             };
-            status = format!(
-                " gpr={:<6} | {} / {} | ETA {} | 'q' or Ctrl+C to stop",
+            let status = format!(
+                "gpr={:<6} | {} / {} | ETA {}",
                 $gpr, $bench, $impl_name, eta
             );
-            draw_tui(&mut terminal, &chart_data, &status);
+            #[cfg(feature = "tui")]
+            draw_tui(&mut terminal, &chart_data, &format!(" {} | 'q' or Ctrl+C to stop", status));
+            #[cfg(not(feature = "tui"))]
+            eprint!("\r{}", status);
             time_gets!(file, chart_data, $bench, $impl_name, $($rest)*);
             completed_steps += 1;
         }};
@@ -467,6 +485,7 @@ fn main() {
 
     macro_rules! check_quit_labeled {
         ($label:lifetime) => {
+            #[cfg(feature = "tui")]
             if quit.load(Ordering::Relaxed) {
                 break $label;
             }
@@ -483,6 +502,7 @@ fn main() {
         let pm = build_pomap_maps(&target_sizes, &keys, &values);
         let sm = build_std_maps(&target_sizes, &keys, &values);
         let hb = build_hashbrown_maps(&target_sizes, &keys, &values);
+        #[allow(unused_labels)]
         'hits: for (_, &gpr) in gpr_values.iter().enumerate() {
             let mut order = [0u8, 1, 2];
             order.shuffle(&mut order_rng);
@@ -529,6 +549,7 @@ fn main() {
         let pm = build_pomap_maps(&target_sizes, &keys, &values);
         let sm = build_std_maps(&target_sizes, &keys, &values);
         let hb = build_hashbrown_maps(&target_sizes, &keys, &values);
+        #[allow(unused_labels)]
         'misses: for (_, &gpr) in gpr_values.iter().enumerate() {
             let mut order = [0u8, 1, 2];
             order.shuffle(&mut order_rng);
@@ -575,6 +596,7 @@ fn main() {
         let pm = build_pomap_maps(&target_sizes, &hot_map_keys, &hot_map_values);
         let sm = build_std_maps(&target_sizes, &hot_map_keys, &hot_map_values);
         let hb = build_hashbrown_maps(&target_sizes, &hot_map_keys, &hot_map_values);
+        #[allow(unused_labels)]
         'hotset: for (_, &gpr) in gpr_values.iter().enumerate() {
             let mut order = [0u8, 1, 2];
             order.shuffle(&mut order_rng);
@@ -616,13 +638,18 @@ fn main() {
         }
     }
 
-    if !quit.load(Ordering::Relaxed) {
-        draw_tui(&mut terminal, &chart_data, " Done! Press any key to exit.");
-        while !quit.load(Ordering::Relaxed) {
-            std::thread::sleep(Duration::from_millis(50));
-        }
-    }
+    #[cfg(not(feature = "tui"))]
+    eprintln!("\rDone! ({} steps)                              ", completed_steps);
 
-    disable_raw_mode().unwrap();
-    execute!(terminal.backend_mut(), LeaveAlternateScreen).unwrap();
+    #[cfg(feature = "tui")]
+    {
+        if !quit.load(Ordering::Relaxed) {
+            draw_tui(&mut terminal, &chart_data, " Done! Press any key to exit.");
+            while !quit.load(Ordering::Relaxed) {
+                std::thread::sleep(Duration::from_millis(50));
+            }
+        }
+        disable_raw_mode().unwrap();
+        execute!(terminal.backend_mut(), LeaveAlternateScreen).unwrap();
+    }
 }

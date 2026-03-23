@@ -11,23 +11,24 @@ missing_const_for_fn = "deny"
 missing_inline_in_public_items = "deny"
 
 [features]
-default = ["std"]
+default = ["std", "tui"]
 std = ["ahash/std", "ahash/runtime-rng"]
 resize-logging = []
 bench-string = []
 dots = []
+tui = ["ratatui", "crossterm"]
 
 [dependencies]
 ahash = { version = "0.8", default-features = false }
 wide = { version = "0.7", default-features = false }
+ratatui = { version = "0.29", optional = true }
+crossterm = { version = "0.28", optional = true }
 
 [dev-dependencies]
 criterion = { git = "https://github.com/sam0x17/criterion.rs" }
 hashbrown = "0.14"
 rand = { version = "0.10.0-rc.5", features = ["std"] }
 proptest = "1"
-ratatui = "0.29"
-crossterm = "0.28"
 
 [profile.release]
 codegen-units = 1
