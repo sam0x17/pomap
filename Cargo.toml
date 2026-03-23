@@ -58,3 +58,7 @@ harness = false
 [[bench]]
 name = "scan_depth"
 harness = false
+
+[[bench]]
+name = "profile_insert"
+harness = false
