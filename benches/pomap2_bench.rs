@@ -86,6 +86,36 @@ fn main() {
     println!("  std:       {:>8.2}ms", std_time.as_secs_f64() * 1000.0);
     println!("  pomap2 vs hashbrown: {:.1}x", pomap2_time.as_secs_f64() / hashbrown_time.as_secs_f64());
 
+    // INSERT PRE-ALLOCATED (no growing)
+    println!("\n=== INSERT PRE-ALLOCATED ===");
+    let prealloc_size = 50_000;
+    let rounds = 5;
+
+    let start = std::time::Instant::now();
+    for _ in 0..rounds {
+        // Over-allocate to prevent any bucket overflow (birthday problem).
+        let mut map = BenchPoMap2::with_capacity_and_hasher(prealloc_size * 5, BenchHasherBuilder::default());
+        for idx in 0..prealloc_size {
+            black_box(map.insert(keys[idx], values[idx]));
+        }
+        black_box(&map);
+    }
+    let pomap2_prealloc = start.elapsed();
+
+    let start = std::time::Instant::now();
+    for _ in 0..rounds {
+        let mut map = BenchHashbrownMap::with_capacity_and_hasher(prealloc_size, BenchHasherBuilder::default());
+        for idx in 0..prealloc_size {
+            black_box(map.insert(keys[idx], values[idx]));
+        }
+        black_box(&map);
+    }
+    let hb_prealloc = start.elapsed();
+
+    println!("  pomap2:    {:>8.2}ms", pomap2_prealloc.as_secs_f64() * 1000.0);
+    println!("  hashbrown: {:>8.2}ms", hb_prealloc.as_secs_f64() * 1000.0);
+    println!("  pomap2 vs hashbrown: {:.2}x", pomap2_prealloc.as_secs_f64() / hb_prealloc.as_secs_f64());
+
     // Build maps for get/update benchmarks
     let mut pomap2_maps: Vec<BenchPoMap2> = Vec::new();
     let mut hb_maps: Vec<BenchHashbrownMap> = Vec::new();
