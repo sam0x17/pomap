@@ -11,3 +11,7 @@ extern crate std;
 
 mod pomap;
 pub use pomap::*;
+
+#[allow(missing_docs)]
+/// Experimental bucket-based variant (prototype).
+pub mod pomap2;

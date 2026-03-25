@@ -62,3 +62,7 @@ harness = false
 [[bench]]
 name = "profile_insert"
 harness = false
+
+[[bench]]
+name = "resize_analysis"
+harness = false
