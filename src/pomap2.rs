@@ -57,7 +57,62 @@ impl<K: Key, V: Value> Bucket<K, V> {
     fn scan_candidates(&self, target_tag: u8) -> u32 {
         let tags_vec = u8x16::new(self.tags);
         let target_vec = u8x16::new([target_tag; 16]);
-        (tags_vec.cmp_eq(target_vec).move_mask() as u32) & ((1u32 << self.count) - 1)
+        let count_mask = if self.count >= 16 { 0xFFFF_u32 } else { (1u32 << self.count) - 1 };
+        (tags_vec.cmp_eq(target_vec).move_mask() as u32) & count_mask
+    }
+
+    /// SIMD: find the first tag index >= `target` within the occupied entries.
+    /// Uses the fact that tags are sorted — finds the insertion point.
+    /// Returns count if all tags < target.
+    #[inline(always)]
+    fn simd_lower_bound(&self, target: u8) -> usize {
+        if self.count == 0 {
+            return 0;
+        }
+        // XOR all tags with 0x80 to convert unsigned comparison to signed.
+        // Then compare against (target ^ 0x80) using signed > 0 trick.
+        // Entries where tag >= target: (tag ^ 0x80) >= (target ^ 0x80) in signed space.
+        // We want the first tag >= target. Use: tag + (255 - target) overflows (wraps to < 0x80)
+        // for tags < target, stays >= 0x80 for tags >= target.
+        // Actually simpler: just compare tag == target for exact, then check remaining.
+        //
+        // Since wide only gives us cmp_eq, use a different approach:
+        // Subtract target from each tag (saturating). Result > 0 means tag > target.
+        // Result == 0 means tag <= target. The first non-zero position is where tags > target start.
+        let tags_vec = u8x16::new(self.tags);
+        // Entries where tag > target will have nonzero after saturating subtract.
+        // Entries where tag <= target will be zero.
+        let gt_mask = tags_vec
+            .saturating_sub(u8x16::new([target; 16]))
+            .cmp_eq(u8x16::new([0; 16]));
+        // gt_mask has 0xFF where tag <= target, 0x00 where tag > target.
+        // Invert: we want the first position where tag > target.
+        let le_bits = gt_mask.move_mask() as u32;
+        let count_mask = if self.count >= 16 { 0xFFFF_u32 } else { (1u32 << self.count) - 1 };
+        // le_bits has 1s where tag <= target. First 0 within count_mask is our insertion point.
+        let gt_bits = (!le_bits) & count_mask;
+        if gt_bits != 0 {
+            gt_bits.trailing_zeros() as usize
+        } else {
+            self.count as usize
+        }
+    }
+
+    /// SIMD: find the pivot point where a specific bit is first set in the tag array.
+    #[inline(always)]
+    fn simd_find_bit_pivot(&self, bit_mask: u8) -> usize {
+        let tags_vec = u8x16::new(self.tags);
+        let mask_vec = u8x16::new([bit_mask; 16]);
+        // AND tags with bit_mask, compare against zero.
+        // Entries with the bit set produce non-zero → compare against bit_mask gives match.
+        let has_bit = (tags_vec & mask_vec).cmp_eq(mask_vec);
+        let count_mask = if self.count >= 16 { 0xFFFF_u32 } else { (1u32 << self.count) - 1 };
+        let bits = (has_bit.move_mask() as u32) & count_mask;
+        if bits != 0 {
+            bits.trailing_zeros() as usize
+        } else {
+            self.count as usize
+        }
     }
 
     /// Find a key in this bucket. Returns Some(&V) if found.
@@ -70,6 +125,22 @@ impl<K: Key, V: Value> Bucket<K, V> {
             let (k, v) = unsafe { self.entries[idx].assume_init_ref() };
             if k == key {
                 return Some(v);
+            }
+        }
+        None
+    }
+
+    /// Find a key and return a mutable reference to its value.
+    #[inline]
+    fn get_mut(&mut self, target_tag: u8, key: &K) -> Option<&mut V> {
+        let mut mask = self.scan_candidates(target_tag);
+        let entries_ptr = self.entries.as_mut_ptr();
+        while mask != 0 {
+            let idx = mask.trailing_zeros() as usize;
+            mask &= mask - 1;
+            let entry = unsafe { &mut *(*entries_ptr.add(idx)).as_mut_ptr() };
+            if &entry.0 == key {
+                return Some(&mut entry.1);
             }
         }
         None
@@ -102,20 +173,33 @@ impl<K: Key, V: Value> Bucket<K, V> {
             return Err((key, value));
         }
 
-        // Find insertion point: scan tags for sorted position.
+        // Find insertion point: tags are sorted, find first tag > target_tag,
+        // or within equal tags, use hash tiebreaker.
         let count = self.count as usize;
         let mut insert_idx = count; // default: append at end
-        for i in 0..count {
-            if self.tags[i] > target_tag {
-                insert_idx = i;
-                break;
+
+        // SIMD: find first tag > target_tag (= first tag strictly greater).
+        // simd_lower_bound(x) returns first tag > x (not >=), so pass target_tag directly.
+        let gt_start = self.simd_lower_bound(target_tag);
+
+        // Only need to check entries in [0, gt_start) for equal-tag tiebreaker.
+        // Entries at gt_start and beyond have tags > target_tag (insert before them).
+        insert_idx = gt_start.min(count);
+
+        // Scan backwards from gt_start to handle equal-tag entries.
+        // Equal tags are contiguous just before gt_start. Find the right
+        // position among them using hash tiebreaker.
+        {
+            let mut i = insert_idx;
+            while i > 0 && self.tags[i - 1] == target_tag {
+                i -= 1;
             }
-            if self.tags[i] == target_tag {
-                // Tiebreaker: compare full hashes.
-                let (slot_key, _) = unsafe { self.entries[i].assume_init_ref() };
+            // i is now the start of the equal-tag run. Scan forward.
+            for j in i..insert_idx {
+                let (slot_key, _) = unsafe { self.entries[j].assume_init_ref() };
                 let slot_hash = encode_hash(hash_builder.hash_one(slot_key));
                 if slot_hash > hash || (slot_hash == hash && slot_key > &key) {
-                    insert_idx = i;
+                    insert_idx = j;
                     break;
                 }
             }
@@ -187,7 +271,8 @@ impl<K: Key, V: Value> Bucket<K, V> {
 
 impl<K: Key, V: Value> Drop for Bucket<K, V> {
     fn drop(&mut self) {
-        for i in 0..self.count as usize {
+        let count = (self.count as usize).min(BUCKET_SIZE);
+        for i in 0..count {
             unsafe { self.entries[i].assume_init_drop() };
         }
     }
@@ -335,6 +420,15 @@ impl<K: Key, V: Value, H: BuildHasher> PoMap2<K, V, H> {
         result
     }
 
+    #[inline]
+    pub fn get_mut(&mut self, key: &K) -> Option<&mut V> {
+        let hash = encode_hash(self.hash_builder.hash_one(key));
+        let bucket_idx = self.meta.bucket_index(hash);
+        let tag = self.meta.tag(hash);
+        let bucket = unsafe { &mut *self.buckets.as_ptr().add(bucket_idx) };
+        bucket.get_mut(tag, key)
+    }
+
     pub fn contains_key(&self, key: &K) -> bool {
         self.get(key).is_some()
     }
@@ -371,14 +465,8 @@ impl<K: Key, V: Value, H: BuildHasher> PoMap2<K, V, H> {
                     continue;
                 }
 
-                // Find pivot: first entry where the split bit is set.
-                let mut pivot = count;
-                for i in 0..count {
-                    if (old_bucket.tags[i] & split_mask) != 0 {
-                        pivot = i;
-                        break;
-                    }
-                }
+                // SIMD: find pivot where the split bit is first set.
+                let pivot = old_bucket.simd_find_bit_pivot(split_mask);
 
                 let lo_count = pivot;
                 let hi_count = count - pivot;
@@ -465,6 +553,9 @@ impl<K: Key, V: Value, H: BuildHasher> PoMap2<K, V, H> {
                             );
                         }
                     }
+                    debug_assert!((new_bucket.count as usize) < BUCKET_SIZE,
+                        "bucket overflow during full rehash: bucket {} has {} entries",
+                        new_bucket_idx, new_bucket.count);
                     new_bucket.tags[insert_idx] = new_tag;
                     new_bucket.entries[insert_idx] = MaybeUninit::new((key, value));
                     new_bucket.count += 1;
@@ -505,6 +596,41 @@ impl<K: Key, V: Value, H: BuildHasher> PoMap2<K, V, H> {
     /// Collect all keys in iteration order.
     pub fn keys(&self) -> impl Iterator<Item = &K> {
         self.iter().map(|(k, _)| k)
+    }
+}
+
+impl<K: Key, V: Value, H: BuildHasher + Clone> Clone for PoMap2<K, V, H> {
+    fn clone(&self) -> Self {
+        let layout = Layout::array::<Bucket<K, V>>(self.meta.num_buckets)
+            .expect("PoMap2 layout overflow on clone");
+        let ptr = unsafe { alloc(layout) as *mut Bucket<K, V> };
+        let ptr = NonNull::new(ptr).unwrap_or_else(|| handle_alloc_error(layout));
+
+        for bi in 0..self.meta.num_buckets {
+            let src = self.bucket(bi);
+            let dst = unsafe { &mut *ptr.as_ptr().add(bi) };
+            *dst = Bucket::new();
+            dst.count = src.count;
+            dst.tags = src.tags;
+            for ei in 0..src.count as usize {
+                let (k, v) = unsafe { src.entries[ei].assume_init_ref() };
+                dst.entries[ei] = MaybeUninit::new((k.clone(), v.clone()));
+            }
+        }
+
+        Self {
+            len: self.len,
+            stale_bits: self.stale_bits,
+            meta: Meta {
+                num_buckets: self.meta.num_buckets,
+                bucket_shift: self.meta.bucket_shift,
+                tag_shift: self.meta.tag_shift,
+            },
+            buckets: ptr,
+            layout,
+            hash_builder: self.hash_builder.clone(),
+            _marker: PhantomData,
+        }
     }
 }
 

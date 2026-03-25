@@ -66,3 +66,7 @@ harness = false
 [[bench]]
 name = "resize_analysis"
 harness = false
+
+[[bench]]
+name = "pomap2_bench"
+harness = false
