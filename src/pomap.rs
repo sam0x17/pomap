@@ -297,7 +297,18 @@ impl<K: Key, V: Value, H: BuildHasher> PoMap<K, V, H> {
         let ideal = self.meta.ideal_slot(hash);
         let tag = self.meta.tag(hash);
 
-        // Scan from ideal slot. Entries are at or after their ideal position.
+        // Scalar fast path: check ideal slot directly (most common case).
+        let ideal_tag = unsafe { *self.slots.tags.add(ideal) };
+        if ideal_tag == tag {
+            let (k, v) = unsafe { &*(*self.slots.entries.add(ideal)).as_ptr() };
+            if k == key {
+                return Some(v);
+            }
+        } else if ideal_tag & 0x80 != 0 {
+            return None;
+        }
+
+        // SIMD scan from ideal slot.
         let mut pos = ideal;
         loop {
             let tags_vec = self.load_tags(pos);
@@ -310,7 +321,6 @@ impl<K: Key, V: Value, H: BuildHasher> PoMap<K, V, H> {
                     return Some(v);
                 }
             }
-            // If any EMPTY in this window, entry can't be further out.
             if tags_vec.move_mask() as u32 & 0xFFFF != 0 {
                 return None;
             }
@@ -328,6 +338,18 @@ impl<K: Key, V: Value, H: BuildHasher> PoMap<K, V, H> {
         let ideal = self.meta.ideal_slot(hash);
         let tag = self.meta.tag(hash);
 
+        // Scalar fast path: check ideal slot directly.
+        let ideal_tag = unsafe { *self.slots.tags.add(ideal) };
+        if ideal_tag == tag {
+            let entry = unsafe { &mut *(*self.slots.entries.add(ideal)).as_mut_ptr() };
+            if entry.0 == *key {
+                return Some(&mut entry.1);
+            }
+        } else if ideal_tag & 0x80 != 0 {
+            return None;
+        }
+
+        // SIMD scan.
         let mut pos = ideal;
         loop {
             let tags_vec = self.load_tags(pos);
