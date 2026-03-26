@@ -1,10 +1,10 @@
-//! PoMap2: Bucket-based prefix-ordered hash map prototype.
+//! PoMap2: Prefix-ordered hash map with overlapping SIMD scan windows.
 //!
 //! Flat layout: `[tags: u8 × total_slots] [entries: (K,V) × total_slots]`
-//! Bucket `b` owns slots `[b*16 .. b*16+16)`. Tags are stable across resizes
-//! (7 free resizes before rehashing). SIMD splat scan per bucket.
-//! Entries within each bucket are packed contiguously and sorted by (tag, hash).
-//! Insert uses SIMD to find insert point, then shift-right. Remove shift-left.
+//! Each entry maps to an ideal slot based on its hash prefix. Entries are
+//! globally sorted by hash. When the ideal slot is occupied, entries shift
+//! right to the nearest EMPTY slot. SIMD scan from ideal slot for get.
+//! Grows at global load factor (75%), not per-bucket overflow.
 
 use alloc::alloc::{alloc, dealloc, handle_alloc_error};
 use core::{
@@ -18,16 +18,18 @@ use wide::u8x16;
 
 use crate::{Key, PoMapBuildHasher, Value};
 
-const BUCKET_SIZE: usize = 16;
-const MIN_BUCKETS: usize = 2;
-const GROWTH_FACTOR: usize = 2;
+const SCAN_WIDTH: usize = 16;
+/// Extra slots beyond ideal_range for displacement padding.
+const PADDING: usize = SCAN_WIDTH;
 const EMPTY: u8 = 0x80;
+const MIN_IDEAL_RANGE: usize = 16;
 
 #[inline(always)]
 const fn encode_hash(h: u64) -> u64 {
     h.saturating_sub(1)
 }
 
+/// Tag = 7-bit fingerprint from hash bits below the ideal-slot prefix.
 #[inline(always)]
 const fn make_tag(hash: u64, tag_shift: usize) -> u8 {
     ((hash >> tag_shift) & 0x7F) as u8
@@ -75,38 +77,35 @@ impl<K: Key, V: Value> Drop for Slots<K, V> {
 }
 
 struct Meta {
-    num_buckets: usize,
-    bucket_shift: usize,
+    /// Number of ideal slot positions (power of 2).
+    ideal_range: usize,
+    /// hash >> slot_shift = ideal_slot index.
+    slot_shift: usize,
+    /// hash >> tag_shift & 0x7F = tag.
     tag_shift: usize,
 }
 
 impl Meta {
-    fn new(num_buckets: usize) -> Self {
-        let bucket_bits = num_buckets.trailing_zeros() as usize;
-        let bucket_shift = 64usize.saturating_sub(bucket_bits);
-        let tag_shift = bucket_shift.saturating_sub(7);
-        Self { num_buckets, bucket_shift, tag_shift }
+    fn new(ideal_range: usize) -> Self {
+        let slot_bits = ideal_range.trailing_zeros() as usize;
+        let slot_shift = 64usize.saturating_sub(slot_bits);
+        let tag_shift = slot_shift.saturating_sub(7);
+        Self { ideal_range, slot_shift, tag_shift }
     }
 
     #[inline(always)]
-    fn bucket_index(&self, hash: u64) -> usize {
-        if self.bucket_shift >= 64 { 0 } else { (hash >> self.bucket_shift) as usize }
+    fn ideal_slot(&self, hash: u64) -> usize {
+        if self.slot_shift >= 64 { 0 } else { (hash >> self.slot_shift) as usize }
     }
 
     #[inline(always)]
     fn tag(&self, hash: u64) -> u8 {
         make_tag(hash, self.tag_shift)
     }
-
-    #[inline(always)]
-    fn bucket_start(&self, bucket_idx: usize) -> usize {
-        bucket_idx * BUCKET_SIZE
-    }
 }
 
 pub struct PoMap2<K: Key, V: Value, H: BuildHasher = PoMapBuildHasher> {
     len: usize,
-    stale_bits: u8,
     meta: Meta,
     slots: Slots<K, V>,
     hash_builder: H,
@@ -114,18 +113,15 @@ pub struct PoMap2<K: Key, V: Value, H: BuildHasher = PoMapBuildHasher> {
 
 impl<K: Key, V: Value, H: BuildHasher> PoMap2<K, V, H> {
     pub fn with_hasher(hash_builder: H) -> Self {
-        Self::with_capacity_and_hasher(MIN_BUCKETS * BUCKET_SIZE, hash_builder)
+        Self::with_capacity_and_hasher(MIN_IDEAL_RANGE, hash_builder)
     }
 
     pub fn with_capacity_and_hasher(capacity: usize, hash_builder: H) -> Self {
-        let num_buckets = ((capacity + BUCKET_SIZE - 1) / BUCKET_SIZE)
-            .next_power_of_two()
-            .max(MIN_BUCKETS);
-        let total_slots = num_buckets * BUCKET_SIZE;
+        let ideal_range = capacity.next_power_of_two().max(MIN_IDEAL_RANGE);
+        let total_slots = ideal_range + PADDING;
         Self {
             len: 0,
-            stale_bits: 0,
-            meta: Meta::new(num_buckets),
+            meta: Meta::new(ideal_range),
             slots: Slots::new(total_slots),
             hash_builder,
         }
@@ -137,7 +133,7 @@ impl<K: Key, V: Value, H: BuildHasher> PoMap2<K, V, H> {
     #[inline(always)]
     pub fn is_empty(&self) -> bool { self.len == 0 }
 
-    pub fn capacity(&self) -> usize { self.meta.num_buckets * BUCKET_SIZE }
+    pub fn capacity(&self) -> usize { self.slots.total_slots }
 
     #[inline(always)]
     fn load_tags(&self, start: usize) -> u8x16 {
@@ -145,91 +141,140 @@ impl<K: Key, V: Value, H: BuildHasher> PoMap2<K, V, H> {
         u8x16::new(unsafe { ptr::read_unaligned(ptr as *const [u8; 16]) })
     }
 
-
     #[inline]
     pub fn get(&self, key: &K) -> Option<&V> {
         let hash = encode_hash(self.hash_builder.hash_one(key));
-        let bi = self.meta.bucket_index(hash);
+        let ideal = self.meta.ideal_slot(hash);
         let tag = self.meta.tag(hash);
-        let start = self.meta.bucket_start(bi);
 
-        let mut mask = self.load_tags(start)
-            .cmp_eq(u8x16::new([tag; 16])).move_mask() as u32;
-        while mask != 0 {
-            let offset = mask.trailing_zeros() as usize;
-            mask &= mask - 1;
-            let (k, v) = unsafe { &*(*self.slots.entries.add(start + offset)).as_ptr() };
-            if k == key { return Some(v); }
+        // Scan from ideal slot. Entries are at or after their ideal position.
+        let mut pos = ideal;
+        loop {
+            let tags_vec = self.load_tags(pos);
+            let mut mask = tags_vec.cmp_eq(u8x16::new([tag; 16])).move_mask() as u32;
+            while mask != 0 {
+                let offset = mask.trailing_zeros() as usize;
+                mask &= mask - 1;
+                let (k, v) = unsafe { &*(*self.slots.entries.add(pos + offset)).as_ptr() };
+                if k == key {
+                    return Some(v);
+                }
+            }
+            // If any EMPTY in this window, entry can't be further out.
+            if tags_vec.move_mask() as u32 & 0xFFFF != 0 {
+                return None;
+            }
+            pos += SCAN_WIDTH;
+            if pos >= self.slots.total_slots {
+                return None;
+            }
         }
-        None
     }
 
     #[inline]
     pub fn get_mut(&mut self, key: &K) -> Option<&mut V> {
         let hash = encode_hash(self.hash_builder.hash_one(key));
-        let bi = self.meta.bucket_index(hash);
+        let ideal = self.meta.ideal_slot(hash);
         let tag = self.meta.tag(hash);
-        let start = self.meta.bucket_start(bi);
 
-        let mut mask = self.load_tags(start)
-            .cmp_eq(u8x16::new([tag; 16])).move_mask() as u32;
-        while mask != 0 {
-            let offset = mask.trailing_zeros() as usize;
-            mask &= mask - 1;
-            let entry = unsafe { &mut *(*self.slots.entries.add(start + offset)).as_mut_ptr() };
-            if &entry.0 == key { return Some(&mut entry.1); }
+        let mut pos = ideal;
+        loop {
+            let tags_vec = self.load_tags(pos);
+            let mut mask = tags_vec.cmp_eq(u8x16::new([tag; 16])).move_mask() as u32;
+            while mask != 0 {
+                let offset = mask.trailing_zeros() as usize;
+                mask &= mask - 1;
+                let entry = unsafe { &mut *(*self.slots.entries.add(pos + offset)).as_mut_ptr() };
+                if &entry.0 == key {
+                    return Some(&mut entry.1);
+                }
+            }
+            if tags_vec.move_mask() as u32 & 0xFFFF != 0 {
+                return None;
+            }
+            pos += SCAN_WIDTH;
+            if pos >= self.slots.total_slots {
+                return None;
+            }
         }
-        None
     }
 
     #[inline]
     pub fn insert(&mut self, key: K, value: V) -> Option<V> {
-        let hash = encode_hash(self.hash_builder.hash_one(&key));
-        let bi = self.meta.bucket_index(hash);
-        let tag = self.meta.tag(hash);
-        let start = self.meta.bucket_start(bi);
-        let tags_vec = self.load_tags(start);
-
-        // Replacement check.
-        let mut mask = tags_vec.cmp_eq(u8x16::new([tag; 16])).move_mask() as u32;
-        while mask != 0 {
-            let offset = mask.trailing_zeros() as usize;
-            mask &= mask - 1;
-            let entry = unsafe { &mut *(*self.slots.entries.add(start + offset)).as_mut_ptr() };
-            if entry.0 == key {
-                return Some(mem::replace(&mut entry.1, value));
-            }
-        }
-
-        let count = (tags_vec.move_mask() as u32 | (1u32 << BUCKET_SIZE)).trailing_zeros() as usize;
-        if count >= BUCKET_SIZE {
+        // Grow at 75% load.
+        if self.len * 4 >= self.meta.ideal_range * 3 {
             self.grow();
-            return self.insert(key, value);
         }
 
-        let tags_ptr = unsafe { self.slots.tags.add(start) };
-        let entries_ptr = unsafe { self.slots.entries.add(start) };
-        let splat = u8x16::new([tag; 16]);
-        let gt_mask = (tags_vec.max(splat).cmp_eq(tags_vec).move_mask() as u32
-            & !(tags_vec.cmp_eq(splat).move_mask() as u32))
-            & ((1u32 << count) - 1);
-        let mut pos = if gt_mask != 0 { gt_mask.trailing_zeros() as usize } else { count };
-        while pos > 0 {
-            if unsafe { *tags_ptr.add(pos - 1) } != tag { break; }
-            if encode_hash(self.hash_builder.hash_one(
-                &unsafe { &*(*entries_ptr.add(pos - 1)).as_ptr() }.0)) <= hash { break; }
-            pos -= 1;
-        }
-        let shift = count - pos;
-        if shift > 0 {
-            unsafe {
-                ptr::copy(tags_ptr.add(pos), tags_ptr.add(pos + 1), shift);
-                ptr::copy(entries_ptr.add(pos), entries_ptr.add(pos + 1), shift);
+        let hash = encode_hash(self.hash_builder.hash_one(&key));
+        let ideal = self.meta.ideal_slot(hash);
+        let tag = self.meta.tag(hash);
+
+        // Check for replacement: scan from ideal slot for matching tag + key.
+        {
+            let mut pos = ideal;
+            loop {
+                let tags_vec = self.load_tags(pos);
+                let mut mask = tags_vec.cmp_eq(u8x16::new([tag; 16])).move_mask() as u32;
+                while mask != 0 {
+                    let offset = mask.trailing_zeros() as usize;
+                    mask &= mask - 1;
+                    let entry = unsafe { &mut *(*self.slots.entries.add(pos + offset)).as_mut_ptr() };
+                    if entry.0 == key {
+                        return Some(mem::replace(&mut entry.1, value));
+                    }
+                }
+                if tags_vec.move_mask() as u32 & 0xFFFF != 0 {
+                    break;
+                }
+                pos += SCAN_WIDTH;
+                if pos >= self.slots.total_slots { break; }
             }
         }
+
+        // Find insert position: scan forward from ideal_slot.
+        // Entries are globally sorted by hash. We need to find the first slot
+        // where the incumbent has a higher hash than ours, or is EMPTY.
+        let tags_ptr = self.slots.tags;
+        let entries_ptr = self.slots.entries;
+
+        let mut insert_pos = ideal;
+        loop {
+            let slot_tag = unsafe { *tags_ptr.add(insert_pos) };
+            if slot_tag & 0x80 != 0 {
+                // EMPTY — insert here directly.
+                unsafe {
+                    *tags_ptr.add(insert_pos) = tag;
+                    *entries_ptr.add(insert_pos) = MaybeUninit::new((key, value));
+                }
+                self.len += 1;
+                return None;
+            }
+            // Check if incumbent has a higher hash (we should go before it).
+            let incumbent = unsafe { &*(*entries_ptr.add(insert_pos)).as_ptr() };
+            let incumbent_hash = encode_hash(self.hash_builder.hash_one(&incumbent.0));
+            if incumbent_hash > hash {
+                break; // insert_pos found
+            }
+            insert_pos += 1;
+        }
+
+        // Find nearest EMPTY after insert_pos for the shift target.
+        let mut empty_pos = insert_pos + 1;
+        while unsafe { *tags_ptr.add(empty_pos) } & 0x80 == 0 {
+            empty_pos += 1;
+        }
+
+        // Shift [insert_pos, empty_pos) right by 1.
+        let shift = empty_pos - insert_pos;
         unsafe {
-            *tags_ptr.add(pos) = tag;
-            *entries_ptr.add(pos) = MaybeUninit::new((key, value));
+            ptr::copy(tags_ptr.add(insert_pos), tags_ptr.add(insert_pos + 1), shift);
+            ptr::copy(entries_ptr.add(insert_pos), entries_ptr.add(insert_pos + 1), shift);
+        }
+
+        unsafe {
+            *tags_ptr.add(insert_pos) = tag;
+            *entries_ptr.add(insert_pos) = MaybeUninit::new((key, value));
         }
         self.len += 1;
         None
@@ -238,125 +283,95 @@ impl<K: Key, V: Value, H: BuildHasher> PoMap2<K, V, H> {
     #[inline]
     pub fn remove(&mut self, key: &K) -> Option<V> {
         let hash = encode_hash(self.hash_builder.hash_one(key));
-        let bi = self.meta.bucket_index(hash);
+        let ideal = self.meta.ideal_slot(hash);
         let tag = self.meta.tag(hash);
-        let start = self.meta.bucket_start(bi);
 
-        let tags_vec = self.load_tags(start);
-        let count = (tags_vec.move_mask() as u32 | (1u32 << BUCKET_SIZE)).trailing_zeros() as usize;
-        let mut mask = tags_vec.cmp_eq(u8x16::new([tag; 16])).move_mask() as u32;
-        while mask != 0 {
-            let offset = mask.trailing_zeros() as usize;
-            mask &= mask - 1;
-            let idx = start + offset;
-            if unsafe { &*(*self.slots.entries.add(idx)).as_ptr() }.0 == *key {
-                let (_, value) = unsafe { (*self.slots.entries.add(idx)).assume_init_read() };
-                let tags_ptr = unsafe { self.slots.tags.add(start) };
-                let entries_ptr = unsafe { self.slots.entries.add(start) };
-                let shift = count - offset - 1;
-                if shift > 0 {
-                    unsafe {
-                        ptr::copy(tags_ptr.add(offset + 1), tags_ptr.add(offset), shift);
-                        ptr::copy(entries_ptr.add(offset + 1), entries_ptr.add(offset), shift);
+        let mut pos = ideal;
+        loop {
+            let tags_vec = self.load_tags(pos);
+            let mut mask = tags_vec.cmp_eq(u8x16::new([tag; 16])).move_mask() as u32;
+            while mask != 0 {
+                let offset = mask.trailing_zeros() as usize;
+                mask &= mask - 1;
+                let idx = pos + offset;
+                if unsafe { &*(*self.slots.entries.add(idx)).as_ptr() }.0 == *key {
+                    let (_, value) = unsafe { (*self.slots.entries.add(idx)).assume_init_read() };
+                    // Shift entries left to fill gap: pull back displaced entries
+                    // until we find one at its ideal position or EMPTY.
+                    let tags_ptr = self.slots.tags;
+                    let entries_ptr = self.slots.entries;
+                    let mut hole = idx;
+                    loop {
+                        let next = hole + 1;
+                        let next_tag = unsafe { *tags_ptr.add(next) };
+                        if next_tag & 0x80 != 0 {
+                            // Next is EMPTY — done.
+                            break;
+                        }
+                        // Check if next entry is at its ideal position.
+                        let next_entry = unsafe { &*(*entries_ptr.add(next)).as_ptr() };
+                        let next_hash = encode_hash(self.hash_builder.hash_one(&next_entry.0));
+                        let next_ideal = self.meta.ideal_slot(next_hash);
+                        if next_ideal > hole {
+                            // Next entry's ideal is past the hole — it's not displaced
+                            // into the hole region, so stop.
+                            break;
+                        }
+                        // Pull next entry back into hole.
+                        unsafe {
+                            *tags_ptr.add(hole) = next_tag;
+                            ptr::copy_nonoverlapping(entries_ptr.add(next), entries_ptr.add(hole), 1);
+                        }
+                        hole = next;
                     }
+                    unsafe { *tags_ptr.add(hole) = EMPTY };
+                    self.len -= 1;
+                    return Some(value);
                 }
-                unsafe { *tags_ptr.add(count - 1) = EMPTY };
-                self.len -= 1;
-                return Some(value);
             }
+            if tags_vec.move_mask() as u32 & 0xFFFF != 0 {
+                return None;
+            }
+            pos += SCAN_WIDTH;
+            if pos >= self.slots.total_slots { return None; }
         }
-        None
     }
 
     pub fn contains_key(&self, key: &K) -> bool { self.get(key).is_some() }
 
     fn grow(&mut self) {
-        let old_num_buckets = self.meta.num_buckets;
-        let new_num_buckets = old_num_buckets * GROWTH_FACTOR;
-        let new_meta = Meta::new(new_num_buckets);
-        let new_total = new_num_buckets * BUCKET_SIZE;
+        let new_ideal_range = self.meta.ideal_range * 2;
+        let new_meta = Meta::new(new_ideal_range);
+        let new_total = new_ideal_range + PADDING;
         let new_slots = Slots::new(new_total);
 
-        let can_fast = self.stale_bits < 7;
-        let old_tag_shift = self.meta.tag_shift;
+        // Re-insert all entries. Since old array is sorted by hash,
+        // iterate forward and place each entry at its new ideal position
+        // (or first EMPTY after it). Sorted order is preserved.
+        for i in 0..self.slots.total_slots {
+            let old_tag = unsafe { *self.slots.tags.add(i) };
+            if old_tag & 0x80 != 0 { continue; }
 
-        if can_fast {
-            // Entries are packed and sorted. Split by hash bit → append to new
-            // buckets preserving sorted order. No re-sorting needed.
-            let hash_split_bit = old_tag_shift + 6 - self.stale_bits as usize;
+            let (key, value) = unsafe { (*self.slots.entries.add(i)).assume_init_read() };
+            unsafe { *self.slots.tags.add(i) = EMPTY };
 
-            for bi in 0..old_num_buckets {
-                let old_start = bi * BUCKET_SIZE;
-                let lo_start = (bi * 2) * BUCKET_SIZE;
-                let hi_start = (bi * 2 + 1) * BUCKET_SIZE;
+            let hash = encode_hash(self.hash_builder.hash_one(&key));
+            let new_ideal = new_meta.ideal_slot(hash);
+            let new_tag = new_meta.tag(hash);
 
-                let mut lo_pos = 0usize;
-                let mut hi_pos = 0usize;
-                for i in 0..BUCKET_SIZE {
-                    let tag = unsafe { *self.slots.tags.add(old_start + i) };
-                    if tag & 0x80 != 0 { break; }
-                    let kv = unsafe { (*self.slots.entries.add(old_start + i)).assume_init_read() };
-                    unsafe { *self.slots.tags.add(old_start + i) = EMPTY };
-                    let hash = encode_hash(self.hash_builder.hash_one(&kv.0));
-                    if (hash >> hash_split_bit) & 1 != 0 {
-                        unsafe {
-                            *new_slots.tags.add(hi_start + hi_pos) = tag;
-                            *new_slots.entries.add(hi_start + hi_pos) = MaybeUninit::new(kv);
-                        }
-                        hi_pos += 1;
-                    } else {
-                        unsafe {
-                            *new_slots.tags.add(lo_start + lo_pos) = tag;
-                            *new_slots.entries.add(lo_start + lo_pos) = MaybeUninit::new(kv);
-                        }
-                        lo_pos += 1;
-                    }
-                }
+            // Find first EMPTY at or after new_ideal.
+            let mut slot = new_ideal;
+            while unsafe { *new_slots.tags.add(slot) } & 0x80 == 0 {
+                slot += 1;
             }
-            self.stale_bits += 1;
-        } else {
-            // Full rehash with insertion sort per new bucket.
-            let mut bucket_counts = alloc::vec![0u16; new_num_buckets];
-            for i in 0..self.slots.total_slots {
-                let old_tag = unsafe { *self.slots.tags.add(i) };
-                if old_tag & 0x80 != 0 { continue; }
-                let (key, value) = unsafe { (*self.slots.entries.add(i)).assume_init_read() };
-                unsafe { *self.slots.tags.add(i) = EMPTY };
-                let hash = encode_hash(self.hash_builder.hash_one(&key));
-                let new_bi = new_meta.bucket_index(hash);
-                let new_tag = new_meta.tag(hash);
-                let ns = new_bi * BUCKET_SIZE;
-                let count = bucket_counts[new_bi] as usize;
-
-                let mut pos = count;
-                for j in 0..count {
-                    let st = unsafe { *new_slots.tags.add(ns + j) };
-                    if st > new_tag { pos = j; break; }
-                    if st == new_tag {
-                        let eh = encode_hash(self.hash_builder.hash_one(
-                            &unsafe { &*(*new_slots.entries.add(ns + j)).as_ptr() }.0));
-                        if eh > hash { pos = j; break; }
-                    }
-                }
-                let shift = count - pos;
-                if shift > 0 {
-                    unsafe {
-                        ptr::copy(new_slots.tags.add(ns + pos), new_slots.tags.add(ns + pos + 1), shift);
-                        ptr::copy(new_slots.entries.add(ns + pos), new_slots.entries.add(ns + pos + 1), shift);
-                    }
-                }
-                unsafe {
-                    *new_slots.tags.add(ns + pos) = new_tag;
-                    *new_slots.entries.add(ns + pos) = MaybeUninit::new((key, value));
-                }
-                bucket_counts[new_bi] += 1;
+            unsafe {
+                *new_slots.tags.add(slot) = new_tag;
+                *new_slots.entries.add(slot) = MaybeUninit::new((key, value));
             }
-            self.stale_bits = 0;
         }
 
         self.slots = new_slots;
         self.meta = new_meta;
-        if can_fast { self.meta.tag_shift = old_tag_shift; }
     }
 
     pub fn iter(&self) -> impl Iterator<Item = (&K, &V)> {
@@ -388,8 +403,8 @@ impl<K: Key, V: Value, H: BuildHasher + Clone> Clone for PoMap2<K, V, H> {
             }
         }
         Self {
-            len: self.len, stale_bits: self.stale_bits,
-            meta: Meta { num_buckets: self.meta.num_buckets, bucket_shift: self.meta.bucket_shift, tag_shift: self.meta.tag_shift },
+            len: self.len,
+            meta: Meta { ideal_range: self.meta.ideal_range, slot_shift: self.meta.slot_shift, tag_shift: self.meta.tag_shift },
             slots: new_slots, hash_builder: self.hash_builder.clone(),
         }
     }
@@ -449,8 +464,8 @@ mod tests {
             map.insert(i, i * 10);
             for j in 0..=i {
                 assert_eq!(map.get(&j), Some(&(j * 10)),
-                    "missing key {} after inserting {} (len={}, buckets={})",
-                    j, i, map.len(), map.meta.num_buckets);
+                    "missing key {} after inserting {} (len={})",
+                    j, i, map.len());
             }
         }
         assert_eq!(map.len(), 100);
@@ -496,10 +511,9 @@ mod tests {
     }
 
     #[test]
-    fn fast_resize_preserves() {
+    fn resize_preserves() {
         let mut map = new_map();
         for i in 0..1000u64 { map.insert(i, i); }
-        assert!(map.stale_bits > 0 && map.stale_bits <= 7);
         for i in 0..1000u64 { assert_eq!(map.get(&i), Some(&i), "missing key {} after resizes", i); }
     }
 }
