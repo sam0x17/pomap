@@ -246,20 +246,30 @@ fn main() {
     println!("  hashbrown: {:>8.2}ms", hb_remove.as_secs_f64() * 1000.0);
     println!("  pomap2 vs hashbrown: {:.3}x", pomap2_remove.as_secs_f64() / hb_remove.as_secs_f64());
 
-    // Memory
+    // Memory analysis
     println!("\n=== MEMORY (slot count) ===");
-    for &size in &[500usize, 5000, 50000, 500000] {
+    println!("{:<12} {:>14} {:>14} {:>12} {:>12} {:>12}",
+        "entries", "pomap2 slots", "hb slots", "pm2/hb", "pm2 load%", "hb load%");
+    println!("{}", "-".repeat(80));
+
+    let mem_sizes = [500usize, 5_000, 50_000, 500_000, 5_000_000];
+    let max_mem = *mem_sizes.iter().max().unwrap();
+    let mem_keys: Vec<u64> = random_items(0xB17E5, max_mem);
+    let mem_values: Vec<u64> = random_items(0xF007, max_mem);
+
+    for &size in &mem_sizes {
         let mut pm = BenchPoMap2::with_hasher(BenchHasherBuilder::default());
         let mut hb = BenchHashbrownMap::with_hasher(BenchHasherBuilder::default());
         for i in 0..size {
-            pm.insert(keys[i % keys.len()], values[i % values.len()]);
-            hb.insert(keys[i % keys.len()], values[i % values.len()]);
+            pm.insert(mem_keys[i], mem_values[i]);
+            hb.insert(mem_keys[i], mem_values[i]);
         }
-        let pm_cap = pm.capacity();
-        let hb_cap = hb.capacity();
-        println!("  {:>8} entries: pomap2={:>8} hb={:>8} ratio={:.2}x load={:.1}%",
-                 size, pm_cap, hb_cap,
-                 pm_cap as f64 / hb_cap as f64,
-                 size as f64 / pm_cap as f64 * 100.0);
+        let pm_slots = pm.capacity();
+        let hb_slots = hb.capacity();
+        println!("{:<12} {:>14} {:>14} {:>11.2}x {:>11.1}% {:>11.1}%",
+            size, pm_slots, hb_slots,
+            pm_slots as f64 / hb_slots.max(1) as f64,
+            size as f64 / pm_slots as f64 * 100.0,
+            size as f64 / hb_slots.max(1) as f64 * 100.0);
     }
 }

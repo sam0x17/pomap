@@ -74,57 +74,6 @@ impl<K: Key, V: Value> Drop for Slots<K, V> {
     }
 }
 
-/// Robin Hood insert into bucket [start, start+16).
-/// Probes from ideal offset (tag-derived), swaps with higher-tag entries.
-/// Equal tags tiebroken by hash (lazy, ~6% of inserts).
-#[inline]
-unsafe fn robin_hood_place<K: Key, V: Value, H: BuildHasher>(
-    tags: *mut u8,
-    entries: *mut MaybeUninit<(K, V)>,
-    start: usize,
-    mut tag: u8,
-    mut kv: (K, V),
-    mut hash: u64,
-    hash_builder: &H,
-) {
-    let mut offset = ((tag as usize) * BUCKET_SIZE) >> 7;
-    let mut hash_valid = true;
-    loop {
-        let idx = start + (offset & (BUCKET_SIZE - 1));
-        let slot_tag = unsafe { *tags.add(idx) };
-        if slot_tag & 0x80 != 0 {
-            unsafe {
-                *tags.add(idx) = tag;
-                *entries.add(idx) = MaybeUninit::new(kv);
-            }
-            return;
-        }
-        let should_swap = if slot_tag > tag {
-            true
-        } else if slot_tag == tag {
-            if !hash_valid {
-                hash = encode_hash(hash_builder.hash_one(&kv.0));
-                hash_valid = true;
-            }
-            let existing = unsafe { &*(*entries.add(idx)).as_ptr() };
-            encode_hash(hash_builder.hash_one(&existing.0)) > hash
-        } else {
-            false
-        };
-        if should_swap {
-            let displaced = unsafe { (*entries.add(idx)).assume_init_read() };
-            unsafe {
-                *tags.add(idx) = tag;
-                *entries.add(idx) = MaybeUninit::new(kv);
-            }
-            tag = slot_tag;
-            kv = displaced;
-            hash_valid = false;
-        }
-        offset += 1;
-    }
-}
-
 struct Meta {
     num_buckets: usize,
     bucket_shift: usize,
