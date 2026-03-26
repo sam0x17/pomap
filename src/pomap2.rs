@@ -233,8 +233,6 @@ impl<K: Key, V: Value, H: BuildHasher> PoMap2<K, V, H> {
         }
 
         // Find insert position: scan forward from ideal_slot.
-        // Entries are globally sorted by hash. We need to find the first slot
-        // where the incumbent has a higher hash than ours, or is EMPTY.
         let tags_ptr = self.slots.tags;
         let entries_ptr = self.slots.entries;
 
@@ -250,11 +248,10 @@ impl<K: Key, V: Value, H: BuildHasher> PoMap2<K, V, H> {
                 self.len += 1;
                 return None;
             }
-            // Check if incumbent has a higher hash (we should go before it).
             let incumbent = unsafe { &*(*entries_ptr.add(insert_pos)).as_ptr() };
             let incumbent_hash = encode_hash(self.hash_builder.hash_one(&incumbent.0));
             if incumbent_hash > hash {
-                break; // insert_pos found
+                break;
             }
             insert_pos += 1;
         }
