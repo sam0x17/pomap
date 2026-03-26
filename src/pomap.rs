@@ -454,12 +454,21 @@ impl<K: Key, V: Value, H: BuildHasher> PoMap<K, V, H> {
                 break;
             }
             pos += 1;
+            if pos >= self.slots.total_slots {
+                self.grow();
+                return self.insert(key, value);
+            }
         }
 
         // Find nearest EMPTY after pos for the shift target.
         let mut empty_pos = pos + 1;
         while unsafe { *tags_ptr.add(empty_pos) } & 0x80 == 0 {
             empty_pos += 1;
+            // Safety: if displacement exceeds padding, grow and retry.
+            if empty_pos >= self.slots.total_slots {
+                self.grow();
+                return self.insert(key, value);
+            }
         }
 
         // Shift [pos, empty_pos) right by 1.
