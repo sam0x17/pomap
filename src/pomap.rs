@@ -21,11 +21,20 @@ use core::{
 use wide::u8x16;
 
 const SCAN_WIDTH: usize = 16;
-/// Extra slots beyond ideal_range for displacement padding.
-/// Must handle worst-case consecutive run at 75% load (~O(log n)).
-const PADDING: usize = 256;
 const EMPTY: u8 = 0x80;
 const MIN_IDEAL_RANGE: usize = 16;
+
+/// Padding slots beyond ideal_range to handle displacement at 75% load.
+/// 10 × log2(n) covers the worst case empirically; capped at ir/4 to
+/// keep overhead ≤25% at small sizes. The insert safety check triggers
+/// a grow if ever exceeded (correctness backstop).
+#[inline]
+const fn padding_for(ideal_range: usize) -> usize {
+    let log2 = (usize::BITS - ideal_range.leading_zeros()) as usize;
+    let p = log2 * 10;
+    let cap = ideal_range / 4;
+    if p < cap { p } else { cap }
+}
 
 /// Default build hasher for [`PoMap`], backed by [`AHasher`].
 #[derive(Clone, Default)]
@@ -250,7 +259,7 @@ impl<K: Key, V: Value, H: BuildHasher> PoMap<K, V, H> {
     #[inline]
     pub fn with_capacity_and_hasher(capacity: usize, hash_builder: H) -> Self {
         let ideal_range = capacity.next_power_of_two().max(MIN_IDEAL_RANGE);
-        let total_slots = ideal_range + PADDING;
+        let total_slots = ideal_range + padding_for(ideal_range);
         Self {
             len: 0,
             meta: Meta::new(ideal_range),
@@ -767,7 +776,7 @@ impl<K: Key, V: Value, H: BuildHasher> PoMap<K, V, H> {
 
     fn rebuild(&mut self, new_ideal_range: usize) {
         let new_meta = Meta::new(new_ideal_range);
-        let new_total = new_ideal_range + PADDING;
+        let new_total = new_ideal_range + padding_for(new_ideal_range);
         let new_slots = Slots::new(new_total);
 
         self.transfer_to(&new_meta, &new_slots);
@@ -780,7 +789,7 @@ impl<K: Key, V: Value, H: BuildHasher> PoMap<K, V, H> {
 
     fn try_rebuild(&mut self, new_ideal_range: usize) -> Result<(), TryReserveError> {
         let new_meta = Meta::new(new_ideal_range);
-        let new_total = new_ideal_range + PADDING;
+        let new_total = new_ideal_range + padding_for(new_ideal_range);
         let new_slots = Slots::try_new(new_total)?;
 
         self.transfer_to(&new_meta, &new_slots);
