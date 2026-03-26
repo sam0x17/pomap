@@ -209,69 +209,57 @@ impl<K: Key, V: Value, H: BuildHasher> PoMap2<K, V, H> {
         let hash = encode_hash(self.hash_builder.hash_one(&key));
         let ideal = self.meta.ideal_slot(hash);
         let tag = self.meta.tag(hash);
-
-        // Check for replacement: scan from ideal slot for matching tag + key.
-        {
-            let mut pos = ideal;
-            loop {
-                let tags_vec = self.load_tags(pos);
-                let mut mask = tags_vec.cmp_eq(u8x16::new([tag; 16])).move_mask() as u32;
-                while mask != 0 {
-                    let offset = mask.trailing_zeros() as usize;
-                    mask &= mask - 1;
-                    let entry = unsafe { &mut *(*self.slots.entries.add(pos + offset)).as_mut_ptr() };
-                    if entry.0 == key {
-                        return Some(mem::replace(&mut entry.1, value));
-                    }
-                }
-                if tags_vec.move_mask() as u32 & 0xFFFF != 0 {
-                    break;
-                }
-                pos += SCAN_WIDTH;
-                if pos >= self.slots.total_slots { break; }
-            }
-        }
-
-        // Find insert position: scan forward from ideal_slot.
         let tags_ptr = self.slots.tags;
         let entries_ptr = self.slots.entries;
 
-        let mut insert_pos = ideal;
+        // Fast path: ideal slot is EMPTY — write directly, no scan needed.
+        if unsafe { *tags_ptr.add(ideal) } & 0x80 != 0 {
+            unsafe {
+                *tags_ptr.add(ideal) = tag;
+                *entries_ptr.add(ideal) = MaybeUninit::new((key, value));
+            }
+            self.len += 1;
+            return None;
+        }
+
+        // Combined replacement check + position finding in a single forward scan.
+        let mut pos = ideal;
         loop {
-            let slot_tag = unsafe { *tags_ptr.add(insert_pos) };
+            let slot_tag = unsafe { *tags_ptr.add(pos) };
             if slot_tag & 0x80 != 0 {
-                // EMPTY — insert here directly.
+                // EMPTY — insert here.
                 unsafe {
-                    *tags_ptr.add(insert_pos) = tag;
-                    *entries_ptr.add(insert_pos) = MaybeUninit::new((key, value));
+                    *tags_ptr.add(pos) = tag;
+                    *entries_ptr.add(pos) = MaybeUninit::new((key, value));
                 }
                 self.len += 1;
                 return None;
             }
-            let incumbent = unsafe { &*(*entries_ptr.add(insert_pos)).as_ptr() };
+            let incumbent = unsafe { &*(*entries_ptr.add(pos)).as_ptr() };
             let incumbent_hash = encode_hash(self.hash_builder.hash_one(&incumbent.0));
+            if incumbent_hash == hash && incumbent.0 == key {
+                let entry = unsafe { &mut *(*entries_ptr.add(pos)).as_mut_ptr() };
+                return Some(mem::replace(&mut entry.1, value));
+            }
             if incumbent_hash > hash {
                 break;
             }
-            insert_pos += 1;
+            pos += 1;
         }
 
-        // Find nearest EMPTY after insert_pos for the shift target.
-        let mut empty_pos = insert_pos + 1;
+        // Find nearest EMPTY after pos for the shift target.
+        let mut empty_pos = pos + 1;
         while unsafe { *tags_ptr.add(empty_pos) } & 0x80 == 0 {
             empty_pos += 1;
         }
 
-        // Shift [insert_pos, empty_pos) right by 1.
-        let shift = empty_pos - insert_pos;
+        // Shift [pos, empty_pos) right by 1.
+        let shift = empty_pos - pos;
         unsafe {
-            ptr::copy(tags_ptr.add(insert_pos), tags_ptr.add(insert_pos + 1), shift);
-            ptr::copy(entries_ptr.add(insert_pos), entries_ptr.add(insert_pos + 1), shift);
-        }
-
-        unsafe {
-            *tags_ptr.add(insert_pos) = tag;
-            *entries_ptr.add(insert_pos) = MaybeUninit::new((key, value));
+            ptr::copy(tags_ptr.add(pos), tags_ptr.add(pos + 1), shift);
+            ptr::copy(entries_ptr.add(pos), entries_ptr.add(pos + 1), shift);
+            *tags_ptr.add(pos) = tag;
+            *entries_ptr.add(pos) = MaybeUninit::new((key, value));
         }
         self.len += 1;
         None
@@ -342,9 +330,9 @@ impl<K: Key, V: Value, H: BuildHasher> PoMap2<K, V, H> {
         let new_total = new_ideal_range + PADDING;
         let new_slots = Slots::new(new_total);
 
-        // Re-insert all entries. Since old array is sorted by hash,
-        // iterate forward and place each entry at its new ideal position
-        // (or first EMPTY after it). Sorted order is preserved.
+        // Old entries are sorted by hash → new ideal_slots are monotonically
+        // non-decreasing. Track last write position to avoid redundant scanning.
+        let mut write_pos = 0usize;
         for i in 0..self.slots.total_slots {
             let old_tag = unsafe { *self.slots.tags.add(i) };
             if old_tag & 0x80 != 0 { continue; }
@@ -356,18 +344,23 @@ impl<K: Key, V: Value, H: BuildHasher> PoMap2<K, V, H> {
             let new_ideal = new_meta.ideal_slot(hash);
             let new_tag = new_meta.tag(hash);
 
-            // Find first EMPTY at or after new_ideal.
-            let mut slot = new_ideal;
-            while unsafe { *new_slots.tags.add(slot) } & 0x80 == 0 {
-                slot += 1;
+            if new_ideal > write_pos {
+                write_pos = new_ideal;
+            }
+            while unsafe { *new_slots.tags.add(write_pos) } & 0x80 == 0 {
+                write_pos += 1;
             }
             unsafe {
-                *new_slots.tags.add(slot) = new_tag;
-                *new_slots.entries.add(slot) = MaybeUninit::new((key, value));
+                *new_slots.tags.add(write_pos) = new_tag;
+                *new_slots.entries.add(write_pos) = MaybeUninit::new((key, value));
             }
+            write_pos += 1;
         }
 
-        self.slots = new_slots;
+        // Old slots have all entries moved out — skip per-element drop scan.
+        let old_slots = mem::replace(&mut self.slots, new_slots);
+        unsafe { dealloc(old_slots.ptr.as_ptr(), old_slots.layout) };
+        mem::forget(old_slots);
         self.meta = new_meta;
     }
 
