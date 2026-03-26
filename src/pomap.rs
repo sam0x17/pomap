@@ -440,6 +440,22 @@ impl<K: Key, V: Value, H: BuildHasher> PoMap<K, V, H> {
             return None;
         }
 
+        self.insert_slow(key, value, hash, ideal, tag)
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn insert_slow(
+        &mut self,
+        key: K,
+        value: V,
+        hash: u64,
+        ideal: usize,
+        tag: u8,
+    ) -> Option<V> {
+        let tags_ptr = self.slots.tags;
+        let entries_ptr = self.slots.entries;
+
         // Combined replacement check + position finding in a single forward scan.
         let mut pos = ideal;
         loop {
@@ -473,7 +489,6 @@ impl<K: Key, V: Value, H: BuildHasher> PoMap<K, V, H> {
         let mut empty_pos = pos + 1;
         while unsafe { *tags_ptr.add(empty_pos) } & 0x80 == 0 {
             empty_pos += 1;
-            // Safety: if displacement exceeds padding, grow and retry.
             if empty_pos >= self.slots.total_slots {
                 self.grow();
                 return self.insert(key, value);
