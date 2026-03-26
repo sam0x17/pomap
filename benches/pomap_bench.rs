@@ -60,7 +60,6 @@ unsafe impl GlobalAlloc for TrackingAlloc {
 static GLOBAL_ALLOC: TrackingAlloc = TrackingAlloc;
 use hashbrown::HashMap as HashbrownMap;
 use pomap::PoMap;
-use pomap::pomap2::PoMap2;
 #[cfg(feature = "bench-string")]
 use rand::distr::Alphanumeric;
 use rand::{Rng, SeedableRng, rngs::StdRng};
@@ -80,7 +79,6 @@ type BenchHasherBuilder = BuildHasherDefault<BenchHasher>;
 type BenchPoMap = PoMap<BenchKey, BenchValue, BenchHasherBuilder>;
 type BenchHashMap = HashMap<BenchKey, BenchValue, BenchHasherBuilder>;
 type BenchHashbrownMap = HashbrownMap<BenchKey, BenchValue, BenchHasherBuilder>;
-type BenchPoMap2 = PoMap2<BenchKey, BenchValue, BenchHasherBuilder>;
 
 #[inline]
 fn new_std_hashmap() -> BenchHashMap {
@@ -307,18 +305,6 @@ fn bench_insert_allocate(c: &mut Criterion) {
         });
     });
 
-    group.bench_function("pomap2", |b| {
-        b.iter(|| {
-            for &size in &target_sizes {
-                let mut map: BenchPoMap2 = BenchPoMap2::with_hasher(BenchHasherBuilder::default());
-                for (key, val) in keys.iter().zip(values.iter()).take(size) {
-                    black_box(map.insert(key.clone(), val.clone()));
-                }
-                black_box(&map);
-            }
-        });
-    });
-
     group.finish();
 }
 
@@ -341,10 +327,8 @@ fn bench_insert_preallocated(c: &mut Criterion) {
     group.bench_function("pomap", |b| {
         b.iter(|| {
             for &size in &target_sizes {
-                let mut map: BenchPoMap = BenchPoMap::with_capacity_and_hasher(
-                    size,
-                    BenchHasherBuilder::default(),
-                );
+                let mut map: BenchPoMap =
+                    BenchPoMap::with_capacity_and_hasher(size, BenchHasherBuilder::default());
                 for (key, val) in combined.iter().take(size) {
                     black_box(map.insert(key.clone(), val.clone()));
                 }

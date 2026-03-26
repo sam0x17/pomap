@@ -12,7 +12,9 @@ type BenchPoMap = PoMap<BenchKey, BenchValue, BenchHasherBuilder>;
 const MAX_SIZE: usize = 100_000;
 
 fn main() {
-    let mode = std::env::args().nth(1).unwrap_or_else(|| "allocate".to_string());
+    let mode = std::env::args()
+        .nth(1)
+        .unwrap_or_else(|| "allocate".to_string());
     let mut rng = StdRng::seed_from_u64(0xA11CE);
     let keys: Vec<u64> = (0..MAX_SIZE).map(|_| rng.random()).collect();
     let mut rng = StdRng::seed_from_u64(0xFACE);

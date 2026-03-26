@@ -56,17 +56,5 @@ name = "insert_hot_graph"
 harness = false
 
 [[bench]]
-name = "scan_depth"
-harness = false
-
-[[bench]]
 name = "profile_insert"
-harness = false
-
-[[bench]]
-name = "resize_analysis"
-harness = false
-
-[[bench]]
-name = "pomap2_bench"
 harness = false

@@ -639,7 +639,10 @@ fn main() {
     }
 
     #[cfg(not(feature = "tui"))]
-    eprintln!("\rDone! ({} steps)                              ", completed_steps);
+    eprintln!(
+        "\rDone! ({} steps)                              ",
+        completed_steps
+    );
 
     #[cfg(feature = "tui")]
     {

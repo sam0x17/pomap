@@ -395,7 +395,11 @@ fn main() {
             );
 
             #[cfg(feature = "tui")]
-            draw_tui(&mut terminal, &chart_data, &format!(" {} | 'q' or Ctrl+C to stop", status));
+            draw_tui(
+                &mut terminal,
+                &chart_data,
+                &format!(" {} | 'q' or Ctrl+C to stop", status),
+            );
 
             #[cfg(not(feature = "tui"))]
             eprint!("\r{}", status);
@@ -423,7 +427,10 @@ fn main() {
     }
 
     #[cfg(not(feature = "tui"))]
-    eprintln!("\rDone! ({} steps)                              ", completed_steps);
+    eprintln!(
+        "\rDone! ({} steps)                              ",
+        completed_steps
+    );
 
     #[cfg(feature = "tui")]
     {
