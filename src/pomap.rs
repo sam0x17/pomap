@@ -36,6 +36,19 @@ const fn padding_for(ideal_range: usize) -> usize {
     if p < cap { p } else { cap }
 }
 
+/// Prefetch a cache line for reading. No-op on unsupported architectures.
+#[inline(always)]
+fn prefetch_read(_ptr: *const u8) {
+    #[cfg(any(target_arch = "x86_64", target_arch = "x86"))]
+    unsafe {
+        core::arch::asm!("prefetcht0 [{}]", in(reg) _ptr, options(nostack, readonly));
+    }
+    #[cfg(target_arch = "aarch64")]
+    unsafe {
+        core::arch::asm!("prfm pldl1keep, [{}]", in(reg) _ptr, options(nostack, readonly));
+    }
+}
+
 /// Default build hasher for [`PoMap`], backed by [`AHasher`].
 #[derive(Clone, Default)]
 pub struct PoMapBuildHasher;
@@ -458,10 +471,10 @@ impl<K: Key, V: Value, H: BuildHasher> PoMap<K, V, H> {
 
         // Combined replacement check + position finding in a single forward scan.
         let mut pos = ideal;
+        prefetch_read(unsafe { entries_ptr.add(pos) as *const u8 });
         loop {
             let slot_tag = unsafe { *tags_ptr.add(pos) };
             if slot_tag & 0x80 != 0 {
-                // EMPTY — insert here.
                 unsafe {
                     *tags_ptr.add(pos) = tag;
                     *entries_ptr.add(pos) = MaybeUninit::new((key, value));
@@ -469,6 +482,7 @@ impl<K: Key, V: Value, H: BuildHasher> PoMap<K, V, H> {
                 self.len += 1;
                 return None;
             }
+            prefetch_read(unsafe { entries_ptr.add(pos + 1) as *const u8 });
             let incumbent = unsafe { &*(*entries_ptr.add(pos)).as_ptr() };
             let incumbent_hash = encode_hash(self.hash_builder.hash_one(&incumbent.0));
             if incumbent_hash == hash && incumbent.0 == key {
