@@ -458,14 +458,7 @@ impl<K: Key, V: Value, H: BuildHasher> PoMap<K, V, H> {
 
     #[cold]
     #[inline(never)]
-    fn insert_slow(
-        &mut self,
-        key: K,
-        value: V,
-        hash: u64,
-        ideal: usize,
-        tag: u8,
-    ) -> Option<V> {
+    fn insert_slow(&mut self, key: K, value: V, hash: u64, ideal: usize, tag: u8) -> Option<V> {
         let tags_ptr = self.slots.tags;
         let entries_ptr = self.slots.entries;
 
