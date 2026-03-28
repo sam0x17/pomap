@@ -36,19 +36,6 @@ const fn padding_for(ideal_range: usize) -> usize {
     if p < cap { p } else { cap }
 }
 
-/// Prefetch a cache line for reading. No-op on unsupported architectures.
-#[inline(always)]
-fn prefetch_read(_ptr: *const u8) {
-    #[cfg(any(target_arch = "x86_64", target_arch = "x86"))]
-    unsafe {
-        core::arch::asm!("prefetcht0 [{}]", in(reg) _ptr, options(nostack, readonly));
-    }
-    #[cfg(target_arch = "aarch64")]
-    unsafe {
-        core::arch::asm!("prfm pldl1keep, [{}]", in(reg) _ptr, options(nostack, readonly));
-    }
-}
-
 /// Default build hasher for [`PoMap`], backed by [`AHasher`].
 #[derive(Clone, Default)]
 pub struct PoMapBuildHasher;
@@ -462,9 +449,50 @@ impl<K: Key, V: Value, H: BuildHasher> PoMap<K, V, H> {
         let tags_ptr = self.slots.tags;
         let entries_ptr = self.slots.entries;
 
-        // Combined replacement check + position finding in a single forward scan.
+        // SIMD: load 16 tags from ideal to find the occupied run length.
+        let tags_vec = self.load_tags(ideal);
+        let empty_mask = tags_vec.move_mask() as u32 & 0xFFFF;
+
+        // We know ideal is occupied (fast path checked it). Find first EMPTY.
+        // Bit 0 of empty_mask is ideal — it's 0 (occupied). Find the next set bit.
+        let run_len = if empty_mask != 0 {
+            empty_mask.trailing_zeros() as usize
+        } else {
+            SCAN_WIDTH // All 16 are occupied — fall through to general loop.
+        };
+
+        // Fast case: run_len == 1 (only ideal is occupied, ideal+1 is EMPTY).
+        // ~33% of insert_slow calls at 75% load (25% of 75% occupied).
+        if run_len == 1 {
+            let incumbent_hash = encode_hash(
+                self.hash_builder
+                    .hash_one(&unsafe { &*(*entries_ptr.add(ideal)).as_ptr() }.0),
+            );
+            if incumbent_hash == hash && unsafe { &*(*entries_ptr.add(ideal)).as_ptr() }.0 == key {
+                let entry = unsafe { &mut *(*entries_ptr.add(ideal)).as_mut_ptr() };
+                return Some(mem::replace(&mut entry.1, value));
+            }
+            if incumbent_hash > hash {
+                // Shift incumbent right by 1, insert at ideal.
+                unsafe {
+                    ptr::copy(tags_ptr.add(ideal), tags_ptr.add(ideal + 1), 1);
+                    ptr::copy(entries_ptr.add(ideal), entries_ptr.add(ideal + 1), 1);
+                    *tags_ptr.add(ideal) = tag;
+                    *entries_ptr.add(ideal) = MaybeUninit::new((key, value));
+                }
+            } else {
+                // Insert at ideal+1.
+                unsafe {
+                    *tags_ptr.add(ideal + 1) = tag;
+                    *entries_ptr.add(ideal + 1) = MaybeUninit::new((key, value));
+                }
+            }
+            self.len += 1;
+            return None;
+        }
+
+        // General forward scan for longer runs.
         let mut pos = ideal;
-        prefetch_read(unsafe { entries_ptr.add(pos) as *const u8 });
         loop {
             let slot_tag = unsafe { *tags_ptr.add(pos) };
             if slot_tag & 0x80 != 0 {
@@ -475,7 +503,6 @@ impl<K: Key, V: Value, H: BuildHasher> PoMap<K, V, H> {
                 self.len += 1;
                 return None;
             }
-            prefetch_read(unsafe { entries_ptr.add(pos + 1) as *const u8 });
             let incumbent = unsafe { &*(*entries_ptr.add(pos)).as_ptr() };
             let incumbent_hash = encode_hash(self.hash_builder.hash_one(&incumbent.0));
             if incumbent_hash == hash && incumbent.0 == key {
@@ -493,7 +520,12 @@ impl<K: Key, V: Value, H: BuildHasher> PoMap<K, V, H> {
         }
 
         // Find nearest EMPTY after pos for the shift target.
-        let mut empty_pos = pos + 1;
+        // Use the SIMD result if pos is still within the initial 16-byte window.
+        let mut empty_pos = if pos < ideal + run_len {
+            ideal + run_len
+        } else {
+            pos + 1
+        };
         while unsafe { *tags_ptr.add(empty_pos) } & 0x80 == 0 {
             empty_pos += 1;
             if empty_pos >= self.slots.total_slots {
@@ -502,7 +534,6 @@ impl<K: Key, V: Value, H: BuildHasher> PoMap<K, V, H> {
             }
         }
 
-        // Shift [pos, empty_pos) right by 1.
         let shift = empty_pos - pos;
         unsafe {
             ptr::copy(tags_ptr.add(pos), tags_ptr.add(pos + 1), shift);
