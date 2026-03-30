@@ -56,10 +56,18 @@ impl<K: Key, V: Value> Slots<K, V> {
 
         let entries = ptr.as_ptr() as *mut MaybeUninit<Entry<K, V>>;
         for i in 0..total_slots {
-            unsafe { *(entries.add(i) as *mut u64) = EMPTY_HASH; }
+            unsafe {
+                *(entries.add(i) as *mut u64) = EMPTY_HASH;
+            }
         }
 
-        Self { ptr, total_slots, entries, layout, _marker: PhantomData }
+        Self {
+            ptr,
+            total_slots,
+            entries,
+            layout,
+            _marker: PhantomData,
+        }
     }
 
     #[inline(always)]
@@ -87,12 +95,19 @@ struct Meta {
 impl Meta {
     fn new(ideal_range: usize) -> Self {
         let slot_bits = ideal_range.trailing_zeros() as usize;
-        Self { ideal_range, slot_shift: 64usize.saturating_sub(slot_bits) }
+        Self {
+            ideal_range,
+            slot_shift: 64usize.saturating_sub(slot_bits),
+        }
     }
 
     #[inline(always)]
     fn ideal_slot(&self, hash: u64) -> usize {
-        if self.slot_shift >= 64 { 0 } else { (hash >> self.slot_shift) as usize }
+        if self.slot_shift >= 64 {
+            0
+        } else {
+            (hash >> self.slot_shift) as usize
+        }
     }
 }
 
@@ -124,17 +139,25 @@ impl<K: Key, V: Value, H: BuildHasher> PoMap3<K, V, H> {
 
     /// Returns the number of entries.
     #[inline(always)]
-    pub fn len(&self) -> usize { self.len }
+    pub fn len(&self) -> usize {
+        self.len
+    }
 
     /// Returns true if empty.
     #[inline(always)]
-    pub fn is_empty(&self) -> bool { self.len == 0 }
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
 
     /// Returns the number of entries the map can hold without growing.
-    pub fn capacity(&self) -> usize { self.meta.ideal_range * 3 / 4 }
+    pub fn capacity(&self) -> usize {
+        self.meta.ideal_range * 3 / 4
+    }
 
     /// Returns a reference to the hasher.
-    pub fn hasher(&self) -> &H { &self.hash_builder }
+    pub fn hasher(&self) -> &H {
+        &self.hash_builder
+    }
 
     /// Returns a reference to the value for `key`.
     #[inline]
@@ -145,10 +168,14 @@ impl<K: Key, V: Value, H: BuildHasher> PoMap3<K, V, H> {
         let mut pos = ideal;
         loop {
             let stored = self.slots.hash_at(pos);
-            if stored == EMPTY_HASH || stored > hash { return None; }
+            if stored == EMPTY_HASH || stored > hash {
+                return None;
+            }
             if stored == hash {
                 let (_, k, v) = unsafe { &*(*entries.add(pos)).as_ptr() };
-                if k == key { return Some(v); }
+                if k == key {
+                    return Some(v);
+                }
             }
             pos += 1;
         }
@@ -163,10 +190,14 @@ impl<K: Key, V: Value, H: BuildHasher> PoMap3<K, V, H> {
         let mut pos = ideal;
         loop {
             let stored = self.slots.hash_at(pos);
-            if stored == EMPTY_HASH || stored > hash { return None; }
+            if stored == EMPTY_HASH || stored > hash {
+                return None;
+            }
             if stored == hash {
                 let entry = unsafe { &mut *(*entries.add(pos)).as_mut_ptr() };
-                if entry.1 == *key { return Some(&mut entry.2); }
+                if entry.1 == *key {
+                    return Some(&mut entry.2);
+                }
             }
             pos += 1;
         }
@@ -184,7 +215,9 @@ impl<K: Key, V: Value, H: BuildHasher> PoMap3<K, V, H> {
         let entries = self.slots.entries;
 
         if self.slots.hash_at(ideal) == EMPTY_HASH {
-            unsafe { *entries.add(ideal) = MaybeUninit::new((hash, key, value)); }
+            unsafe {
+                *entries.add(ideal) = MaybeUninit::new((hash, key, value));
+            }
             self.len += 1;
             return None;
         }
@@ -199,7 +232,9 @@ impl<K: Key, V: Value, H: BuildHasher> PoMap3<K, V, H> {
         loop {
             let stored = self.slots.hash_at(pos);
             if stored == EMPTY_HASH {
-                unsafe { *entries.add(pos) = MaybeUninit::new((hash, key, value)); }
+                unsafe {
+                    *entries.add(pos) = MaybeUninit::new((hash, key, value));
+                }
                 self.len += 1;
                 return None;
             }
@@ -210,7 +245,9 @@ impl<K: Key, V: Value, H: BuildHasher> PoMap3<K, V, H> {
                     return Some(mem::replace(&mut e.2, value));
                 }
             }
-            if stored > hash { break; }
+            if stored > hash {
+                break;
+            }
             pos += 1;
             if pos >= self.slots.total_slots {
                 self.grow();
@@ -246,24 +283,36 @@ impl<K: Key, V: Value, H: BuildHasher> PoMap3<K, V, H> {
         let mut pos = ideal;
         loop {
             let stored = self.slots.hash_at(pos);
-            if stored == EMPTY_HASH || stored > hash { return None; }
+            if stored == EMPTY_HASH || stored > hash {
+                return None;
+            }
             if stored == hash {
                 let entry = unsafe { &*(*entries.add(pos)).as_ptr() };
                 if entry.1 == *key {
                     let (_, _, value) = unsafe { (*entries.add(pos)).assume_init_read() };
-                    let mut hole = pos;
+                    // Find end of backshift chain: consecutive displaced entries.
+                    let mut end = pos + 1;
                     loop {
-                        let next = hole + 1;
-                        let nh = self.slots.hash_at(next);
-                        if nh == EMPTY_HASH { break; }
-                        let ni = self.meta.ideal_slot(nh);
-                        if ni > hole { break; }
-                        unsafe {
-                            ptr::copy_nonoverlapping(entries.add(next), entries.add(hole), 1);
+                        let nh = self.slots.hash_at(end);
+                        if nh == EMPTY_HASH {
+                            break;
                         }
-                        hole = next;
+                        // Entry at `end` is displaced if ideal_slot < end.
+                        if self.meta.ideal_slot(nh) >= end {
+                            break;
+                        }
+                        end += 1;
                     }
-                    unsafe { *(entries.add(hole) as *mut u64) = EMPTY_HASH; }
+                    // Bulk shift [pos+1, end) left by 1 via memmove.
+                    let count = end - pos - 1;
+                    if count > 0 {
+                        unsafe {
+                            ptr::copy(entries.add(pos + 1), entries.add(pos), count);
+                        }
+                    }
+                    unsafe {
+                        *(entries.add(end - 1) as *mut u64) = EMPTY_HASH;
+                    }
                     self.len -= 1;
                     return Some(value);
                 }
@@ -278,7 +327,9 @@ impl<K: Key, V: Value, H: BuildHasher> PoMap3<K, V, H> {
         let needed_ideal = ((target * 4 + 2) / 3)
             .next_power_of_two()
             .max(MIN_IDEAL_RANGE);
-        if needed_ideal >= self.meta.ideal_range { return; }
+        if needed_ideal >= self.meta.ideal_range {
+            return;
+        }
         self.rebuild(needed_ideal);
     }
 
@@ -294,13 +345,21 @@ impl<K: Key, V: Value, H: BuildHasher> PoMap3<K, V, H> {
         let mut write_pos = 0usize;
         for i in 0..self.slots.total_slots {
             let h = self.slots.hash_at(i);
-            if h == EMPTY_HASH { continue; }
+            if h == EMPTY_HASH {
+                continue;
+            }
             let entry = unsafe { (*self.slots.entries.add(i)).assume_init_read() };
-            unsafe { *(self.slots.entries.add(i) as *mut u64) = EMPTY_HASH; }
+            unsafe {
+                *(self.slots.entries.add(i) as *mut u64) = EMPTY_HASH;
+            }
 
             let new_ideal = new_meta.ideal_slot(h);
-            if new_ideal > write_pos { write_pos = new_ideal; }
-            while new_slots.hash_at(write_pos) != EMPTY_HASH { write_pos += 1; }
+            if new_ideal > write_pos {
+                write_pos = new_ideal;
+            }
+            while new_slots.hash_at(write_pos) != EMPTY_HASH {
+                write_pos += 1;
+            }
             unsafe {
                 *new_slots.entries.add(write_pos) = MaybeUninit::new(entry);
             }
@@ -327,7 +386,10 @@ impl<K: Key, V: Value, H: BuildHasher + Clone> Clone for PoMap3<K, V, H> {
         }
         Self {
             len: self.len,
-            meta: Meta { ideal_range: self.meta.ideal_range, slot_shift: self.meta.slot_shift },
+            meta: Meta {
+                ideal_range: self.meta.ideal_range,
+                slot_shift: self.meta.slot_shift,
+            },
             slots: new_slots,
             hash_builder: self.hash_builder.clone(),
         }
@@ -346,12 +408,16 @@ mod tests {
     use std::hash::BuildHasherDefault;
 
     type TestMap = PoMap3<u64, u64, BuildHasherDefault<AHasher>>;
-    fn new_map() -> TestMap { PoMap3::with_hasher(BuildHasherDefault::default()) }
+    fn new_map() -> TestMap {
+        PoMap3::with_hasher(BuildHasherDefault::default())
+    }
 
     #[test]
     fn basic() {
         let mut m = new_map();
-        m.insert(1, 10); m.insert(2, 20); m.insert(3, 30);
+        m.insert(1, 10);
+        m.insert(2, 20);
+        m.insert(3, 30);
         assert_eq!(m.get(&1), Some(&10));
         assert_eq!(m.get(&2), Some(&20));
         assert_eq!(m.get(&3), Some(&30));
@@ -371,7 +437,8 @@ mod tests {
     #[test]
     fn remove() {
         let mut m = new_map();
-        m.insert(1, 10); m.insert(2, 20);
+        m.insert(1, 10);
+        m.insert(2, 20);
         assert_eq!(m.remove(&1), Some(10));
         assert_eq!(m.get(&1), None);
         assert_eq!(m.get(&2), Some(&20));
@@ -381,17 +448,25 @@ mod tests {
     #[test]
     fn grow_large() {
         let mut m = new_map();
-        for i in 0..10_000u64 { m.insert(i, i); }
-        for i in 0..10_000u64 { assert_eq!(m.get(&i), Some(&i), "missing {}", i); }
+        for i in 0..10_000u64 {
+            m.insert(i, i);
+        }
+        for i in 0..10_000u64 {
+            assert_eq!(m.get(&i), Some(&i), "missing {}", i);
+        }
         assert_eq!(m.len(), 10_000);
     }
 
     #[test]
     fn shrink() {
         let mut m = new_map();
-        for i in 0..1000u64 { m.insert(i, i); }
+        for i in 0..1000u64 {
+            m.insert(i, i);
+        }
         m.shrink_to(0);
-        for i in 0..1000u64 { assert_eq!(m.get(&i), Some(&i)); }
+        for i in 0..1000u64 {
+            assert_eq!(m.get(&i), Some(&i));
+        }
     }
 
     #[test]
@@ -405,9 +480,15 @@ mod tests {
             let key: u64 = rng.random_range(0..1000);
             let val: u64 = rng.random();
             match op {
-                0 => { assert_eq!(m.insert(key, val), expected.insert(key, val)); }
-                1 => { assert_eq!(m.get(&key).copied(), expected.get(&key).copied()); }
-                _ => { assert_eq!(m.remove(&key), expected.remove(&key)); }
+                0 => {
+                    assert_eq!(m.insert(key, val), expected.insert(key, val));
+                }
+                1 => {
+                    assert_eq!(m.get(&key).copied(), expected.get(&key).copied());
+                }
+                _ => {
+                    assert_eq!(m.remove(&key), expected.remove(&key));
+                }
             }
         }
         assert_eq!(m.len(), expected.len());

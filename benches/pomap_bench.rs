@@ -348,8 +348,7 @@ fn bench_insert_allocate(c: &mut Criterion) {
     group.bench_function("pomap3", |b| {
         b.iter(|| {
             for &size in &target_sizes {
-                let mut map: BenchPoMap3 =
-                    BenchPoMap3::with_hasher(BenchHasherBuilder::default());
+                let mut map: BenchPoMap3 = BenchPoMap3::with_hasher(BenchHasherBuilder::default());
                 for (key, val) in keys.iter().zip(values.iter()).take(size) {
                     black_box(map.insert(key.clone(), val.clone()));
                 }
@@ -570,8 +569,7 @@ fn bench_get_misses(c: &mut Criterion) {
     });
 
     drop(hashbrown_maps);
-    let pomap3_maps =
-        build_pomap3_maps_from_data(&target_sizes, &present_keys, &present_values);
+    let pomap3_maps = build_pomap3_maps_from_data(&target_sizes, &present_keys, &present_values);
 
     group.bench_function("pomap3", |b| {
         b.iter(|| {
@@ -1009,8 +1007,7 @@ fn bench_shrink_to(c: &mut Criterion) {
     });
 
     drop(hashbrown_maps);
-    let pomap3_maps =
-        build_pomap3_maps_from_data_with_capacity(&target_sizes, &keys, &values, 8);
+    let pomap3_maps = build_pomap3_maps_from_data_with_capacity(&target_sizes, &keys, &values, 8);
     group.bench_function("pomap3", |b| {
         b.iter_batched(
             || {
