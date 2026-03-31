@@ -24,6 +24,7 @@ use crossterm::{
 };
 use hashbrown::HashMap as HashbrownMap;
 use pomap::PoMap;
+use pomap::pomap3::PoMap3;
 use rand::{Rng, SeedableRng, rngs::StdRng, seq::SliceRandom};
 #[cfg(feature = "tui")]
 use ratatui::{
@@ -101,6 +102,7 @@ type BenchValue = BenchType;
 type BenchHasher = AHasher;
 type BenchHasherBuilder = BuildHasherDefault<BenchHasher>;
 type BenchPoMap = PoMap<BenchKey, BenchValue, BenchHasherBuilder>;
+type BenchPoMap3 = PoMap3<BenchKey, BenchValue, BenchHasherBuilder>;
 type BenchHashMap = HashMap<BenchKey, BenchValue, BenchHasherBuilder>;
 type BenchHashbrownMap = HashbrownMap<BenchKey, BenchValue, BenchHasherBuilder>;
 
@@ -155,10 +157,11 @@ fn insert_target_sizes() -> Vec<usize> {
 // ---------------------------------------------------------------------------
 
 #[cfg(feature = "tui")]
-const IMPL_COLORS: [(&str, Color); 3] = [
+const IMPL_COLORS: [(&str, Color); 4] = [
     ("pomap", Color::Green),
     ("std_hashmap", Color::Yellow),
     ("hashbrown", Color::Red),
+    ("pomap3", Color::Cyan),
 ];
 
 #[cfg(feature = "tui")]
@@ -249,6 +252,8 @@ fn draw_tui(
             Span::styled("■ std_hashmap", Style::default().fg(Color::Yellow)),
             Span::raw("  "),
             Span::styled("■ hashbrown", Style::default().fg(Color::Red)),
+            Span::raw("  "),
+            Span::styled("■ pomap3", Style::default().fg(Color::Cyan)),
         ]);
         f.render_widget(Paragraph::new(legend), bottom[0]);
         f.render_widget(Paragraph::new(status), bottom[1]);
@@ -349,13 +354,13 @@ fn main() {
     });
 
     let bench_start = Instant::now();
-    let total_steps = target_sizes.len() * 3;
+    let total_steps = target_sizes.len() * 4;
     let mut completed_steps = 0usize;
 
     let mut order_rng = StdRng::seed_from_u64(0x105E27);
 
     for &size in &target_sizes {
-        let mut order = [0u8, 1, 2];
+        let mut order = [0u8, 1, 2, 3];
         order.shuffle(&mut order_rng);
 
         for &idx in &order {
@@ -367,7 +372,8 @@ fn main() {
             let impl_name = match idx {
                 0 => "pomap",
                 1 => "std_hashmap",
-                _ => "hashbrown",
+                2 => "hashbrown",
+                _ => "pomap3",
             };
 
             let eta = if completed_steps > 0 {
@@ -415,10 +421,15 @@ fn main() {
                     "std_hashmap",
                     BenchHashMap::with_hasher(BenchHasherBuilder::default())
                 ),
-                _ => time_inserts!(
+                2 => time_inserts!(
                     size,
                     "hashbrown",
                     BenchHashbrownMap::with_hasher(BenchHasherBuilder::default())
+                ),
+                _ => time_inserts!(
+                    size,
+                    "pomap3",
+                    BenchPoMap3::with_hasher(BenchHasherBuilder::default())
                 ),
             }
 

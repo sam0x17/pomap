@@ -1,6 +1,4 @@
 /target
-get_graph.csv
-insert_graph.csv
-insert_hot_graph.csv
+*_graph.csv
 /.claude/*
 !/.claude/skills/
