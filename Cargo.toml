@@ -44,18 +44,6 @@ name = "pomap_bench"
 harness = false
 
 [[bench]]
-name = "gets_temp_graph"
-harness = false
-
-[[bench]]
-name = "insert_graph"
-harness = false
-
-[[bench]]
-name = "insert_hot_graph"
-harness = false
-
-[[bench]]
 name = "profile_insert"
 harness = false
 
