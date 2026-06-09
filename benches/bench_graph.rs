@@ -159,9 +159,11 @@ macro_rules! hb  { ()          => { BenchHashbrownMap::with_hasher(BenchHasherBu
 
 const MAX_SIZE: usize = 10_000_000;
 const NUM_POINTS_PER_DECADE: usize = 60;
-const ROUNDS: u64 = 2;
-/// Total operations per (size, impl) measurement for get/update/remove benchmarks.
-const OPS_TARGET: usize = 1_000_000;
+/// Minimum wall-clock time per measurement point. Each (size, impl) pair
+/// runs in a loop until at least this much time has elapsed, then divides
+/// total time by total ops. This eliminates noise at small sizes where
+/// individual operations are sub-10ns.
+const MIN_MEASURE_NS: u128 = 250_000_000; // 250ms
 const HOT_SET_SIZE: usize = 1_000;
 const SHRINK_OVER_ALLOC: usize = 8;
 
@@ -196,25 +198,26 @@ fn target_sizes() -> Vec<usize> {
 // Per-operation timing macros
 // ---------------------------------------------------------------------------
 
+/// How many ops to run between elapsed() checks. Keeps the inner loop tight
+/// and avoids timing overhead from clock reads on every single op.
+const BATCH: usize = 1024;
+
 /// Time cold inserts (no pre-allocation). Returns ns/insert.
+/// Each batch builds one map (size inserts), so elapsed is checked per map.
 macro_rules! time_insert_alloc {
     ($size:expr, $keys:expr, $values:expr, $ctor:expr) => {{
         let size = $size;
-        let reps = (MAX_SIZE / size).max(1);
-        let total_inserts = reps as u128 * size as u128 * ROUNDS as u128;
-        let mut total_ns = 0u128;
-        for _ in 0..ROUNDS {
-            let start = Instant::now();
-            for _ in 0..reps {
-                let mut map = $ctor;
-                for i in 0..size {
-                    black_box(map.insert($keys[i].clone(), $values[i].clone()));
-                }
-                black_box(&map);
+        let mut total_inserts = 0u128;
+        let start = Instant::now();
+        while start.elapsed().as_nanos() < MIN_MEASURE_NS {
+            let mut map = $ctor;
+            for i in 0..size {
+                black_box(map.insert($keys[i].clone(), $values[i].clone()));
             }
-            total_ns += start.elapsed().as_nanos();
+            black_box(&map);
+            total_inserts += size as u128;
         }
-        total_ns as f64 / total_inserts as f64
+        start.elapsed().as_nanos() as f64 / total_inserts as f64
     }};
 }
 
@@ -222,21 +225,17 @@ macro_rules! time_insert_alloc {
 macro_rules! time_insert_prealloc {
     ($size:expr, $keys:expr, $values:expr, $ctor:expr) => {{
         let size = $size;
-        let reps = (MAX_SIZE / size).max(1);
-        let total_inserts = reps as u128 * size as u128 * ROUNDS as u128;
-        let mut total_ns = 0u128;
-        for _ in 0..ROUNDS {
-            let start = Instant::now();
-            for _ in 0..reps {
-                let mut map = $ctor;
-                for i in 0..size {
-                    black_box(map.insert($keys[i].clone(), $values[i].clone()));
-                }
-                black_box(&map);
+        let mut total_inserts = 0u128;
+        let start = Instant::now();
+        while start.elapsed().as_nanos() < MIN_MEASURE_NS {
+            let mut map = $ctor;
+            for i in 0..size {
+                black_box(map.insert($keys[i].clone(), $values[i].clone()));
             }
-            total_ns += start.elapsed().as_nanos();
+            black_box(&map);
+            total_inserts += size as u128;
         }
-        total_ns as f64 / total_inserts as f64
+        start.elapsed().as_nanos() as f64 / total_inserts as f64
     }};
 }
 
@@ -246,18 +245,17 @@ macro_rules! time_gets {
         let size = $size;
         let mut map = $ctor;
         for i in 0..size { map.insert($keys[i].clone(), $values[i].clone()); }
-        let total_ops = OPS_TARGET as u128 * ROUNDS as u128;
-        let mut total_ns = 0u128;
-        for _ in 0..ROUNDS {
-            let mut rng = StdRng::seed_from_u64($seed ^ size as u64);
-            let start = Instant::now();
-            for _ in 0..OPS_TARGET {
+        let mut total_ops = 0u128;
+        let mut rng = StdRng::seed_from_u64($seed ^ size as u64);
+        let start = Instant::now();
+        while start.elapsed().as_nanos() < MIN_MEASURE_NS {
+            for _ in 0..BATCH {
                 let idx = rng.random_range(0..$lookup_range);
                 black_box(map.get(&$lookup_keys[idx]));
             }
-            total_ns += start.elapsed().as_nanos();
+            total_ops += BATCH as u128;
         }
-        total_ns as f64 / total_ops as f64
+        start.elapsed().as_nanos() as f64 / total_ops as f64
     }};
 }
 
@@ -267,20 +265,21 @@ macro_rules! time_updates {
         let size = $size;
         let mut map = $ctor;
         for i in 0..size { map.insert($keys[i].clone(), $values[i].clone()); }
-        let total_ops = OPS_TARGET as u128 * ROUNDS as u128;
-        let mut total_ns = 0u128;
-        for _ in 0..ROUNDS {
-            let start = Instant::now();
-            for i in 0..OPS_TARGET {
-                let key = &$keys[i % size];
+        let mut total_ops = 0u128;
+        let mut cursor = 0usize;
+        let start = Instant::now();
+        while start.elapsed().as_nanos() < MIN_MEASURE_NS {
+            for _ in 0..BATCH {
+                let key = &$keys[cursor % size];
                 if let Some(v) = map.get_mut(key) {
-                    *v = $update_values[i % size].clone();
+                    *v = $update_values[cursor % size].clone();
                     black_box(&*v);
                 }
+                cursor += 1;
             }
-            total_ns += start.elapsed().as_nanos();
+            total_ops += BATCH as u128;
         }
-        total_ns as f64 / total_ops as f64
+        start.elapsed().as_nanos() as f64 / total_ops as f64
     }};
 }
 
@@ -290,17 +289,17 @@ macro_rules! time_remove_hits {
         let size = $size;
         let mut base = $ctor;
         for i in 0..size { base.insert($keys[i].clone(), $values[i].clone()); }
-        let removes_per_clone = OPS_TARGET.min(size);
-        let num_clones = (OPS_TARGET / removes_per_clone).max(1) * ROUNDS as usize;
-        let total_removes = num_clones as u128 * removes_per_clone as u128;
+        let removes_per_clone = size.min(1000);
+        let mut total_removes = 0u128;
         let mut total_ns = 0u128;
-        for _ in 0..num_clones {
+        while total_ns < MIN_MEASURE_NS {
             let mut map = base.clone();
-            let start = Instant::now();
+            let batch_start = Instant::now();
             for i in 0..removes_per_clone {
                 black_box(map.remove(&$keys[i]));
             }
-            total_ns += start.elapsed().as_nanos();
+            total_ns += batch_start.elapsed().as_nanos();
+            total_removes += removes_per_clone as u128;
         }
         total_ns as f64 / total_removes as f64
     }};
@@ -312,36 +311,37 @@ macro_rules! time_remove_misses {
         let size = $size;
         let mut map = $ctor;
         for i in 0..size { map.insert($keys[i].clone(), $values[i].clone()); }
-        let total_ops = OPS_TARGET as u128 * ROUNDS as u128;
-        let mut total_ns = 0u128;
-        for _ in 0..ROUNDS {
-            let mut rng = StdRng::seed_from_u64($seed ^ size as u64);
-            let start = Instant::now();
-            for _ in 0..OPS_TARGET {
+        let mut total_ops = 0u128;
+        let mut rng = StdRng::seed_from_u64($seed ^ size as u64);
+        let start = Instant::now();
+        while start.elapsed().as_nanos() < MIN_MEASURE_NS {
+            for _ in 0..BATCH {
                 let idx = rng.random_range(0..size);
                 black_box(map.remove(&$miss_keys[idx]));
             }
-            total_ns += start.elapsed().as_nanos();
+            total_ops += BATCH as u128;
         }
-        total_ns as f64 / total_ops as f64
+        start.elapsed().as_nanos() as f64 / total_ops as f64
     }};
 }
 
 /// Time shrink_to on over-allocated maps. Returns ns/shrink.
+/// Clone cost is excluded — only the shrink itself is timed.
 macro_rules! time_shrink {
     ($size:expr, $keys:expr, $values:expr, $ctor:expr) => {{
         let size = $size;
         let mut base = $ctor;
         for i in 0..size { base.insert($keys[i].clone(), $values[i].clone()); }
-        let num_shrinks = ((MAX_SIZE / size).max(1) * ROUNDS as usize) as u128;
+        let mut total_shrinks = 0u128;
         let mut total_ns = 0u128;
-        for _ in 0..num_shrinks {
+        while total_ns < MIN_MEASURE_NS {
             let mut map = base.clone();
-            let start = Instant::now();
+            let op_start = Instant::now();
             black_box(map.shrink_to(size));
-            total_ns += start.elapsed().as_nanos();
+            total_ns += op_start.elapsed().as_nanos();
+            total_shrinks += 1;
         }
-        total_ns as f64 / num_shrinks as f64
+        total_ns as f64 / total_shrinks as f64
     }};
 }
 
