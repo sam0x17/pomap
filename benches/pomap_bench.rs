@@ -61,6 +61,7 @@ static GLOBAL_ALLOC: TrackingAlloc = TrackingAlloc;
 use hashbrown::HashMap as HashbrownMap;
 use pomap::PoMap;
 use pomap::pomap3::PoMap3;
+use pomap::pomap4::PoMap4;
 #[cfg(feature = "bench-string")]
 use rand::distr::Alphanumeric;
 use rand::{Rng, SeedableRng, rngs::StdRng};
@@ -79,6 +80,7 @@ type BenchHasher = AHasher;
 type BenchHasherBuilder = BuildHasherDefault<BenchHasher>;
 type BenchPoMap = PoMap<BenchKey, BenchValue, BenchHasherBuilder>;
 type BenchPoMap3 = PoMap3<BenchKey, BenchValue, BenchHasherBuilder>;
+type BenchPoMap4 = PoMap4<BenchKey, BenchValue, BenchHasherBuilder>;
 type BenchHashMap = HashMap<BenchKey, BenchValue, BenchHasherBuilder>;
 type BenchHashbrownMap = HashbrownMap<BenchKey, BenchValue, BenchHasherBuilder>;
 
@@ -302,6 +304,44 @@ fn build_pomap3_maps_from_data_with_capacity(
         .collect()
 }
 
+fn build_pomap4_maps_from_data(
+    target_sizes: &[usize],
+    keys: &[BenchKey],
+    values: &[BenchValue],
+) -> Vec<(usize, BenchPoMap4)> {
+    target_sizes
+        .iter()
+        .map(|&size| {
+            let mut map: BenchPoMap4 =
+                BenchPoMap4::with_capacity_and_hasher(size, BenchHasherBuilder::default());
+            for idx in 0..size {
+                map.insert(keys[idx].clone(), values[idx].clone());
+            }
+            (size, map)
+        })
+        .collect()
+}
+
+fn build_pomap4_maps_from_data_with_capacity(
+    target_sizes: &[usize],
+    keys: &[BenchKey],
+    values: &[BenchValue],
+    capacity_multiplier: usize,
+) -> Vec<(usize, BenchPoMap4)> {
+    target_sizes
+        .iter()
+        .map(|&size| {
+            let capacity = size.saturating_mul(capacity_multiplier).max(size);
+            let mut map: BenchPoMap4 =
+                BenchPoMap4::with_capacity_and_hasher(capacity, BenchHasherBuilder::default());
+            for idx in 0..size {
+                map.insert(keys[idx].clone(), values[idx].clone());
+            }
+            (size, map)
+        })
+        .collect()
+}
+
 fn bench_insert_allocate(c: &mut Criterion) {
     let target_sizes = insert_target_sizes();
     let max_target_size = *target_sizes.iter().max().unwrap();
@@ -349,6 +389,18 @@ fn bench_insert_allocate(c: &mut Criterion) {
         b.iter(|| {
             for &size in &target_sizes {
                 let mut map: BenchPoMap3 = BenchPoMap3::with_hasher(BenchHasherBuilder::default());
+                for (key, val) in keys.iter().zip(values.iter()).take(size) {
+                    black_box(map.insert(key.clone(), val.clone()));
+                }
+                black_box(&map);
+            }
+        });
+    });
+
+    group.bench_function("pomap4", |b| {
+        b.iter(|| {
+            for &size in &target_sizes {
+                let mut map: BenchPoMap4 = BenchPoMap4::with_hasher(BenchHasherBuilder::default());
                 for (key, val) in keys.iter().zip(values.iter()).take(size) {
                     black_box(map.insert(key.clone(), val.clone()));
                 }
@@ -426,6 +478,19 @@ fn bench_insert_preallocated(c: &mut Criterion) {
         });
     });
 
+    group.bench_function("pomap4", |b| {
+        b.iter(|| {
+            for &size in &target_sizes {
+                let mut map: BenchPoMap4 =
+                    BenchPoMap4::with_capacity_and_hasher(size, BenchHasherBuilder::default());
+                for (key, val) in combined.iter().take(size) {
+                    black_box(map.insert(key.clone(), val.clone()));
+                }
+                black_box(&map);
+            }
+        });
+    });
+
     group.finish();
 }
 
@@ -486,6 +551,22 @@ fn bench_get_hits(c: &mut Criterion) {
     group.bench_function("pomap3", |b| {
         b.iter(|| {
             for &(size, ref map) in &pomap3_maps {
+                let mut rng = StdRng::seed_from_u64(0xC01DBEEF ^ size as u64);
+                for _ in 0..GETS_PER_ROUND {
+                    let idx = rng.random_range(0..size);
+                    let key = &keys[idx];
+                    black_box(map.get(key));
+                }
+            }
+        });
+    });
+
+    drop(pomap3_maps);
+    let pomap4_maps = build_pomap4_maps_from_data(&target_sizes, &keys, &values);
+
+    group.bench_function("pomap4", |b| {
+        b.iter(|| {
+            for &(size, ref map) in &pomap4_maps {
                 let mut rng = StdRng::seed_from_u64(0xC01DBEEF ^ size as u64);
                 for _ in 0..GETS_PER_ROUND {
                     let idx = rng.random_range(0..size);
@@ -584,6 +665,22 @@ fn bench_get_misses(c: &mut Criterion) {
         });
     });
 
+    drop(pomap3_maps);
+    let pomap4_maps = build_pomap4_maps_from_data(&target_sizes, &present_keys, &present_values);
+
+    group.bench_function("pomap4", |b| {
+        b.iter(|| {
+            for &(size, ref map) in &pomap4_maps {
+                let mut rng = StdRng::seed_from_u64(0xC0FFEE42 ^ size as u64);
+                for _ in 0..GETS_PER_ROUND {
+                    let idx = rng.random_range(0..size);
+                    let key = &miss_keys[idx];
+                    black_box(map.get(key));
+                }
+            }
+        });
+    });
+
     group.finish();
 }
 
@@ -652,6 +749,24 @@ fn bench_update(c: &mut Criterion) {
     group.bench_function("pomap3", |b| {
         b.iter(|| {
             for (size, map) in pomap3_maps.iter_mut() {
+                let size = *size;
+                for idx in 0..GETS_PER_ROUND {
+                    let key = &keys[idx % size];
+                    let val = update_values[idx % size];
+                    if let Some(v) = map.get_mut(key) {
+                        black_box(*v = val);
+                    }
+                }
+            }
+        });
+    });
+
+    drop(pomap3_maps);
+    let mut pomap4_maps = build_pomap4_maps_from_data(&target_sizes, &keys, &initial_values);
+
+    group.bench_function("pomap4", |b| {
+        b.iter(|| {
+            for (size, map) in pomap4_maps.iter_mut() {
                 let size = *size;
                 for idx in 0..GETS_PER_ROUND {
                     let key = &keys[idx % size];
@@ -733,6 +848,22 @@ fn bench_hot_gets(c: &mut Criterion) {
     group.bench_function("pomap3", |b| {
         b.iter(|| {
             for ((_, map), &hot_count) in pomap3_maps.iter().zip(&hot_counts) {
+                let mut rng = StdRng::seed_from_u64(0xDEC0DE42 ^ hot_count as u64);
+                for _ in 0..GETS_PER_ROUND {
+                    let idx = rng.random_range(0..hot_count);
+                    let key = &hot_keys[idx];
+                    black_box(map.get(key));
+                }
+            }
+        });
+    });
+
+    drop(pomap3_maps);
+    let pomap4_maps = build_pomap4_maps_from_data(&target_sizes, &map_keys, &map_values);
+
+    group.bench_function("pomap4", |b| {
+        b.iter(|| {
+            for ((_, map), &hot_count) in pomap4_maps.iter().zip(&hot_counts) {
                 let mut rng = StdRng::seed_from_u64(0xDEC0DE42 ^ hot_count as u64);
                 for _ in 0..GETS_PER_ROUND {
                     let idx = rng.random_range(0..hot_count);
@@ -847,6 +978,29 @@ fn bench_remove_hits(c: &mut Criterion) {
         );
     });
 
+    drop(pomap3_maps);
+    let pomap4_maps = build_pomap4_maps_from_data(&target_sizes, &keys, &values);
+    group.bench_function("pomap4", |b| {
+        b.iter_batched(
+            || {
+                pomap4_maps
+                    .iter()
+                    .map(|(size, map)| (*size, map.clone()))
+                    .collect::<Vec<(usize, BenchPoMap4)>>()
+            },
+            |mut maps| {
+                for (size, map) in maps.iter_mut() {
+                    let removes = GETS_PER_ROUND.min(*size);
+                    for idx in 0..removes {
+                        let key = &keys[idx];
+                        black_box(map.remove(key));
+                    }
+                }
+            },
+            BatchSize::LargeInput,
+        );
+    });
+
     group.finish();
 }
 
@@ -936,6 +1090,22 @@ fn bench_remove_misses(c: &mut Criterion) {
         });
     });
 
+    drop(pomap3_maps);
+    let mut pomap4_maps =
+        build_pomap4_maps_from_data(&target_sizes, &present_keys, &present_values);
+
+    group.bench_function("pomap4", |b| {
+        b.iter(|| {
+            for (size, map) in pomap4_maps.iter_mut() {
+                let removes = GETS_PER_ROUND.min(*size);
+                for idx in 0..removes {
+                    let key = &miss_keys[idx];
+                    black_box(map.remove(key));
+                }
+            }
+        });
+    });
+
     group.finish();
 }
 
@@ -1015,6 +1185,25 @@ fn bench_shrink_to(c: &mut Criterion) {
                     .iter()
                     .map(|(size, map)| (*size, map.clone()))
                     .collect::<Vec<(usize, BenchPoMap3)>>()
+            },
+            |mut maps| {
+                for (size, map) in maps.iter_mut() {
+                    black_box(map.shrink_to(*size));
+                }
+            },
+            BatchSize::LargeInput,
+        );
+    });
+
+    drop(pomap3_maps);
+    let pomap4_maps = build_pomap4_maps_from_data_with_capacity(&target_sizes, &keys, &values, 8);
+    group.bench_function("pomap4", |b| {
+        b.iter_batched(
+            || {
+                pomap4_maps
+                    .iter()
+                    .map(|(size, map)| (*size, map.clone()))
+                    .collect::<Vec<(usize, BenchPoMap4)>>()
             },
             |mut maps| {
                 for (size, map) in maps.iter_mut() {
