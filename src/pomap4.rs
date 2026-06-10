@@ -26,6 +26,27 @@ use crate::{Key, PoMapBuildHasher, Value};
 const MIN_IDEAL_RANGE: usize = 16;
 const EMPTY_HASH: u64 = u64::MAX;
 
+/// Grow when `len` reaches `ideal_range * LOAD_NUM / LOAD_DEN` (62.5%). A lower
+/// load factor keeps runs short, which keeps insert shifts and remove backshift
+/// chains short. Mostly free in memory because `ideal_range` is a power of two.
+const LOAD_NUM: usize = 5;
+const LOAD_DEN: usize = 8;
+
+/// Multiplier applied to `ideal_range` on grow. Higher = fewer rebuilds (less
+/// total repack work, ~f/(f-1)·n moves) but more slack memory. Measured dial:
+/// factor 2 → insert_allocate ~1.66× hb, avg ~2.03× hb memory; factor 4 →
+/// ~1.13× hb inserts but avg ~2.75× (worst ~6.25×) memory. Kept at 2 for memory.
+const GROWTH_FACTOR: usize = 2;
+
+/// Smallest `ideal_range` (power of two) that holds `capacity` entries without
+/// growing — i.e. whose grow threshold strictly exceeds `capacity`.
+#[inline]
+fn ideal_range_for(capacity: usize) -> usize {
+    // Need ideal_range * LOAD_NUM / LOAD_DEN > capacity.
+    let needed = capacity * LOAD_DEN / LOAD_NUM + 1;
+    needed.next_power_of_two().max(MIN_IDEAL_RANGE)
+}
+
 #[inline(always)]
 const fn encode_hash(h: u64) -> u64 {
     let h = h.saturating_sub(1);
@@ -122,6 +143,7 @@ impl Meta {
 /// PoMap4: inline-hash AoS map with gap-preserving resize.
 pub struct PoMap4<K: Key, V: Value, H: BuildHasher = PoMapBuildHasher> {
     len: usize,
+    grow_threshold: usize,
     meta: Meta,
     slots: Slots<K, V>,
     hash_builder: H,
@@ -135,10 +157,11 @@ impl<K: Key, V: Value, H: BuildHasher> PoMap4<K, V, H> {
 
     /// Creates an empty map with the given capacity and hash builder.
     pub fn with_capacity_and_hasher(capacity: usize, hash_builder: H) -> Self {
-        let ideal_range = capacity.next_power_of_two().max(MIN_IDEAL_RANGE);
+        let ideal_range = ideal_range_for(capacity);
         let total_slots = ideal_range + padding_for(ideal_range);
         Self {
             len: 0,
+            grow_threshold: ideal_range * LOAD_NUM / LOAD_DEN,
             meta: Meta::new(ideal_range),
             slots: Slots::new(total_slots),
             hash_builder,
@@ -159,7 +182,7 @@ impl<K: Key, V: Value, H: BuildHasher> PoMap4<K, V, H> {
 
     /// Returns the number of entries the map can hold without growing.
     pub fn capacity(&self) -> usize {
-        self.meta.ideal_range * 3 / 4
+        self.grow_threshold
     }
 
     /// Returns a reference to the hasher.
@@ -214,10 +237,7 @@ impl<K: Key, V: Value, H: BuildHasher> PoMap4<K, V, H> {
     /// Inserts a key-value pair, returning the old value if present.
     #[inline]
     pub fn insert(&mut self, key: K, value: V) -> Option<V> {
-        // Grow at 62.5% load: lower than pomap3's 75% so runs stay short, which
-        // keeps remove backshift chains short. Trades ~20% more slots for faster
-        // removes (and slightly faster everything-that-scans-a-run).
-        if self.len * 8 >= self.meta.ideal_range * 5 {
+        if self.len >= self.grow_threshold {
             self.grow();
         }
 
@@ -330,9 +350,7 @@ impl<K: Key, V: Value, H: BuildHasher> PoMap4<K, V, H> {
     /// Shrinks the allocation to fit at least `min_capacity` entries.
     pub fn shrink_to(&mut self, min_capacity: usize) {
         let target = self.len.max(min_capacity);
-        let needed_ideal = ((target * 4 + 2) / 3)
-            .next_power_of_two()
-            .max(MIN_IDEAL_RANGE);
+        let needed_ideal = ideal_range_for(target);
         if needed_ideal >= self.meta.ideal_range {
             return;
         }
@@ -342,7 +360,7 @@ impl<K: Key, V: Value, H: BuildHasher> PoMap4<K, V, H> {
 
     fn grow(&mut self) {
         // Near-full source: preserve inter-run gaps with per-vacant cursor bumps.
-        self.rebuild(self.meta.ideal_range * 2, true);
+        self.rebuild(self.meta.ideal_range * GROWTH_FACTOR, true);
     }
 
     /// Repacks live entries into a fresh allocation sized for `new_ideal_range`.
@@ -367,10 +385,9 @@ impl<K: Key, V: Value, H: BuildHasher> PoMap4<K, V, H> {
                 }
                 continue;
             }
+            // Move the entry out. The old Slots is mem::forget-en below (its Drop
+            // never runs), so there is no need to clear the moved-from slot.
             let entry = unsafe { (*self.slots.entries.add(i)).assume_init_read() };
-            unsafe {
-                *(self.slots.entries.add(i) as *mut u64) = EMPTY_HASH;
-            }
             cursor = cursor.max(new_meta.ideal_slot(h));
             unsafe {
                 *new_slots.entries.add(cursor) = MaybeUninit::new(entry);
@@ -382,6 +399,7 @@ impl<K: Key, V: Value, H: BuildHasher> PoMap4<K, V, H> {
         unsafe { dealloc(old.ptr.as_ptr(), old.layout) };
         mem::forget(old);
         self.meta = new_meta;
+        self.grow_threshold = new_ideal_range * LOAD_NUM / LOAD_DEN;
     }
 }
 
@@ -398,6 +416,7 @@ impl<K: Key, V: Value, H: BuildHasher + Clone> Clone for PoMap4<K, V, H> {
         }
         Self {
             len: self.len,
+            grow_threshold: self.grow_threshold,
             meta: Meta::new(self.meta.ideal_range),
             slots: new_slots,
             hash_builder: self.hash_builder.clone(),
