@@ -49,8 +49,9 @@ fn ideal_range_for(capacity: usize) -> usize {
 
 #[inline(always)]
 const fn encode_hash(h: u64) -> u64 {
-    let h = h.saturating_sub(1);
-    if h == EMPTY_HASH { EMPTY_HASH - 1 } else { h }
+    // saturating_sub(1) yields at most u64::MAX-1, so the result can never collide
+    // with EMPTY_HASH (u64::MAX) — no extra guard needed.
+    h.saturating_sub(1)
 }
 
 #[inline]
@@ -84,10 +85,11 @@ impl<K: Key, V: Value> Slots<K, V> {
         };
 
         let entries = ptr.as_ptr() as *mut MaybeUninit<Entry<K, V>>;
-        for i in 0..total_slots {
-            unsafe {
-                *(entries.add(i) as *mut u64) = EMPTY_HASH;
-            }
+        // EMPTY_HASH is u64::MAX = all 0xFF bytes, so one memset over the whole
+        // allocation marks every slot's hash vacant in a single pass. The K/V bytes
+        // are clobbered too but are MaybeUninit and never read while hash == EMPTY.
+        unsafe {
+            ptr::write_bytes(ptr.as_ptr(), 0xFF, layout.size());
         }
 
         Self {
@@ -132,11 +134,9 @@ impl Meta {
 
     #[inline(always)]
     fn ideal_slot(&self, hash: u64) -> usize {
-        if self.slot_shift >= 64 {
-            0
-        } else {
-            (hash >> self.slot_shift) as usize
-        }
+        // slot_shift is always < 64: ideal_range >= MIN_IDEAL_RANGE (16) is a power
+        // of two, so slot_bits >= 4 and slot_shift = 64 - slot_bits <= 60.
+        (hash >> self.slot_shift) as usize
     }
 }
 
