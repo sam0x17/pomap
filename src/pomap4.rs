@@ -385,6 +385,11 @@ impl<K: Key, V: Value, H: BuildHasher, const GROWTH: usize> PoMap4<K, V, H, GROW
     fn rebuild(&mut self, new_ideal_range: usize, bump_gaps: bool) {
         let new_meta = Meta::new(new_ideal_range);
         let new_total = new_ideal_range + padding_for(new_ideal_range);
+        // Fully memset-initialized target, then a second pass writing the ~60%
+        // occupied slots. Single-pass "write each slot exactly once" variants
+        // (region-fill per gap; inline 8-byte gap stores) were tried and measured
+        // 35-44% SLOWER: the upfront memset streams complete cache lines with no
+        // read-for-ownership, which beats any partial-line gap-filling pattern.
         let new_slots = Slots::new(new_total);
 
         let mut cursor = 0usize;
