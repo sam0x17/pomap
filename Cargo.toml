@@ -15,6 +15,9 @@ default = ["std", "tui"]
 std = ["ahash/std", "ahash/runtime-rng"]
 resize-logging = []
 bench-string = []
+# Bench pomap4 with GROWTH=2 instead of the default 4:
+#   cargo bench --bench pomap_bench --features growth2
+growth2 = []
 dots = []
 tui = ["ratatui", "crossterm"]
 

@@ -32,12 +32,6 @@ const EMPTY_HASH: u64 = u64::MAX;
 const LOAD_NUM: usize = 5;
 const LOAD_DEN: usize = 8;
 
-/// Multiplier applied to `ideal_range` on grow. Higher = fewer rebuilds (less
-/// total repack work, ~f/(f-1)·n moves) but more slack memory. Measured dial:
-/// factor 2 → insert_allocate ~1.66× hb, avg ~2.03× hb memory; factor 4 →
-/// ~1.13× hb inserts but avg ~2.75× (worst ~6.25×) memory. Kept at 2 for memory.
-const GROWTH_FACTOR: usize = 2;
-
 /// Smallest `ideal_range` (power of two) that holds `capacity` entries without
 /// growing — i.e. whose grow threshold strictly exceeds `capacity`.
 #[inline]
@@ -141,7 +135,16 @@ impl Meta {
 }
 
 /// PoMap4: inline-hash AoS map with gap-preserving resize.
-pub struct PoMap4<K: Key, V: Value, H: BuildHasher = PoMapBuildHasher> {
+///
+/// `GROWTH` is the multiplier applied to `ideal_range` on grow and **must be a
+/// power of two**: the slot mapping shifts by `trailing_zeros(ideal_range)`, so
+/// a non-power-of-two factor silently degrades the table to a handful of ideal
+/// slots and O(n²) inserts (enforced at compile time). Higher = fewer rebuilds
+/// (~f/(f-1)·n total entry moves) but more slack memory. Measured with u64
+/// keys/values vs hashbrown: GROWTH=4 → insert_allocate ~1.02× (parity), avg
+/// ~2.75× memory (worst ~6.25× right after a grow); GROWTH=2 → ~1.48× inserts,
+/// avg ~2.03× memory (worst ~3.37×). No other operation is affected by GROWTH.
+pub struct PoMap4<K: Key, V: Value, H: BuildHasher = PoMapBuildHasher, const GROWTH: usize = 4> {
     len: usize,
     grow_threshold: usize,
     meta: Meta,
@@ -149,7 +152,14 @@ pub struct PoMap4<K: Key, V: Value, H: BuildHasher = PoMapBuildHasher> {
     hash_builder: H,
 }
 
-impl<K: Key, V: Value, H: BuildHasher> PoMap4<K, V, H> {
+impl<K: Key, V: Value, H: BuildHasher, const GROWTH: usize> PoMap4<K, V, H, GROWTH> {
+    /// Compile-time guard: a non-power-of-two growth factor breaks the
+    /// power-of-two `ideal_range` invariant that `ideal_slot` relies on.
+    const GROWTH_VALID: () = assert!(
+        GROWTH.is_power_of_two() && GROWTH >= 2,
+        "PoMap4 GROWTH must be a power of two >= 2"
+    );
+
     /// Creates an empty map with the given hash builder.
     pub fn with_hasher(hash_builder: H) -> Self {
         Self::with_capacity_and_hasher(MIN_IDEAL_RANGE, hash_builder)
@@ -157,6 +167,7 @@ impl<K: Key, V: Value, H: BuildHasher> PoMap4<K, V, H> {
 
     /// Creates an empty map with the given capacity and hash builder.
     pub fn with_capacity_and_hasher(capacity: usize, hash_builder: H) -> Self {
+        let () = Self::GROWTH_VALID;
         let ideal_range = ideal_range_for(capacity);
         let total_slots = ideal_range + padding_for(ideal_range);
         Self {
@@ -360,7 +371,7 @@ impl<K: Key, V: Value, H: BuildHasher> PoMap4<K, V, H> {
 
     fn grow(&mut self) {
         // Near-full source: preserve inter-run gaps with per-vacant cursor bumps.
-        self.rebuild(self.meta.ideal_range * GROWTH_FACTOR, true);
+        self.rebuild(self.meta.ideal_range * GROWTH, true);
     }
 
     /// Repacks live entries into a fresh allocation sized for `new_ideal_range`.
@@ -403,7 +414,7 @@ impl<K: Key, V: Value, H: BuildHasher> PoMap4<K, V, H> {
     }
 }
 
-impl<K: Key, V: Value, H: BuildHasher + Clone> Clone for PoMap4<K, V, H> {
+impl<K: Key, V: Value, H: BuildHasher + Clone, const GROWTH: usize> Clone for PoMap4<K, V, H, GROWTH> {
     fn clone(&self) -> Self {
         let new_slots = Slots::new(self.slots.total_slots);
         for i in 0..self.slots.total_slots {
@@ -434,6 +445,28 @@ mod tests {
     type TestMap = PoMap4<u64, u64, BuildHasherDefault<AHasher>>;
     fn new_map() -> TestMap {
         PoMap4::with_hasher(BuildHasherDefault::default())
+    }
+
+    fn fuzz_against_hashmap<const GROWTH: usize>() {
+        use rand::{Rng, SeedableRng, rngs::StdRng};
+        let mut rng = StdRng::seed_from_u64(0xDEAD);
+        let mut m: PoMap4<u64, u64, BuildHasherDefault<AHasher>, GROWTH> =
+            PoMap4::with_hasher(BuildHasherDefault::default());
+        let mut expected: HashMap<u64, u64> = HashMap::new();
+        for _ in 0..50_000 {
+            let op: u8 = rng.random_range(0..3);
+            let key: u64 = rng.random_range(0..2000);
+            let val: u64 = rng.random();
+            match op {
+                0 => assert_eq!(m.insert(key, val), expected.insert(key, val)),
+                1 => assert_eq!(m.get(&key).copied(), expected.get(&key).copied()),
+                _ => assert_eq!(m.remove(&key), expected.remove(&key)),
+            }
+        }
+        assert_eq!(m.len(), expected.len());
+        for (k, v) in &expected {
+            assert_eq!(m.get(k), Some(v));
+        }
     }
 
     #[test]
@@ -501,23 +534,24 @@ mod tests {
 
     #[test]
     fn matches_hashmap() {
-        use rand::{Rng, SeedableRng, rngs::StdRng};
-        let mut rng = StdRng::seed_from_u64(0xDEAD);
-        let mut m = new_map();
-        let mut expected: HashMap<u64, u64> = HashMap::new();
-        for _ in 0..50_000 {
-            let op: u8 = rng.random_range(0..3);
-            let key: u64 = rng.random_range(0..2000);
-            let val: u64 = rng.random();
-            match op {
-                0 => assert_eq!(m.insert(key, val), expected.insert(key, val)),
-                1 => assert_eq!(m.get(&key).copied(), expected.get(&key).copied()),
-                _ => assert_eq!(m.remove(&key), expected.remove(&key)),
-            }
+        fuzz_against_hashmap::<4>();
+    }
+
+    #[test]
+    fn matches_hashmap_growth2() {
+        fuzz_against_hashmap::<2>();
+    }
+
+    #[test]
+    fn grow_large_growth2() {
+        let mut m: PoMap4<u64, u64, BuildHasherDefault<AHasher>, 2> =
+            PoMap4::with_hasher(BuildHasherDefault::default());
+        for i in 0..10_000u64 {
+            m.insert(i, i);
         }
-        assert_eq!(m.len(), expected.len());
-        for (k, v) in &expected {
-            assert_eq!(m.get(k), Some(v));
+        for i in 0..10_000u64 {
+            assert_eq!(m.get(&i), Some(&i), "missing {}", i);
         }
+        assert_eq!(m.len(), 10_000);
     }
 }

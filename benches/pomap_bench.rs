@@ -80,7 +80,12 @@ type BenchHasher = AHasher;
 type BenchHasherBuilder = BuildHasherDefault<BenchHasher>;
 type BenchPoMap = PoMap<BenchKey, BenchValue, BenchHasherBuilder>;
 type BenchPoMap3 = PoMap3<BenchKey, BenchValue, BenchHasherBuilder>;
-type BenchPoMap4 = PoMap4<BenchKey, BenchValue, BenchHasherBuilder>;
+/// pomap4 growth factor: default 4; `--features growth2` benches GROWTH=2
+/// (e.g. `cargo bench --bench pomap_bench --features growth2`).
+#[cfg(feature = "growth2")]
+type BenchPoMap4 = PoMap4<BenchKey, BenchValue, BenchHasherBuilder, 2>;
+#[cfg(not(feature = "growth2"))]
+type BenchPoMap4 = PoMap4<BenchKey, BenchValue, BenchHasherBuilder, 4>;
 type BenchHashMap = HashMap<BenchKey, BenchValue, BenchHasherBuilder>;
 type BenchHashbrownMap = HashbrownMap<BenchKey, BenchValue, BenchHasherBuilder>;
 
