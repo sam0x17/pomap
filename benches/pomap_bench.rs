@@ -909,6 +909,7 @@ fn bench_remove_hits(c: &mut Criterion) {
                         black_box(map.remove(key));
                     }
                 }
+                maps // return the batch so its drop is not timed
             },
             BatchSize::LargeInput,
         );
@@ -932,6 +933,7 @@ fn bench_remove_hits(c: &mut Criterion) {
                         black_box(map.remove(key));
                     }
                 }
+                maps // return the batch so its drop is not timed
             },
             BatchSize::LargeInput,
         );
@@ -955,6 +957,7 @@ fn bench_remove_hits(c: &mut Criterion) {
                         black_box(map.remove(key));
                     }
                 }
+                maps // return the batch so its drop is not timed
             },
             BatchSize::LargeInput,
         );
@@ -978,6 +981,7 @@ fn bench_remove_hits(c: &mut Criterion) {
                         black_box(map.remove(key));
                     }
                 }
+                maps // return the batch so its drop is not timed
             },
             BatchSize::LargeInput,
         );
@@ -1001,6 +1005,7 @@ fn bench_remove_hits(c: &mut Criterion) {
                         black_box(map.remove(key));
                     }
                 }
+                maps // return the batch so its drop is not timed
             },
             BatchSize::LargeInput,
         );
@@ -1137,6 +1142,7 @@ fn bench_shrink_to(c: &mut Criterion) {
                 for (size, map) in maps.iter_mut() {
                     black_box(map.shrink_to(*size));
                 }
+                maps // return the batch so its drop is not timed
             },
             BatchSize::LargeInput,
         );
@@ -1156,6 +1162,7 @@ fn bench_shrink_to(c: &mut Criterion) {
                 for (size, map) in maps.iter_mut() {
                     black_box(map.shrink_to(*size));
                 }
+                maps // return the batch so its drop is not timed
             },
             BatchSize::LargeInput,
         );
@@ -1176,6 +1183,7 @@ fn bench_shrink_to(c: &mut Criterion) {
                 for (size, map) in maps.iter_mut() {
                     black_box(map.shrink_to(*size));
                 }
+                maps // return the batch so its drop is not timed
             },
             BatchSize::LargeInput,
         );
@@ -1195,6 +1203,7 @@ fn bench_shrink_to(c: &mut Criterion) {
                 for (size, map) in maps.iter_mut() {
                     black_box(map.shrink_to(*size));
                 }
+                maps // return the batch so its drop is not timed
             },
             BatchSize::LargeInput,
         );
@@ -1214,6 +1223,7 @@ fn bench_shrink_to(c: &mut Criterion) {
                 for (size, map) in maps.iter_mut() {
                     black_box(map.shrink_to(*size));
                 }
+                maps // return the batch so its drop is not timed
             },
             BatchSize::LargeInput,
         );
