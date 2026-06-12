@@ -103,7 +103,6 @@ type BenchKey = BenchType;
 type BenchValue = BenchType;
 type BenchHasherBuilder = BuildHasherDefault<AHasher>;
 type BenchPoMap = PoMap<BenchKey, BenchValue, BenchHasherBuilder>;
-type BenchPoMap3 = pomap::pomap3::PoMap3<BenchKey, BenchValue, BenchHasherBuilder>;
 type BenchHashMap = HashMap<BenchKey, BenchValue, BenchHasherBuilder>;
 type BenchHashbrownMap = HashbrownMap<BenchKey, BenchValue, BenchHasherBuilder>;
 
@@ -146,8 +145,6 @@ fn generate_miss_keys(
 
 macro_rules! pm  { ()          => { BenchPoMap::with_hasher(BenchHasherBuilder::default()) };
                    ($cap:expr) => { BenchPoMap::with_capacity_and_hasher($cap, BenchHasherBuilder::default()) }; }
-macro_rules! pm3 { ()          => { BenchPoMap3::with_hasher(BenchHasherBuilder::default()) };
-                   ($cap:expr) => { BenchPoMap3::with_capacity_and_hasher($cap, BenchHasherBuilder::default()) }; }
 macro_rules! std { ()          => { BenchHashMap::with_hasher(BenchHasherBuilder::default()) };
                    ($cap:expr) => { BenchHashMap::with_capacity_and_hasher($cap, BenchHasherBuilder::default()) }; }
 macro_rules! hb  { ()          => { BenchHashbrownMap::with_hasher(BenchHasherBuilder::default()) };
@@ -167,7 +164,7 @@ const MIN_MEASURE_NS: u128 = 250_000_000; // 250ms
 const HOT_SET_SIZE: usize = 1_000;
 const SHRINK_OVER_ALLOC: usize = 8;
 
-const IMPL_NAMES: [&str; 4] = ["pomap", "std_hashmap", "hashbrown", "pomap3"];
+const IMPL_NAMES: [&str; 3] = ["pomap", "std_hashmap", "hashbrown"];
 
 fn target_sizes() -> Vec<usize> {
     let mut power_targets = Vec::new();
@@ -350,11 +347,10 @@ macro_rules! time_shrink {
 // ---------------------------------------------------------------------------
 
 #[cfg(feature = "tui")]
-const IMPL_COLORS: [(&str, Color); 4] = [
+const IMPL_COLORS: [(&str, Color); 3] = [
     ("pomap", Color::Green),
     ("std_hashmap", Color::Yellow),
     ("hashbrown", Color::Red),
-    ("pomap3", Color::Cyan),
 ];
 
 #[cfg(feature = "tui")]
@@ -443,8 +439,6 @@ fn draw_tui(
             Span::styled("■ std_hashmap", Style::default().fg(Color::Yellow)),
             Span::raw("  "),
             Span::styled("■ hashbrown", Style::default().fg(Color::Red)),
-            Span::raw("  "),
-            Span::styled("■ pomap3", Style::default().fg(Color::Cyan)),
         ]);
         f.render_widget(Paragraph::new(legend), bottom[0]);
         f.render_widget(Paragraph::new(status), bottom[1]);
@@ -606,8 +600,7 @@ fn main() {
             run_bench("insert_allocate", "ns/insert", |size, idx| match idx {
                 0 => time_insert_alloc!(size, keys, values, pm!()),
                 1 => time_insert_alloc!(size, keys, values, std!()),
-                2 => time_insert_alloc!(size, keys, values, hb!()),
-                _ => time_insert_alloc!(size, keys, values, pm3!()),
+                _ => time_insert_alloc!(size, keys, values, hb!()),
             });
         }
 
@@ -617,8 +610,7 @@ fn main() {
             run_bench("insert_preallocated", "ns/insert", |size, idx| match idx {
                 0 => time_insert_prealloc!(size, keys, values, pm!(size)),
                 1 => time_insert_prealloc!(size, keys, values, std!(size)),
-                2 => time_insert_prealloc!(size, keys, values, hb!(size)),
-                _ => time_insert_prealloc!(size, keys, values, pm3!(size)),
+                _ => time_insert_prealloc!(size, keys, values, hb!(size)),
             });
         }
 
@@ -628,8 +620,7 @@ fn main() {
             run_bench("get_hits", "ns/get", |size, idx| match idx {
                 0 => time_gets!(size, keys, values, keys, size, 0xC01DBEEF, pm!(size)),
                 1 => time_gets!(size, keys, values, keys, size, 0xC01DBEEF, std!(size)),
-                2 => time_gets!(size, keys, values, keys, size, 0xC01DBEEF, hb!(size)),
-                _ => time_gets!(size, keys, values, keys, size, 0xC01DBEEF, pm3!(size)),
+                _ => time_gets!(size, keys, values, keys, size, 0xC01DBEEF, hb!(size)),
             });
         }
 
@@ -649,8 +640,7 @@ fn main() {
             run_bench("get_misses", "ns/get", |size, idx| match idx {
                 0 => time_gets!(size, present_keys, present_values, miss_keys, size, 0xC0FFEE42, pm!(size)),
                 1 => time_gets!(size, present_keys, present_values, miss_keys, size, 0xC0FFEE42, std!(size)),
-                2 => time_gets!(size, present_keys, present_values, miss_keys, size, 0xC0FFEE42, hb!(size)),
-                _ => time_gets!(size, present_keys, present_values, miss_keys, size, 0xC0FFEE42, pm3!(size)),
+                _ => time_gets!(size, present_keys, present_values, miss_keys, size, 0xC0FFEE42, hb!(size)),
             });
         }
 
@@ -661,8 +651,7 @@ fn main() {
             run_bench("update_existing", "ns/update", |size, idx| match idx {
                 0 => time_updates!(size, keys, initial_values, update_values, pm!(size)),
                 1 => time_updates!(size, keys, initial_values, update_values, std!(size)),
-                2 => time_updates!(size, keys, initial_values, update_values, hb!(size)),
-                _ => time_updates!(size, keys, initial_values, update_values, pm3!(size)),
+                _ => time_updates!(size, keys, initial_values, update_values, hb!(size)),
             });
         }
 
@@ -678,8 +667,7 @@ fn main() {
                 match idx {
                     0 => time_gets!(size, all_keys, all_values, hot_keys, hot_count, 0xDEC0DE42, pm!(size)),
                     1 => time_gets!(size, all_keys, all_values, hot_keys, hot_count, 0xDEC0DE42, std!(size)),
-                    2 => time_gets!(size, all_keys, all_values, hot_keys, hot_count, 0xDEC0DE42, hb!(size)),
-                    _ => time_gets!(size, all_keys, all_values, hot_keys, hot_count, 0xDEC0DE42, pm3!(size)),
+                    _ => time_gets!(size, all_keys, all_values, hot_keys, hot_count, 0xDEC0DE42, hb!(size)),
                 }
             });
         }
@@ -690,8 +678,7 @@ fn main() {
             run_bench("remove_hits", "ns/remove", |size, idx| match idx {
                 0 => time_remove_hits!(size, keys, values, pm!(size)),
                 1 => time_remove_hits!(size, keys, values, std!(size)),
-                2 => time_remove_hits!(size, keys, values, hb!(size)),
-                _ => time_remove_hits!(size, keys, values, pm3!(size)),
+                _ => time_remove_hits!(size, keys, values, hb!(size)),
             });
         }
 
@@ -711,8 +698,7 @@ fn main() {
             run_bench("remove_misses", "ns/remove", |size, idx| match idx {
                 0 => time_remove_misses!(size, present_keys, present_values, miss_keys, 0xBA5EBA11, pm!(size)),
                 1 => time_remove_misses!(size, present_keys, present_values, miss_keys, 0xBA5EBA11, std!(size)),
-                2 => time_remove_misses!(size, present_keys, present_values, miss_keys, 0xBA5EBA11, hb!(size)),
-                _ => time_remove_misses!(size, present_keys, present_values, miss_keys, 0xBA5EBA11, pm3!(size)),
+                _ => time_remove_misses!(size, present_keys, present_values, miss_keys, 0xBA5EBA11, hb!(size)),
             });
         }
 
@@ -722,8 +708,7 @@ fn main() {
             run_bench("shrink_to", "ns/shrink", |size, idx| match idx {
                 0 => time_shrink!(size, keys, values, pm!(size * SHRINK_OVER_ALLOC)),
                 1 => time_shrink!(size, keys, values, std!(size * SHRINK_OVER_ALLOC)),
-                2 => time_shrink!(size, keys, values, hb!(size * SHRINK_OVER_ALLOC)),
-                _ => time_shrink!(size, keys, values, pm3!(size * SHRINK_OVER_ALLOC)),
+                _ => time_shrink!(size, keys, values, hb!(size * SHRINK_OVER_ALLOC)),
             });
         }
 

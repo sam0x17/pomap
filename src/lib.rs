@@ -11,11 +11,3 @@ extern crate std;
 
 mod pomap;
 pub use pomap::*;
-
-#[allow(missing_docs)]
-/// Experimental: embedded-hash variant (no SIMD, no tags).
-pub mod pomap3;
-
-#[allow(missing_docs)]
-/// Experimental: AoS inline-hash layout + bounded-window cascade write path.
-pub mod pomap4;
