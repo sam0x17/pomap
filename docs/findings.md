@@ -372,10 +372,46 @@ biased here; fair = main-suite sweep). Numbers are single-run, median-of-3 —
 **trust the trends, not individual cells** (a few points, e.g. 64 B at 48 MiB, are
 visibly noisy).
 
-**[TODO]:** per-platform matrix runs (`scripts/run_cold.sh` on Zen 4 + Zen 5c —
-crossover should move with cache size; high-BW Zen 5c cold win larger and earlier)
-and `perf stat` cache-miss counts (predict PoMap ≈ N, hashbrown ≈ 2N + ~23% split
-on cold hits) to bind wall-clock to the 1-vs-2-line mechanism.
+**Two-machine cold matrix (M3 Max vs Zen 5c EPYC 9845; `cold-*.csv`).** The
+crossover is microarchitecture-dependent, and the **server CPU broadens PoMap's
+advantage** — exactly the direction the bandwidth thesis predicts:
+
+- **get_hit:** both win cold (128 MiB: M3 0.63–0.85×, Zen 5c 0.67–0.92×). But the
+  crossover moves *earlier* on the server: for values ≥16 B, Zen 5c PoMap wins
+  get_hit at *every* size including warm/cache-resident (16 B @ 0.1–1 MiB:
+  0.63–0.83×), whereas on M3 hashbrown wins warm and PoMap only takes over past
+  the LLC (~16–48 MiB). At 8 B both still show the warm→cold crossover (hashbrown's
+  SIMD edge survives for the tiniest entry).
+- **Cold writes INVERT on the server.** At 48–128 MiB, Zen 5c PoMap *wins* insert
+  (0.73–0.87×) and remove (0.80–0.85×) across value sizes; on lower-bandwidth M3
+  these are only ~parity. Streaming repack/backshift beats scatter-rehash once
+  bandwidth binds — the §5.3 inversion, now seen directly in the cold regime.
+- **get_miss loses on both at all sizes** (M3 1.1–2.3×, Zen 5c 1.1–2.6×). The
+  robust weak spot (single-map biased here; fair = main-suite sweep).
+- **Value-size read erosion is M3-specific.** M3 cold get_hit degrades 0.63→0.85
+  (8→64 B; entry straddles lines past 64 B); Zen 5c stays ~0.67–0.92 with no clear
+  erosion — it wins broadly regardless of payload.
+
+Caveats: Zen 5c is a **virtualized 8-vCPU slice of a 160-core part** (ratios
+meaningful, absolutes VM-soft); single run, median-of-3 — several cells are noisy
+(trust the trends, not individual cells). **Zen 4 (9354P) matrix not yet captured.**
+**Mechanism, to be settled by `perf` (`scripts/perf_cold.sh` + `benches/cold_perf.rs`,
+Linux):** the harness runs `perf stat` per impl×op (30 cold passes over a 256 MiB
+working set, no inter-pass eviction so counts are clean) and reports per-op
+`instructions`, IPC, and L1 / LLC / dTLB load-misses. It will resolve *which*
+mechanism drives the cold-hit win — the two candidates differ and we should not
+assert one unmeasured:
+- **"2 lines vs 1"** in the strong form (hashbrown ≈ 2 *DRAM* misses/lookup) only
+  holds if the control array also misses DRAM. At sizes where the 1-byte control
+  array is LLC-resident, hashbrown is really **1 DRAM miss (entry) + 1 LLC-latency
+  control access + SIMD**, and PoMap's ~15–35% win is that control+SIMD overhead,
+  not a 2× miss count. The `perf` LLC-load-misses/op (expect ≈1 for both vs ≈2)
+  vs L1-misses/op (expect ~1 vs ~2 — total line touches) distinguishes these.
+- dTLB-load-misses/op tests the page-pressure angle (PoMap one big array vs
+  hashbrown's small control + big entry).
+
+Run on Zen 5c (perf works there): `scripts/perf_cold.sh` → `perf-<cpu>_<Nc>.csv`.
+**[TODO]:** Zen 4 matrix + perf when the box returns.
 
 ## 6. Negative results (worth a paper subsection)
 
@@ -464,6 +500,15 @@ On servers: pin to a non-zero core (`taskset -c 2`), set the governor to
 `performance` and disable turbo where possible, keep the box idle, and capture
 full output (never pipe through `tail` — it truncates early groups). Capture the
 `bench_bandwidth` table on each platform — it is the bandwidth x-axis for §5.3.
+
+Cold-access matrix + perf (the cold-read mechanism, §5.6):
+```
+scripts/run_cold.sh    # → cold-<cpu>_<Nc>_<GB>GB.csv  (all platforms)
+scripts/perf_cold.sh   # → perf-<cpu>_<Nc>.csv         (Linux; needs perf + paranoid<=1)
+```
+`perf_cold.sh` env knobs: `VW` (value words 1|2|4|8), `WS` (MB), `PASSES`, `EVENTS`
+(append an AMD `ls_misal_loads.*` event to measure split loads if `perf list`
+shows it).
 
 ## 9. Summary of what we are confident in
 

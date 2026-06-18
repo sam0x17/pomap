@@ -50,6 +50,10 @@ name = "cold"
 harness = false
 
 [[bench]]
+name = "cold_perf"
+harness = false
+
+[[bench]]
 name = "profile_insert"
 harness = false
 
