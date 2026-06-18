@@ -46,6 +46,10 @@ name = "pomap_bench"
 harness = false
 
 [[bench]]
+name = "cold"
+harness = false
+
+[[bench]]
 name = "profile_insert"
 harness = false
 

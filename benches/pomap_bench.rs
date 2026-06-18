@@ -874,33 +874,89 @@ fn measure_map_bytes<F: FnOnce() -> R, R>(build: F) -> (usize, R) {
     (bytes, map)
 }
 
-fn bench_memory_footprint(c: &mut Criterion) {
-    // Slot sizes for the current BenchKey/BenchValue types.
-    // PoMap:     8 (hash u64) + size_of::<K>() + size_of::<V>()
-    // hashbrown: 1 (control)  + size_of::<K>() + size_of::<V>()
-    // std HashMap is backed by hashbrown so its slot size is the same.
-    const HB_SLOT: usize = 1 + std::mem::size_of::<BenchKey>() + std::mem::size_of::<BenchValue>();
+/// STREAM-triad memory-bandwidth "mountain": sustained throughput at working-set
+/// sizes spanning L1 → DRAM. Gives each platform run a self-reported bandwidth
+/// curve to correlate against PoMap's bandwidth-bound write/bulk results. The
+/// working set is `3 * n * 8` bytes (arrays a/b/c of f64); throughput counts the
+/// two reads + one write per element (24 B). Single-threaded, pinned by the
+/// caller's `taskset`.
+fn bench_bandwidth(_c: &mut Criterion) {
+    use std::time::Instant;
 
+    // (elements per array, human label for the 3-array working set)
+    let configs: [(usize, &str); 6] = [
+        (1 << 10, "24 KiB (L1)"),
+        (1 << 13, "192 KiB (L2)"),
+        (1 << 16, "1.5 MiB (L2/L3)"),
+        (1 << 19, "12 MiB (L3)"),
+        (1 << 22, "96 MiB (L3/DRAM)"),
+        (1 << 24, "384 MiB (DRAM)"),
+    ];
+    let max_n = 1usize << 24;
+    let mut a = vec![0.0f64; max_n];
+    // Index-dependent data so the triad can't be constant-folded.
+    let b: Vec<f64> = (0..max_n).map(|i| i as f64).collect();
+    let cc: Vec<f64> = (0..max_n).map(|i| (i % 7) as f64).collect();
+    let scalar = 3.0f64;
+
+    println!("\n{:<20} {:>12} {:>14}", "working set", "per array", "triad GB/s");
+    println!("{}", "-".repeat(50));
+    for (n, label) in configs {
+        let a = &mut a[..n];
+        let b = &b[..n];
+        let cc = &cc[..n];
+        // ~256M element-updates of total work per size (min 5 iters for stability).
+        let iters = (256_000_000usize / n).max(5);
+        // Warm the working set into cache (for the levels where it fits).
+        for i in 0..n {
+            a[i] = b[i] + scalar * cc[i];
+        }
+        let t0 = Instant::now();
+        for _ in 0..iters {
+            for i in 0..n {
+                a[i] = b[i] + scalar * cc[i];
+            }
+            // Force each outer iteration to be observed so successive triads
+            // aren't collapsed, without pessimizing the inner vectorized loop.
+            black_box(a.as_ptr());
+        }
+        let secs = t0.elapsed().as_secs_f64();
+        let gbps = (n as f64 * 24.0 * iters as f64) / secs / 1e9;
+        println!(
+            "{:<20} {:>9} KiB {:>13.1}",
+            label,
+            n * 8 / 1024,
+            gbps
+        );
+    }
+    black_box(&a);
+}
+
+fn bench_memory_footprint(c: &mut Criterion) {
+    // Reports the REAL retained heap footprint of each map (net bytes held after
+    // a build-from-empty), measured by the tracking global allocator — not a
+    // logical capacity() estimate. bytes/entry and the pm/hb ratio are the
+    // paper-ready memory metrics. Build maps via `with_hasher` (default growth)
+    // so the growth-step geometry is exercised exactly as in real use.
     let sizes = [500usize, 5_000, 50_000, 500_000, 5_000_000];
     let max_size = *sizes.iter().max().unwrap();
     let keys: Vec<BenchKey> = random_items(0xB17E5, max_size);
     let values: Vec<BenchValue> = random_items(0xF007, max_size);
 
     println!(
-        "\n{:<12} {:>14} {:>14} {:>12} {:>12} {:>12}",
-        "entries", "pomap slots", "hb slots", "pm/hb", "pm load%", "hb load%"
+        "\n{:<10} {:>14} {:>14} {:>11} {:>11} {:>9}",
+        "entries", "pomap bytes", "hb bytes", "pm B/ent", "hb B/ent", "pm/hb"
     );
-    println!("{}", "-".repeat(80));
+    println!("{}", "-".repeat(74));
 
     for &size in &sizes {
-        let (_, pm) = measure_map_bytes(|| {
+        let (pm_bytes, pm) = measure_map_bytes(|| {
             let mut m = BenchPoMap::with_hasher(BenchHasherBuilder::default());
             for i in 0..size {
                 m.insert(keys[i].clone(), values[i].clone());
             }
             m
         });
-        let pm_slots = pm.capacity();
         drop(black_box(pm));
 
         let (hb_bytes, hb) = measure_map_bytes(|| {
@@ -910,17 +966,16 @@ fn bench_memory_footprint(c: &mut Criterion) {
             }
             m
         });
-        let hb_slots = hb_bytes / HB_SLOT;
         drop(black_box(hb));
 
         println!(
-            "{:<12} {:>14} {:>14} {:>11.2}x {:>11.1}% {:>11.1}%",
+            "{:<10} {:>14} {:>14} {:>11.1} {:>11.1} {:>8.2}x",
             size,
-            pm_slots,
-            hb_slots,
-            pm_slots as f64 / hb_slots.max(1) as f64,
-            size as f64 / pm_slots as f64 * 100.0,
-            size as f64 / hb_slots.max(1) as f64 * 100.0,
+            pm_bytes,
+            hb_bytes,
+            pm_bytes as f64 / size as f64,
+            hb_bytes as f64 / size as f64,
+            pm_bytes as f64 / hb_bytes.max(1) as f64,
         );
     }
 
@@ -941,7 +996,8 @@ criterion_group!(
     bench_remove_hits,
     bench_remove_misses,
     bench_shrink_to,
-    bench_memory_footprint
+    bench_memory_footprint,
+    bench_bandwidth
 );
 
 criterion_main!(benches);
