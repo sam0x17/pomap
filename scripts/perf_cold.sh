@@ -13,15 +13,20 @@ command -v perf >/dev/null 2>&1 || {
   echo "perf not found. Install linux-tools (e.g. apt install linux-tools-\$(uname -r))."
   exit 1
 }
-# perf_event_paranoid > 1 blocks unprivileged `perf stat` hardware counters.
-par="$(cat /proc/sys/kernel/perf_event_paranoid 2>/dev/null || echo 99)"
-if [ "$par" -gt 1 ] 2>/dev/null && [ "$(id -u)" != 0 ]; then
-  echo "WARNING: perf_event_paranoid=${par} will block hardware counters."
-  echo "  Fix (one of): sudo sysctl kernel.perf_event_paranoid=1"
-  echo "                sudo $0          # run the whole script as root"
-  echo "Continuing — but expect empty counter rows if it is not lowered."
-  echo
+# Hard capability probe — fail LOUDLY now rather than emit a clean-looking empty
+# CSV. perf bails at counter setup (without running the workload) when blocked.
+if ! perf stat -e instructions -- true >/dev/null 2>/tmp/pp.$$; then
+  echo "ERROR: 'perf stat' cannot read counters on this host:"
+  sed 's/^/    /' /tmp/pp.$$
+  par="$(cat /proc/sys/kernel/perf_event_paranoid 2>/dev/null || echo '?')"
+  echo "  perf_event_paranoid = ${par}"
+  echo "  Fix (one of):"
+  echo "    sudo sysctl kernel.perf_event_paranoid=1     # then re-run"
+  echo "    sudo $0                                      # run this whole script as root"
+  rm -f /tmp/pp.$$
+  exit 1
 fi
+rm -f /tmp/pp.$$
 
 VW="${VW:-1}"           # value words: 1=8B 2=16B 4=32B 8=64B
 WS="${WS:-256}"         # working-set MB (must be >> LLC to stay cold across passes)
@@ -52,9 +57,13 @@ pin=""; command -v taskset >/dev/null 2>&1 && pin="taskset -c 2"
 for imp in pomap hashbrown std; do
   for op in get_hit get_miss; do
     perf stat -x, -e "$EVENTS" -o /tmp/perf.$$.csv $pin "$bin" "$imp" "$op" "$VW" "$WS" "$PASSES" \
-      >/tmp/run.$$.out 2>/dev/null || true
+      >/tmp/run.$$.out 2>/tmp/perferr.$$ || true
     ops="$(sed -n 's/^ops=//p' /tmp/run.$$.out)"
-    [ -n "${ops:-}" ] || { printf "%-10s %-9s   (no output)\n" "$imp" "$op"; continue; }
+    if [ -z "${ops:-}" ]; then
+      printf "%-10s %-9s   (no output — perf error below)\n" "$imp" "$op"
+      sed 's/^/      /' /tmp/perferr.$$
+      continue
+    fi
     awk -F, -v ops="$ops" -v imp="$imp" -v op="$op" -v vw="$VW" -v ws="$WS" -v out="$out" '
       $1 ~ /^[0-9]+(\.[0-9]+)?$/ { v[$3]=$1 }
       END {

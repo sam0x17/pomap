@@ -54,3 +54,6 @@ ${run} 2>/dev/null >> "$out"
 
 echo "wrote ${out}"
 echo "rows: $(grep -c '^[0-9]' "$out")"
+echo
+echo "NOTE: this is the wall-clock matrix. For hardware counters (cache/TLB"
+echo "      misses per op, IPC) run the OTHER script:  scripts/perf_cold.sh"
