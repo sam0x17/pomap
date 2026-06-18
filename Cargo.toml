@@ -27,7 +27,7 @@ ratatui = { version = "0.29", optional = true }
 crossterm = { version = "0.28", optional = true }
 
 [dev-dependencies]
-criterion = { path = "../criterion.rs" }
+criterion = { git = "https://github.com/sam0x17/criterion.rs.git", branch = "master" }
 hashbrown = "0.14"
 rand = { version = "0.10.0-rc.5", features = ["std"] }
 proptest = "1"

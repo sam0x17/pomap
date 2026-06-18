@@ -191,6 +191,7 @@ dependencies = [
 [[package]]
 name = "criterion"
 version = "0.7.0"
+source = "git+https://github.com/sam0x17/criterion.rs.git?branch=master#441d4c65ef674d7e87e4cd602a38044224879bb5"
 dependencies = [
  "anes",
  "cast",
@@ -212,6 +213,7 @@ dependencies = [
 [[package]]
 name = "criterion-plot"
 version = "0.7.0"
+source = "git+https://github.com/sam0x17/criterion.rs.git?branch=master#441d4c65ef674d7e87e4cd602a38044224879bb5"
 dependencies = [
  "cast",
  "itertools",
