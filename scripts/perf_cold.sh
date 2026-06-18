@@ -49,7 +49,7 @@ if [ -z "$PERF" ]; then
 fi
 rm -f /tmp/pp.$$
 
-VW="${VW:-1}"           # value words: 1=8B 2=16B 4=32B 8=64B
+VW_LIST="${VW:-1 2 4 8}" # value words to sweep: 1=8B 2=16B 4=32B 8=64B (set VW=1 for just 8B)
 WS="${WS:-256}"         # working-set MB (must be >> LLC to stay cold across passes)
 PASSES="${PASSES:-30}"  # cold passes (build overhead ~ 1/PASSES)
 # Generic events map to AMD PMU. For misaligned/split loads on AMD add e.g.
@@ -69,40 +69,42 @@ bin="$(sed -n 's/.*(\(target[^)]*cold_perf[^)]*\)).*/\1/p' /tmp/pb.$$ | tail -1)
 [ -x "$bin" ] || { echo "could not locate cold_perf binary"; exit 1; }
 
 echo "# cpu: ${cpu_raw}"  | tee "$out"
-{ echo "# cores: ${cores}"; echo "# config: value_words=${VW} ws_mb=${WS} passes=${PASSES}";
+{ echo "# cores: ${cores}"; echo "# config: value_words={${VW_LIST}} ws_mb=${WS} passes=${PASSES}";
   echo "# events: ${EVENTS}"; echo "# date_utc: $(date -u +%Y-%m-%dT%H:%M:%SZ)"; } | tee -a "$out"
 echo "impl,op,value_words,ws_mb,ops,instr_per_op,cyc_per_op,ipc,l1miss_per_op,llcmiss_per_op,dtlbmiss_per_op,cachemiss_per_op" >> "$out"
 
-printf "\n%-10s %-9s %11s %10s %10s %10s %6s\n" impl op LLCmiss/op L1miss/op dTLB/op instr/op IPC
+printf "\n%-4s %-10s %-9s %11s %10s %10s %10s %6s\n" valB impl op LLCmiss/op L1miss/op dTLB/op instr/op IPC
 pin=""; command -v taskset >/dev/null 2>&1 && pin="taskset -c 2"
-for imp in pomap hashbrown std; do
-  for op in get_hit get_miss; do
-    # taskset (shell) -> $PERF -> binary, so perf never has to exec taskset itself.
-    # perf -x, writes CSV to stderr (no -o) → user-owned redirect even under sudo.
-    $pin $PERF stat -x, -e "$EVENTS" "$bin" "$imp" "$op" "$VW" "$WS" "$PASSES" \
-      >/tmp/run.$$.out 2>/tmp/perf.$$.csv || true
-    ops="$(grep -oE 'ops=[0-9]+' /tmp/run.$$.out | head -1 | cut -d= -f2)"
-    if [ -z "${ops:-}" ]; then
-      printf "%-10s %-9s   (no output — see error logged to CSV)\n" "$imp" "$op"
-      # Log the failure INTO the CSV so a copied-back file is self-diagnosing.
-      {
-        echo "# ERROR ${imp}/${op}: binary produced no 'ops=' line. perf stderr + run stdout:"
-        sed 's/^/#   perf: /' /tmp/perf.$$.csv
-        sed 's/^/#   run:  /' /tmp/run.$$.out
-      } >> "$out"
-      continue
-    fi
-    awk -F, -v ops="$ops" -v imp="$imp" -v op="$op" -v vw="$VW" -v ws="$WS" -v out="$out" '
-      $1 ~ /^[0-9]+(\.[0-9]+)?$/ { v[$3]=$1 }
-      END {
-        ins=v["instructions"]; cyc=v["cycles"];
-        ipc = (cyc>0)? ins/cyc : 0;
-        l1=v["L1-dcache-load-misses"]/ops; llc=v["LLC-load-misses"]/ops;
-        dt=v["dTLB-load-misses"]/ops; cm=v["cache-misses"]/ops;
-        printf "%-10s %-9s %11.3f %10.3f %10.3f %10.1f %6.2f\n", imp, op, llc, l1, dt, ins/ops, ipc;
-        printf "%s,%s,%s,%s,%s,%.1f,%.1f,%.3f,%.4f,%.4f,%.4f,%.4f\n",
-               imp,op,vw,ws,ops, ins/ops, cyc/ops, ipc, l1, llc, dt, cm >> out;
-      }' /tmp/perf.$$.csv
+for VW in $VW_LIST; do
+  vb=$((VW * 8))
+  for imp in pomap hashbrown std; do
+    for op in get_hit get_miss; do
+      # taskset (shell) -> $PERF -> binary, so perf never has to exec taskset itself.
+      # perf -x, writes CSV to stderr (no -o) → user-owned redirect even under sudo.
+      $pin $PERF stat -x, -e "$EVENTS" "$bin" "$imp" "$op" "$VW" "$WS" "$PASSES" \
+        >/tmp/run.$$.out 2>/tmp/perf.$$.csv || true
+      ops="$(grep -oE 'ops=[0-9]+' /tmp/run.$$.out | head -1 | cut -d= -f2)"
+      if [ -z "${ops:-}" ]; then
+        printf "%-4s %-10s %-9s   (no output — see error logged to CSV)\n" "$vb" "$imp" "$op"
+        {
+          echo "# ERROR vb=${vb} ${imp}/${op}: binary produced no 'ops=' line. perf stderr + run stdout:"
+          sed 's/^/#   perf: /' /tmp/perf.$$.csv
+          sed 's/^/#   run:  /' /tmp/run.$$.out
+        } >> "$out"
+        continue
+      fi
+      awk -F, -v ops="$ops" -v vb="$vb" -v imp="$imp" -v op="$op" -v vw="$VW" -v ws="$WS" -v out="$out" '
+        $1 ~ /^[0-9]+(\.[0-9]+)?$/ { v[$3]=$1 }
+        END {
+          ins=v["instructions"]; cyc=v["cycles"];
+          ipc = (cyc>0)? ins/cyc : 0;
+          l1=v["L1-dcache-load-misses"]/ops; llc=v["LLC-load-misses"]/ops;
+          dt=v["dTLB-load-misses"]/ops; cm=v["cache-misses"]/ops;
+          printf "%-4s %-10s %-9s %11.3f %10.3f %10.3f %10.1f %6.2f\n", vb, imp, op, llc, l1, dt, ins/ops, ipc;
+          printf "%s,%s,%s,%s,%s,%.1f,%.1f,%.3f,%.4f,%.4f,%.4f,%.4f\n",
+                 imp,op,vw,ws,ops, ins/ops, cyc/ops, ipc, l1, llc, dt, cm >> out;
+        }' /tmp/perf.$$.csv
+    done
   done
 done
 rm -f /tmp/perf.$$.csv /tmp/run.$$.out /tmp/pb.$$
