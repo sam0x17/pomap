@@ -77,14 +77,19 @@ printf "\n%-10s %-9s %11s %10s %10s %10s %6s\n" impl op LLCmiss/op L1miss/op dTL
 pin=""; command -v taskset >/dev/null 2>&1 && pin="taskset -c 2"
 for imp in pomap hashbrown std; do
   for op in get_hit get_miss; do
-    # perf -x, writes its CSV to stderr (no -o), so the redirect below is owned by
-    # the invoking user even when perf runs under sudo — the cleanup rm then works.
-    $PERF stat -x, -e "$EVENTS" $pin "$bin" "$imp" "$op" "$VW" "$WS" "$PASSES" \
+    # taskset (shell) -> $PERF -> binary, so perf never has to exec taskset itself.
+    # perf -x, writes CSV to stderr (no -o) → user-owned redirect even under sudo.
+    $pin $PERF stat -x, -e "$EVENTS" "$bin" "$imp" "$op" "$VW" "$WS" "$PASSES" \
       >/tmp/run.$$.out 2>/tmp/perf.$$.csv || true
-    ops="$(sed -n 's/^ops=//p' /tmp/run.$$.out)"
+    ops="$(grep -oE 'ops=[0-9]+' /tmp/run.$$.out | head -1 | cut -d= -f2)"
     if [ -z "${ops:-}" ]; then
-      printf "%-10s %-9s   (no output — perf stderr below)\n" "$imp" "$op"
-      sed 's/^/      /' /tmp/perf.$$.csv
+      printf "%-10s %-9s   (no output — see error logged to CSV)\n" "$imp" "$op"
+      # Log the failure INTO the CSV so a copied-back file is self-diagnosing.
+      {
+        echo "# ERROR ${imp}/${op}: binary produced no 'ops=' line. perf stderr + run stdout:"
+        sed 's/^/#   perf: /' /tmp/perf.$$.csv
+        sed 's/^/#   run:  /' /tmp/run.$$.out
+      } >> "$out"
       continue
     fi
     awk -F, -v ops="$ops" -v imp="$imp" -v op="$op" -v vw="$VW" -v ws="$WS" -v out="$out" '

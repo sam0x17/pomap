@@ -57,16 +57,16 @@ deficit to win as memory bandwidth grows** (laptop/desktop → server). The unif
 mechanism is the **memory hierarchy**, and the advantage is therefore largest
 exactly where real large-map workloads live — **cold, low-locality access**:
 
-- *Cold reads.* A PoMap lookup touches **one cache line** — the hash is inline
-  with its (K, V), so probe + filter + fetch is a single line (one miss, one TLB
-  entry). A SwissTable lookup touches **two**: the control-byte group, then the
-  entry in a *separate* array (two independent misses, two TLB entries). When data
-  is cold (DRAM/L3-resident, the common case for large maps), halving the misses
-  is close to a 2× latency advantage; when everything is hot in L1 the miss
-  difference vanishes and the gap narrows to instruction throughput. PoMap's read
-  edge thus *widens with working-set size and coldness*; **below the cache
-  boundary (warm) hashbrown's SIMD throughput wins** — it is a crossover, measured
-  in §5.6, not a blanket read win. (Misses are the exception even cold — §5.6.)
+- *Cold reads.* A PoMap lookup keeps the hash inline with its (K, V), so probe +
+  filter + fetch hit one contiguous region; a SwissTable lookup touches the
+  control-byte group *and* the entry in a separate array. perf on the cold-hit
+  path (§5.6) attributes PoMap's win to **two measured effects**: ~30% fewer
+  instructions (no SIMD control-scan machinery) and ~26% fewer L1-dcache misses
+  (fewer lines touched) — netting ~0.65× the cycles. (The precise DRAM/LLC-miss
+  count is unconfirmed — the VM lacks L3 counters; bare-metal TODO.) The edge
+  *widens with working-set size and coldness*; **below the cache boundary (warm)
+  hashbrown's SIMD throughput wins** — a crossover (§5.6), not a blanket read win,
+  and misses are the exception even cold.
 - *Cold writes.* PoMap's inserts/repacks/backshifts are sequential streaming;
   SwissTable growth rehashes (scatter). Cold and bandwidth-bound, sequential wins
   — hence the server-CPU inversion.
@@ -395,23 +395,38 @@ advantage** — exactly the direction the bandwidth thesis predicts:
 Caveats: Zen 5c is a **virtualized 8-vCPU slice of a 160-core part** (ratios
 meaningful, absolutes VM-soft); single run, median-of-3 — several cells are noisy
 (trust the trends, not individual cells). **Zen 4 (9354P) matrix not yet captured.**
-**Mechanism, to be settled by `perf` (`scripts/perf_cold.sh` + `benches/cold_perf.rs`,
-Linux):** the harness runs `perf stat` per impl×op (30 cold passes over a 256 MiB
-working set, no inter-pass eviction so counts are clean) and reports per-op
-`instructions`, IPC, and L1 / LLC / dTLB load-misses. It will resolve *which*
-mechanism drives the cold-hit win — the two candidates differ and we should not
-assert one unmeasured:
-- **"2 lines vs 1"** in the strong form (hashbrown ≈ 2 *DRAM* misses/lookup) only
-  holds if the control array also misses DRAM. At sizes where the 1-byte control
-  array is LLC-resident, hashbrown is really **1 DRAM miss (entry) + 1 LLC-latency
-  control access + SIMD**, and PoMap's ~15–35% win is that control+SIMD overhead,
-  not a 2× miss count. The `perf` LLC-load-misses/op (expect ≈1 for both vs ≈2)
-  vs L1-misses/op (expect ~1 vs ~2 — total line touches) distinguishes these.
-- dTLB-load-misses/op tests the page-pressure angle (PoMap one big array vs
-  hashbrown's small control + big entry).
+**Mechanism — perf-measured (Zen 5c VM, `get_hit`, 256 MiB WS, 30 passes).**
+Per-op counters, pomap vs hashbrown:
 
-Run on Zen 5c (perf works there): `scripts/perf_cold.sh` → `perf-<cpu>_<Nc>.csv`.
-**[TODO]:** Zen 4 matrix + perf when the box returns.
+| metric | pomap | hashbrown | pm/hb |
+|---|---|---|---|
+| instructions/op | 56.8 | 79.5 | **0.71** |
+| cycles/op | 179 | 277 | **0.65** |
+| L1-dcache-miss/op | 2.63 | 3.55 | **0.74** |
+| cache(L2)-miss/op | 3.64 | 4.56 | 0.80 |
+| dTLB-miss/op | 2.02 | 2.15 | 0.94 |
+
+The cold-hit win is driven by **two measured mechanisms**: (1) **~30% fewer
+instructions** — hashbrown's control-group load + `pcmpeqb`/`pmovmskb`/mask-scan
+machinery that PoMap's scalar inline scan avoids (confirms the SIMD-overhead
+claim); (2) **~26% fewer L1-dcache misses** — fewer cache lines touched (the
+locality claim). The cycles ratio (0.65×) matches the wall-clock cold-hit ratio.
+**So the earlier strong "2 DRAM misses vs 1" should be stated as "fewer cache-line
+misses + fewer instructions"** — the L1-miss ratio is 0.74×, not 0.5×, and absolute
+counts include ~1 key-array miss/op of harness overhead common to all impls.
+
+**Two hard limits of this measurement:**
+- **`LLC-loads`/`LLC-load-misses` are `<not supported>` on the VM** (no L3 PMU
+  passthrough), so the precise DRAM-miss count — the cleanest test of the
+  1-vs-2-line story — is *unconfirmed* and deferred to the bare-metal Zen 4 box.
+- **The `get_miss` perf rows are unrepresentative.** The harness does not evict
+  between the 30 passes (to keep counts clean), so hashbrown's ~15 MB control
+  array warms into L3 and its miss looks cheap — *not* the cold-miss regime. The
+  cold-miss verdict stays with the wall-clock matrix (PoMap loses).
+
+**[TODO]:** bare-metal Zen 4 for LLC counters + a cold-miss-faithful perf variant.
+(Tooling note: an `ops=` parse bug blanked the first CSVs; data above came from the
+captured perf stderr. Fixed — re-runs now populate `perf-<cpu>_<Nc>.csv` directly.)
 
 ## 6. Negative results (worth a paper subsection)
 
