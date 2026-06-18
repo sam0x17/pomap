@@ -1,0 +1,12 @@
+# cpu:  AMD EPYC 9845 160-Core Processor
+# cores: 8
+# config: value_words=1 ws_mb=256 passes=30
+# events: instructions,cycles,cache-misses,L1-dcache-load-misses,LLC-loads,LLC-load-misses,dTLB-load-misses
+# date_utc: 2026-06-18T23:16:55Z
+impl,op,value_words,ws_mb,ops,instr_per_op,cyc_per_op,ipc,l1miss_per_op,llcmiss_per_op,dtlbmiss_per_op,cachemiss_per_op
+pomap,get_hit,1,256,335544300,56.8,177.6,0.320,2.6325,0.0000,1.7628,3.6631
+pomap,get_miss,1,256,335544300,50.2,161.1,0.312,2.4531,0.0000,2.0008,3.4501
+hashbrown,get_hit,1,256,335544300,79.5,281.2,0.283,3.5503,0.0000,2.5279,4.5293
+hashbrown,get_miss,1,256,335544300,74.6,174.0,0.429,2.6678,0.0000,1.3459,2.8266
+std,get_hit,1,256,335544300,66.3,214.1,0.310,3.5482,0.0000,2.1462,4.4976
+std,get_miss,1,256,335544300,66.2,132.6,0.499,2.6579,0.0000,1.3390,2.7832
