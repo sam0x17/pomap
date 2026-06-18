@@ -9,20 +9,41 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
+# IMPORTANT: run this as your NORMAL user (NOT sudo). Building needs cargo (in
+# your ~/.cargo/bin); only counter access needs privilege, and the script
+# elevates *just* `perf` itself via sudo when required.
+command -v cargo >/dev/null 2>&1 || {
+  echo "cargo not found in PATH."
+  if [ "$(id -u)" = 0 ]; then
+    echo "  You ran this as root — cargo lives in your normal user's ~/.cargo/bin."
+    echo "  Re-run as your NORMAL user (no sudo); the script sudo's only perf:"
+    echo "      scripts/perf_cold.sh"
+  fi
+  exit 1
+}
 command -v perf >/dev/null 2>&1 || {
   echo "perf not found. Install linux-tools (e.g. apt install linux-tools-\$(uname -r))."
   exit 1
 }
-# Hard capability probe — fail LOUDLY now rather than emit a clean-looking empty
-# CSV. perf bails at counter setup (without running the workload) when blocked.
-if ! perf stat -e instructions -- true >/dev/null 2>/tmp/pp.$$; then
-  echo "ERROR: 'perf stat' cannot read counters on this host:"
+
+# Capability probe: prefer unprivileged perf; fall back to `sudo perf` (which
+# bypasses perf_event_paranoid). Fail LOUDLY if neither can read counters.
+PERF=""
+if perf stat -e instructions -- true >/dev/null 2>/tmp/pp.$$; then
+  PERF="perf"
+else
+  echo "unprivileged perf is blocked; trying via sudo (may prompt for password)…"
+  if sudo perf stat -e instructions -- true >/dev/null 2>/tmp/pp.$$; then
+    PERF="sudo perf"
+    sudo -v   # cache credentials so the measurement loop doesn't re-prompt
+  fi
+fi
+if [ -z "$PERF" ]; then
+  echo "ERROR: perf cannot read counters, even via sudo:"
   sed 's/^/    /' /tmp/pp.$$
-  par="$(cat /proc/sys/kernel/perf_event_paranoid 2>/dev/null || echo '?')"
-  echo "  perf_event_paranoid = ${par}"
-  echo "  Fix (one of):"
-  echo "    sudo sysctl kernel.perf_event_paranoid=1     # then re-run"
-  echo "    sudo $0                                      # run this whole script as root"
+  echo "  perf_event_paranoid = $(cat /proc/sys/kernel/perf_event_paranoid 2>/dev/null || echo '?')"
+  echo "  If the events read '<not supported>', this VM has no PMU passthrough —"
+  echo "  hardware counters are unavailable here; use the bare-metal box instead."
   rm -f /tmp/pp.$$
   exit 1
 fi
@@ -56,12 +77,14 @@ printf "\n%-10s %-9s %11s %10s %10s %10s %6s\n" impl op LLCmiss/op L1miss/op dTL
 pin=""; command -v taskset >/dev/null 2>&1 && pin="taskset -c 2"
 for imp in pomap hashbrown std; do
   for op in get_hit get_miss; do
-    perf stat -x, -e "$EVENTS" -o /tmp/perf.$$.csv $pin "$bin" "$imp" "$op" "$VW" "$WS" "$PASSES" \
-      >/tmp/run.$$.out 2>/tmp/perferr.$$ || true
+    # perf -x, writes its CSV to stderr (no -o), so the redirect below is owned by
+    # the invoking user even when perf runs under sudo — the cleanup rm then works.
+    $PERF stat -x, -e "$EVENTS" $pin "$bin" "$imp" "$op" "$VW" "$WS" "$PASSES" \
+      >/tmp/run.$$.out 2>/tmp/perf.$$.csv || true
     ops="$(sed -n 's/^ops=//p' /tmp/run.$$.out)"
     if [ -z "${ops:-}" ]; then
-      printf "%-10s %-9s   (no output — perf error below)\n" "$imp" "$op"
-      sed 's/^/      /' /tmp/perferr.$$
+      printf "%-10s %-9s   (no output — perf stderr below)\n" "$imp" "$op"
+      sed 's/^/      /' /tmp/perf.$$.csv
       continue
     fi
     awk -F, -v ops="$ops" -v imp="$imp" -v op="$op" -v vw="$VW" -v ws="$WS" -v out="$out" '
