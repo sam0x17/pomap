@@ -1,0 +1,6 @@
+# cpu:  AMD EPYC 9845 160-Core Processor
+# cores: 8
+# config: value_words=1 ws_mb=256 passes=30
+# events: instructions,cycles,cache-misses,L1-dcache-load-misses,LLC-loads,LLC-load-misses,dTLB-load-misses
+# date_utc: 2026-06-18T23:01:39Z
+impl,op,value_words,ws_mb,ops,instr_per_op,cyc_per_op,ipc,l1miss_per_op,llcmiss_per_op,dtlbmiss_per_op,cachemiss_per_op
