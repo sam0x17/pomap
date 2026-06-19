@@ -1,0 +1,360 @@
+   Compiling pomap v0.1.0 (/home/sam/workspace/pomap)
+    Finished `bench` profile [optimized] target(s) in 22.76s
+     Running benches/pomap_bench.rs (target/release/deps/pomap_bench-567bbb196fcbe83e)
+Gnuplot not found, using plotters backend
+Benchmarking insert_allocate/pomap
+Benchmarking insert_allocate/pomap: Warming up for 3.0000 s
+
+Warning: Unable to complete 100 samples in 5.0s. You may wish to increase target time to 6.8s, or reduce sample count to 70.
+Benchmarking insert_allocate/pomap: Collecting 100 samples in estimated 6.7999 s (100 iterations)
+Benchmarking insert_allocate/pomap: Analyzing
+insert_allocate/pomap   time:   [66.922 ms 66.959 ms 66.999 ms]
+                        change: [+0.0583% +0.1812% +0.3039%] (p = 0.00 < 0.05)
+                        Change within noise threshold.
+Found 5 outliers among 100 measurements (5.00%)
+  1 (1.00%) low mild
+  1 (1.00%) high mild
+  3 (3.00%) high severe
+Benchmarking insert_allocate/std_hashmap
+Benchmarking insert_allocate/std_hashmap: Warming up for 3.0000 s
+
+Warning: Unable to complete 100 samples in 5.0s. You may wish to increase target time to 7.8s, or reduce sample count to 60.
+Benchmarking insert_allocate/std_hashmap: Collecting 100 samples in estimated 7.8058 s (100 iterations)
+Benchmarking insert_allocate/std_hashmap: Analyzing
+insert_allocate/std_hashmap
+                        time:   [78.028 ms 78.049 ms 78.070 ms]
+                        change: [+2.8296% +2.8931% +2.9557%] (p = 0.00 < 0.05)
+                        Performance has regressed.
+Benchmarking insert_allocate/hashbrown
+Benchmarking insert_allocate/hashbrown: Warming up for 3.0000 s
+
+Warning: Unable to complete 100 samples in 5.0s. You may wish to increase target time to 8.4s, or reduce sample count to 50.
+Benchmarking insert_allocate/hashbrown: Collecting 100 samples in estimated 8.4244 s (100 iterations)
+Benchmarking insert_allocate/hashbrown: Analyzing
+insert_allocate/hashbrown
+                        time:   [84.222 ms 84.245 ms 84.270 ms]
+                        change: [+3.0281% +3.1536% +3.2645%] (p = 0.00 < 0.05)
+                        Performance has regressed.
+Found 3 outliers among 100 measurements (3.00%)
+  3 (3.00%) high mild
+Comparison for group 'insert_allocate':
+  Higher is better; best performer is 1.00 (typical).
+      1st insert_allocate/pomap:       1.000 (66.959 ms), change: [0.000, +0.1812%], rank: [16.6% faster than 2nd]
+      2nd insert_allocate/std_hashmap: 0.858 (78.049 ms), change: [-0.023, +2.8931%], rank: [16.6% slower than 1st, 7.9% faster than 3rd]
+      3rd insert_allocate/hashbrown:   0.795 (84.245 ms), change: [-0.024, +3.1536%], rank: [7.9% slower than 2nd]
+
+Benchmarking insert_preallocated/pomap
+Benchmarking insert_preallocated/pomap: Warming up for 3.0000 s
+Benchmarking insert_preallocated/pomap: Collecting 100 samples in estimated 8.0455 s (200 iterations)
+Benchmarking insert_preallocated/pomap: Analyzing
+insert_preallocated/pomap
+                        time:   [40.317 ms 40.333 ms 40.352 ms]
+                        change: [+1.4050% +1.4558% +1.5094%] (p = 0.00 < 0.05)
+                        Performance has regressed.
+Found 2 outliers among 100 measurements (2.00%)
+  2 (2.00%) high severe
+Benchmarking insert_preallocated/std_hashmap
+Benchmarking insert_preallocated/std_hashmap: Warming up for 3.0000 s
+Benchmarking insert_preallocated/std_hashmap: Collecting 100 samples in estimated 6.9096 s (200 iterations)
+Benchmarking insert_preallocated/std_hashmap: Analyzing
+insert_preallocated/std_hashmap
+                        time:   [34.589 ms 34.605 ms 34.622 ms]
+                        change: [−0.9469% −0.8852% −0.8254%] (p = 0.00 < 0.05)
+                        Change within noise threshold.
+Found 3 outliers among 100 measurements (3.00%)
+  3 (3.00%) high mild
+Benchmarking insert_preallocated/hashbrown
+Benchmarking insert_preallocated/hashbrown: Warming up for 3.0000 s
+Benchmarking insert_preallocated/hashbrown: Collecting 100 samples in estimated 6.9549 s (200 iterations)
+Benchmarking insert_preallocated/hashbrown: Analyzing
+insert_preallocated/hashbrown
+                        time:   [34.906 ms 34.961 ms 35.027 ms]
+                        change: [−0.2980% −0.1384% +0.0351%] (p = 0.13 > 0.05)
+                        No change in performance detected.
+Found 11 outliers among 100 measurements (11.00%)
+  2 (2.00%) high mild
+  9 (9.00%) high severe
+Comparison for group 'insert_preallocated':
+  Higher is better; best performer is 1.00 (typical).
+      1st insert_preallocated/std_hashmap: 1.000 (34.605 ms), change: [0.000, −0.8852%], rank: [1.0% faster than 2nd]
+      2nd insert_preallocated/hashbrown:   0.990 (34.961 ms), change: [-0.007, −0.1384%], rank: [1.0% slower than 1st, 15.4% faster than 3rd]
+      3rd insert_preallocated/pomap:       0.858 (40.333 ms), change: [-0.020, +1.4558%], rank: [15.4% slower than 2nd]
+
+Benchmarking get_hits/pomap
+Benchmarking get_hits/pomap: Warming up for 3.0000 s
+Benchmarking get_hits/pomap: Collecting 100 samples in estimated 5.1937 s (91k iterations)
+Benchmarking get_hits/pomap: Analyzing
+get_hits/pomap          time:   [56.651 µs 56.702 µs 56.757 µs]
+                        change: [+1.6466% +1.8500% +2.0521%] (p = 0.00 < 0.05)
+                        Performance has regressed.
+Found 5 outliers among 100 measurements (5.00%)
+  1 (1.00%) low severe
+  4 (4.00%) high mild
+Benchmarking get_hits/std_hashmap
+Benchmarking get_hits/std_hashmap: Warming up for 3.0000 s
+Benchmarking get_hits/std_hashmap: Collecting 100 samples in estimated 5.3142 s (56k iterations)
+Benchmarking get_hits/std_hashmap: Analyzing
+get_hits/std_hashmap    time:   [95.448 µs 95.492 µs 95.538 µs]
+                        change: [+2.9640% +3.1623% +3.3297%] (p = 0.00 < 0.05)
+                        Performance has regressed.
+Found 4 outliers among 100 measurements (4.00%)
+  4 (4.00%) high mild
+Benchmarking get_hits/hashbrown
+Benchmarking get_hits/hashbrown: Warming up for 3.0000 s
+Benchmarking get_hits/hashbrown: Collecting 100 samples in estimated 5.5520 s (50k iterations)
+Benchmarking get_hits/hashbrown: Analyzing
+get_hits/hashbrown      time:   [109.81 µs 110.00 µs 110.23 µs]
+                        change: [−1.5676% −1.2538% −0.9382%] (p = 0.00 < 0.05)
+                        Change within noise threshold.
+Found 8 outliers among 100 measurements (8.00%)
+  1 (1.00%) low mild
+  2 (2.00%) high mild
+  5 (5.00%) high severe
+Comparison for group 'get_hits':
+  Higher is better; best performer is 1.00 (typical).
+      1st get_hits/pomap:       1.000 (56.702 µs), change: [0.000, +1.8500%], rank: [68.4% faster than 2nd]
+      2nd get_hits/std_hashmap: 0.594 (95.492 µs), change: [-0.008, +3.1623%], rank: [68.4% slower than 1st, 15.2% faster than 3rd]
+      3rd get_hits/hashbrown:   0.515 (110.00 µs), change: [+0.016, −1.2538%], rank: [15.2% slower than 2nd]
+
+Benchmarking get_misses/pomap
+Benchmarking get_misses/pomap: Warming up for 3.0000 s
+Benchmarking get_misses/pomap: Collecting 100 samples in estimated 5.2442 s (101k iterations)
+Benchmarking get_misses/pomap: Analyzing
+get_misses/pomap        time:   [50.481 µs 50.811 µs 51.202 µs]
+                        change: [+3.7256% +4.5166% +5.2378%] (p = 0.00 < 0.05)
+                        Performance has regressed.
+Benchmarking get_misses/std_hashmap
+Benchmarking get_misses/std_hashmap: Warming up for 3.0000 s
+Benchmarking get_misses/std_hashmap: Collecting 100 samples in estimated 5.1289 s (101k iterations)
+Benchmarking get_misses/std_hashmap: Analyzing
+get_misses/std_hashmap  time:   [50.673 µs 50.857 µs 51.042 µs]
+                        change: [+3.6767% +3.9572% +4.2874%] (p = 0.00 < 0.05)
+                        Performance has regressed.
+Found 1 outliers among 100 measurements (1.00%)
+  1 (1.00%) high mild
+Benchmarking get_misses/hashbrown
+Benchmarking get_misses/hashbrown: Warming up for 3.0000 s
+Benchmarking get_misses/hashbrown: Collecting 100 samples in estimated 5.2516 s (96k iterations)
+Benchmarking get_misses/hashbrown: Analyzing
+get_misses/hashbrown    time:   [54.178 µs 54.224 µs 54.276 µs]
+                        change: [−5.1583% −5.0218% −4.8863%] (p = 0.00 < 0.05)
+                        Performance has improved.
+Found 2 outliers among 100 measurements (2.00%)
+  1 (1.00%) high mild
+  1 (1.00%) high severe
+Comparison for group 'get_misses':
+  Higher is better; best performer is 1.00 (typical).
+      1st get_misses/pomap:       1.000 (50.811 µs), change: [0.000, +4.5166%], rank: [0.1% faster than 2nd]
+      2nd get_misses/std_hashmap: 0.999 (50.857 µs), change: [+0.005, +3.9572%], rank: [0.1% slower than 1st, 6.6% faster than 3rd]
+      3rd get_misses/hashbrown:   0.937 (54.224 µs), change: [+0.086, −5.0218%], rank: [6.6% slower than 2nd]
+
+Benchmarking update_existing/pomap
+Benchmarking update_existing/pomap: Warming up for 3.0000 s
+Benchmarking update_existing/pomap: Collecting 100 samples in estimated 5.0578 s (106k iterations)
+Benchmarking update_existing/pomap: Analyzing
+update_existing/pomap   time:   [47.530 µs 47.573 µs 47.621 µs]
+                        change: [−0.3924% −0.2529% −0.1180%] (p = 0.00 < 0.05)
+                        Change within noise threshold.
+Found 5 outliers among 100 measurements (5.00%)
+  1 (1.00%) low mild
+  4 (4.00%) high mild
+Benchmarking update_existing/std_hashmap
+Benchmarking update_existing/std_hashmap: Warming up for 3.0000 s
+Benchmarking update_existing/std_hashmap: Collecting 100 samples in estimated 5.2132 s (35k iterations)
+Benchmarking update_existing/std_hashmap: Analyzing
+update_existing/std_hashmap
+                        time:   [146.48 µs 146.58 µs 146.69 µs]
+                        change: [−0.4283% −0.2168% +0.0410%] (p = 0.07 > 0.05)
+                        No change in performance detected.
+Found 7 outliers among 100 measurements (7.00%)
+  4 (4.00%) high mild
+  3 (3.00%) high severe
+Benchmarking update_existing/hashbrown
+Benchmarking update_existing/hashbrown: Warming up for 3.0000 s
+Benchmarking update_existing/hashbrown: Collecting 100 samples in estimated 5.7191 s (35k iterations)
+Benchmarking update_existing/hashbrown: Analyzing
+update_existing/hashbrown
+                        time:   [161.36 µs 161.44 µs 161.52 µs]
+                        change: [+1.8994% +2.5821% +3.2912%] (p = 0.00 < 0.05)
+                        Performance has regressed.
+Found 5 outliers among 100 measurements (5.00%)
+  4 (4.00%) high mild
+  1 (1.00%) high severe
+Comparison for group 'update_existing':
+  Higher is better; best performer is 1.00 (typical).
+      1st update_existing/pomap:       1.000 (47.573 µs), change: [0.000, −0.2529%], rank: [3.08x faster than 2nd]
+      2nd update_existing/std_hashmap: 0.325 (146.58 µs), change: [0.000, −0.2168%], rank: [3.08x slower than 1st, 10.1% faster than 3rd]
+      3rd update_existing/hashbrown:   0.295 (161.44 µs), change: [-0.008, +2.5821%], rank: [10.1% slower than 2nd]
+
+Benchmarking get_hotset/pomap
+Benchmarking get_hotset/pomap: Warming up for 3.0000 s
+Benchmarking get_hotset/pomap: Collecting 100 samples in estimated 5.0173 s (131k iterations)
+Benchmarking get_hotset/pomap: Analyzing
+get_hotset/pomap        time:   [37.993 µs 38.011 µs 38.031 µs]
+                        change: [+0.8959% +1.0207% +1.1538%] (p = 0.00 < 0.05)
+                        Change within noise threshold.
+Found 3 outliers among 100 measurements (3.00%)
+  1 (1.00%) low severe
+  1 (1.00%) high mild
+  1 (1.00%) high severe
+Benchmarking get_hotset/std_hashmap
+Benchmarking get_hotset/std_hashmap: Warming up for 3.0000 s
+Benchmarking get_hotset/std_hashmap: Collecting 100 samples in estimated 5.1750 s (76k iterations)
+Benchmarking get_hotset/std_hashmap: Analyzing
+get_hotset/std_hashmap  time:   [67.969 µs 67.998 µs 68.027 µs]
+                        change: [+0.5579% +0.9235% +1.5211%] (p = 0.00 < 0.05)
+                        Change within noise threshold.
+Found 5 outliers among 100 measurements (5.00%)
+  3 (3.00%) high mild
+  2 (2.00%) high severe
+Benchmarking get_hotset/hashbrown
+Benchmarking get_hotset/hashbrown: Warming up for 3.0000 s
+Benchmarking get_hotset/hashbrown: Collecting 100 samples in estimated 5.0828 s (71k iterations)
+Benchmarking get_hotset/hashbrown: Analyzing
+get_hotset/hashbrown    time:   [71.220 µs 71.252 µs 71.288 µs]
+                        change: [−8.4060% −7.1229% −5.3150%] (p = 0.00 < 0.05)
+                        Performance has improved.
+Found 11 outliers among 100 measurements (11.00%)
+  1 (1.00%) low mild
+  4 (4.00%) high mild
+  6 (6.00%) high severe
+Comparison for group 'get_hotset':
+  Higher is better; best performer is 1.00 (typical).
+      1st get_hotset/pomap:       1.000 (38.011 µs), change: [0.000, +1.0207%], rank: [78.9% faster than 2nd]
+      2nd get_hotset/std_hashmap: 0.559 (67.998 µs), change: [+0.001, +0.9235%], rank: [78.9% slower than 1st, 4.8% faster than 3rd]
+      3rd get_hotset/hashbrown:   0.533 (71.252 µs), change: [+0.043, −7.1229%], rank: [4.8% slower than 2nd]
+
+Benchmarking remove_hits/pomap
+Benchmarking remove_hits/pomap: Warming up for 3.0000 s
+
+Warning: Unable to complete 100 samples in 5.0s. You may wish to increase target time to 6.3s, or reduce sample count to 70.
+Benchmarking remove_hits/pomap: Collecting 100 samples in estimated 6.2855 s (100 iterations)
+Benchmarking remove_hits/pomap: Analyzing
+remove_hits/pomap       time:   [338.18 µs 340.68 µs 343.33 µs]
+                        change: [+6.1611% +7.2579% +8.3373%] (p = 0.00 < 0.05)
+                        Performance has regressed.
+Found 1 outliers among 100 measurements (1.00%)
+  1 (1.00%) high mild
+Benchmarking remove_hits/std_hashmap
+Benchmarking remove_hits/std_hashmap: Warming up for 3.0000 s
+Benchmarking remove_hits/std_hashmap: Collecting 100 samples in estimated 5.4882 s (300 iterations)
+Benchmarking remove_hits/std_hashmap: Analyzing
+remove_hits/std_hashmap time:   [557.72 µs 560.05 µs 562.55 µs]
+                        change: [+5.9175% +6.5437% +7.1842%] (p = 0.00 < 0.05)
+                        Performance has regressed.
+Found 7 outliers among 100 measurements (7.00%)
+  6 (6.00%) high mild
+  1 (1.00%) high severe
+Benchmarking remove_hits/hashbrown
+Benchmarking remove_hits/hashbrown: Warming up for 3.0000 s
+Benchmarking remove_hits/hashbrown: Collecting 100 samples in estimated 6.6058 s (300 iterations)
+Benchmarking remove_hits/hashbrown: Analyzing
+remove_hits/hashbrown   time:   [578.27 µs 580.95 µs 583.83 µs]
+                        change: [+5.6955% +6.3321% +6.9596%] (p = 0.00 < 0.05)
+                        Performance has regressed.
+Found 7 outliers among 100 measurements (7.00%)
+  1 (1.00%) low mild
+  4 (4.00%) high mild
+  2 (2.00%) high severe
+Comparison for group 'remove_hits':
+  Higher is better; best performer is 1.00 (typical).
+      1st remove_hits/pomap:       1.000 (340.68 µs), change: [0.000, +7.2579%], rank: [64.4% faster than 2nd]
+      2nd remove_hits/std_hashmap: 0.608 (560.05 µs), change: [+0.004, +6.5437%], rank: [64.4% slower than 1st, 3.7% faster than 3rd]
+      3rd remove_hits/hashbrown:   0.586 (580.95 µs), change: [+0.005, +6.3321%], rank: [3.7% slower than 2nd]
+
+Benchmarking remove_misses/pomap
+Benchmarking remove_misses/pomap: Warming up for 3.0000 s
+Benchmarking remove_misses/pomap: Collecting 100 samples in estimated 5.0491 s (379k iterations)
+Benchmarking remove_misses/pomap: Analyzing
+remove_misses/pomap     time:   [13.165 µs 13.179 µs 13.192 µs]
+                        change: [+0.4683% +0.6626% +0.8546%] (p = 0.00 < 0.05)
+                        Change within noise threshold.
+Found 6 outliers among 100 measurements (6.00%)
+  3 (3.00%) low mild
+  1 (1.00%) high mild
+  2 (2.00%) high severe
+Benchmarking remove_misses/std_hashmap
+Benchmarking remove_misses/std_hashmap: Warming up for 3.0000 s
+Benchmarking remove_misses/std_hashmap: Collecting 100 samples in estimated 5.0526 s (480k iterations)
+Benchmarking remove_misses/std_hashmap: Analyzing
+remove_misses/std_hashmap
+                        time:   [10.522 µs 10.535 µs 10.548 µs]
+                        change: [−0.1024% +0.0065% +0.1212%] (p = 0.92 > 0.05)
+                        No change in performance detected.
+Benchmarking remove_misses/hashbrown
+Benchmarking remove_misses/hashbrown: Warming up for 3.0000 s
+Benchmarking remove_misses/hashbrown: Collecting 100 samples in estimated 5.0168 s (424k iterations)
+Benchmarking remove_misses/hashbrown: Analyzing
+remove_misses/hashbrown time:   [11.768 µs 11.781 µs 11.795 µs]
+                        change: [−2.4460% −2.3495% −2.2457%] (p = 0.00 < 0.05)
+                        Performance has improved.
+Comparison for group 'remove_misses':
+  Higher is better; best performer is 1.00 (typical).
+      1st remove_misses/std_hashmap: 1.000 (10.535 µs), change: [0.000, +0.0065%], rank: [11.8% faster than 2nd]
+      2nd remove_misses/hashbrown:   0.894 (11.781 µs), change: [+0.021, −2.3495%], rank: [11.8% slower than 1st, 11.9% faster than 3rd]
+      3rd remove_misses/pomap:       0.799 (13.179 µs), change: [-0.005, +0.6626%], rank: [11.9% slower than 2nd]
+
+Benchmarking shrink_to/pomap
+Benchmarking shrink_to/pomap: Warming up for 3.0000 s
+
+Warning: Unable to complete 100 samples in 5.0s. You may wish to increase target time to 43.9s, or reduce sample count to 10.
+Benchmarking shrink_to/pomap: Collecting 100 samples in estimated 43.901 s (100 iterations)
+Benchmarking shrink_to/pomap: Analyzing
+shrink_to/pomap         time:   [88.653 ms 88.753 ms 88.852 ms]
+                        change: [+0.3039% +0.4716% +0.6310%] (p = 0.00 < 0.05)
+                        Change within noise threshold.
+Benchmarking shrink_to/std_hashmap
+Benchmarking shrink_to/std_hashmap: Warming up for 3.0000 s
+
+Warning: Unable to complete 100 samples in 5.0s. You may wish to increase target time to 38.1s, or reduce sample count to 10.
+Benchmarking shrink_to/std_hashmap: Collecting 100 samples in estimated 38.061 s (100 iterations)
+Benchmarking shrink_to/std_hashmap: Analyzing
+shrink_to/std_hashmap   time:   [228.76 ms 229.77 ms 230.82 ms]
+                        change: [+0.0963% +0.6240% +1.1622%] (p = 0.03 < 0.05)
+                        Change within noise threshold.
+Benchmarking shrink_to/hashbrown
+Benchmarking shrink_to/hashbrown: Warming up for 3.0000 s
+
+Warning: Unable to complete 100 samples in 5.0s. You may wish to increase target time to 38.0s, or reduce sample count to 10.
+Benchmarking shrink_to/hashbrown: Collecting 100 samples in estimated 37.965 s (100 iterations)
+Benchmarking shrink_to/hashbrown: Analyzing
+shrink_to/hashbrown     time:   [236.16 ms 237.27 ms 239.08 ms]
+                        change: [+1.1410% +1.6020% +2.3672%] (p = 0.00 < 0.05)
+                        Performance has regressed.
+Found 2 outliers among 100 measurements (2.00%)
+  2 (2.00%) high severe
+Comparison for group 'shrink_to':
+  Higher is better; best performer is 1.00 (typical).
+      1st shrink_to/pomap:       1.000 (88.753 ms), change: [0.000, +0.4716%], rank: [158.9% faster than 2nd]
+      2nd shrink_to/std_hashmap: 0.386 (229.77 ms), change: [-0.001, +0.6240%], rank: [158.9% slower than 1st, 3.3% faster than 3rd]
+      3rd shrink_to/hashbrown:   0.374 (237.27 ms), change: [-0.004, +1.6020%], rank: [3.3% slower than 2nd]
+
+
+entries       pomap bytes       hb bytes    pm B/ent    hb B/ent     pm/hb
+--------------------------------------------------------------------------
+500                 52032          17424       104.1        34.8     2.99x
+5000               199968         139280        40.0        27.9     1.44x
+50000             3150048        1114128        63.0        22.3     2.83x
+500000           50336928       17825808       100.7        35.7     2.82x
+5000000         201332352      142606352        40.3        28.5     1.41x
+Benchmarking memory_footprint_bytes/report
+Benchmarking memory_footprint_bytes/report: Warming up for 3.0000 s
+Benchmarking memory_footprint_bytes/report: Collecting 100 samples in estimated 5.0000 s (18B iterations)
+Benchmarking memory_footprint_bytes/report: Analyzing
+memory_footprint_bytes/report
+                        time:   [270.29 ps 270.37 ps 270.45 ps]
+                        change: [+0.0450% +0.1738% +0.4185%] (p = 0.03 < 0.05)
+                        Change within noise threshold.
+Found 4 outliers among 100 measurements (4.00%)
+  2 (2.00%) high mild
+  2 (2.00%) high severe
+
+
+working set             per array     triad GB/s
+--------------------------------------------------
+24 KiB (L1)                  8 KiB         116.3
+192 KiB (L2)                64 KiB         100.9
+1.5 MiB (L2/L3)            512 KiB          97.3
+12 MiB (L3)               4096 KiB          89.6
+96 MiB (L3/DRAM)         32768 KiB          51.9
+384 MiB (DRAM)          131072 KiB          44.5
