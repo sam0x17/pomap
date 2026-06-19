@@ -550,14 +550,22 @@ On servers: pin to a non-zero core (`taskset -c 2`), set the governor to
 full output (never pipe through `tail` — it truncates early groups). Capture the
 `bench_bandwidth` table on each platform — it is the bandwidth x-axis for §5.3.
 
-Cold-access matrix + perf (the cold-read mechanism, §5.6):
+**One-shot per machine** — collects the complete spec-named dataset:
 ```
-scripts/run_cold.sh    # → cold-<cpu>_<Nc>_<GB>GB.csv  (all platforms)
-scripts/perf_cold.sh   # → perf-<cpu>_<Nc>.csv         (Linux; needs perf + paranoid<=1)
+scripts/collect_all.sh   # → bench-<spec>-g4.txt, bench-<spec>-g2.txt,
+                         #   cold-<spec>.csv, perf-<spec>.csv   (~20-30 min)
+```
+It chains the three below; copy back the files it lists at the end. Or run them
+individually:
+```
+scripts/run_bench.sh   # main suite, both growth factors → bench-<spec>-g{4,2}.txt
+scripts/run_cold.sh    # cold-access matrix             → cold-<spec>.csv  (growth-independent)
+scripts/perf_cold.sh   # perf counters                  → perf-<spec>.csv  (Linux; needs perf + paranoid<=1)
 ```
 `perf_cold.sh` env knobs: `VW` (value words 1|2|4|8), `WS` (MB), `PASSES`, `EVENTS`
 (append an AMD `ls_misal_loads.*` event to measure split loads if `perf list`
-shows it).
+shows it). Only `insert_allocate`/memory depend on GROWTH; cold + perf are
+growth-independent (provisioned builds).
 
 ## 9. Summary of what we are confident in
 
