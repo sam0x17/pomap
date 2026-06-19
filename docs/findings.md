@@ -293,24 +293,35 @@ Per-slot, PoMap stores 24 B for `u64/u64` (8 B inline hash + 8 + 8) versus
 hashbrown's ~17 B (1 control byte + 8 + 8), and runs at a lower load factor. The
 harness now measures the **real retained heap footprint** via a tracking global
 allocator (a build-from-empty, so the growth-step geometry is exercised as in
-real use). Measured bytes-per-entry, M3 Max, GROWTH=4:
+real use). Measured bytes-per-entry vs hashbrown, M3 Max, **both growth factors**:
 
-| entries | PoMap B/ent | hashbrown B/ent | PoMap / hb |
-|---|---|---|---|
-| 500 | 104.1 | 34.8 | 2.99× |
-| 5,000 | 40.0 | 27.9 | 1.44× |
-| 50,000 | 63.0 | 22.3 | 2.83× |
-| 500,000 | 100.7 | 35.7 | 2.82× |
-| 5,000,000 | 40.3 | 28.5 | 1.41× |
+| entries | PoMap/hb @ GROWTH=2 | PoMap/hb @ GROWTH=4 |
+|---|---|---|
+| 500 | **1.56×** | 2.99× |
+| 5,000 | 1.44× | 1.44× |
+| 50,000 | 2.83× | 2.83× |
+| 500,000 | **1.41×** | 2.82× |
+| 5,000,000 | 1.41× | 1.41× |
 
-The ratio is **lumpy (1.4–3.0×)**, governed entirely by where N lands relative to
-a 4× growth boundary: ~1.4× near full (≈60% load, e.g. 5M), ~2.8× just after a
-grow (≈24% load, e.g. 500k). This is the GROWTH=4 sparsity cost made concrete,
-and it confirms the earlier analytic estimate. GROWTH=2 roughly halves the
-post-grow sparsity (averaging ~2.0×). Note the table reflects `with_hasher`
-(build-from-empty, the *pessimistic* footprint); `with_capacity(n)` provisions to
-~62.5% load and lands tighter. Memory is the design's real cost — the price of
-the inline 8-byte hash plus the low load factor that buys the read/write wins.
+The ratio is **lumpy**, governed by where N lands relative to a growth boundary:
+~1.4× near full load, up to ~2.8–3.0× just after a grow (sparse). **GROWTH=2 is
+≤ GROWTH=4 at every size** — identical where the power-of-two boundary coincides
+(5k, 50k, 5M), and much tighter where GROWTH=4 overshoots into a sparse post-4×-grow
+table (500, 500k). Averages: **G2 ≈ 2.0×, G4 ≈ 2.75×**; worst case ~2.8–3.4× both.
+The table reflects `with_hasher` (build-from-empty, the *pessimistic* footprint);
+`with_capacity(n)` provisions to ~62.5% load and lands tighter. Memory is the
+design's real cost — the inline 8-byte hash plus the low load factor that buys the
+read/write wins.
+
+**Growth-factor recommendation: GROWTH=2 as the memory-sane default.** GROWTH
+affects *only* `insert_allocate` (build-from-empty) and this footprint — every
+other operation provisions via `with_capacity` and is growth-independent. The
+dial: G4 → insert_allocate ~1.1× hb but ~2.75× memory; G2 → insert_allocate 1.50×
+but ~2.0× memory. Since the *only* cost of G2 is build-from-empty insert speed —
+which a caller sidesteps entirely with `with_capacity` (growth-independent, already
+~1.8× either way) — **G2 buys back the single biggest knock against the design
+(~2.75×→2.0× memory) for a cost most callers can avoid.** Use G4 only when
+build-heavy and memory-rich.
 
 *(Fixed: the report previously printed `capacity()` (the logical threshold)
 rather than measured bytes; the numbers above are the corrected, allocator-measured

@@ -7,6 +7,9 @@
 # Usage: scripts/run_cold.sh            # auto spec-based name
 #        scripts/run_cold.sh out.csv    # explicit path override
 set -euo pipefail
+# NOTE: GROWTH-independent — every map is built via with_capacity (no growth), so
+# GROWTH=2 and GROWTH=4 give identical results here. The growth dial is captured
+# by scripts/run_bench.sh (main suite). No --features growth2 needed.
 cd "$(dirname "$0")/.."
 
 # ---- gather platform specs (portable: Linux /proc, else macOS sysctl) ----

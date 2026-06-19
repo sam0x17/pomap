@@ -7,6 +7,8 @@
 # Tunables (env): VW=value_words(1|2|4|8)  WS=ws_mb  PASSES=passes  EVENTS=...
 # Usage: scripts/perf_cold.sh
 set -euo pipefail
+# NOTE: GROWTH-independent — maps are built via with_capacity (no growth), so the
+# counters are identical at GROWTH=2 and GROWTH=4. No --features growth2 needed.
 cd "$(dirname "$0")/.."
 
 # IMPORTANT: run this as your NORMAL user (NOT sudo). Building needs cargo (in
