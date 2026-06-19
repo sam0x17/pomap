@@ -388,9 +388,12 @@ advantage** — exactly the direction the bandwidth thesis predicts:
   bandwidth binds — the §5.3 inversion, now seen directly in the cold regime.
 - **get_miss loses on both at all sizes** (M3 1.1–2.3×, Zen 5c 1.1–2.6×). The
   robust weak spot (single-map biased here; fair = main-suite sweep).
-- **Value-size read erosion is M3-specific.** M3 cold get_hit degrades 0.63→0.85
-  (8→64 B; entry straddles lines past 64 B); Zen 5c stays ~0.67–0.92 with no clear
-  erosion — it wins broadly regardless of payload.
+- **Value-size read erosion is universal, not M3-specific** (corrected). Both
+  machines' cold get_hit advantage shrinks as values grow: M3 0.63→0.85, Zen 5c
+  cold-end 0.67→0.92 (8→64 B). perf on Zen 5c explains it (below): an instruction +
+  IPC effect from the entry straddling cache lines, not a miss-count one. (Zen 5c
+  still wins *more broadly across sizes* than M3 — the crossover is earlier — but
+  the cold-end ratio erodes with payload on both.)
 
 Caveats: Zen 5c is a **virtualized 8-vCPU slice of a 160-core part** (ratios
 meaningful, absolutes VM-soft); single run, median-of-3 — several cells are noisy
@@ -414,6 +417,26 @@ locality claim). The cycles ratio (0.65×) matches the wall-clock cold-hit ratio
 **So the earlier strong "2 DRAM misses vs 1" should be stated as "fewer cache-line
 misses + fewer instructions"** — the L1-miss ratio is 0.74×, not 0.5×, and absolute
 counts include ~1 key-array miss/op of harness overhead common to all impls.
+
+**Value-size sweep explains the read erosion (`get_hit` pm/hb across 8→64 B):**
+
+| value | instr | cycles | L1-miss | IPC pomap | IPC hb |
+|---|---|---|---|---|---|
+| 8 B | 0.71 | 0.63 | 0.74 | 0.317 | 0.281 |
+| 16 B | 0.73 | 0.66 | 0.86 | 0.316 | 0.287 |
+| 32 B | 0.77 | 0.73 | 0.74 | 0.355 | 0.338 |
+| 64 B | 0.80 | **0.87** | 0.85 | 0.388 | **0.419** |
+
+The cycle advantage erodes 0.63→0.87 because (1) PoMap's **instruction** edge shrinks
+(0.71→0.80 — hashbrown's fixed SIMD overhead amortizes over more per-op work) and
+(2) **IPC crosses over** — PoMap goes from above hashbrown (8 B) to below it (64 B),
+the cache-line-straddling penalty of the 80 B entry. The L1-miss ratio is flat/noisy,
+so the erosion is an instruction + execution-efficiency effect, **not** a miss-count
+one. This is the mechanism behind the wall-clock value-size erosion (§5.6 above),
+and it reproduces on Zen 5c — confirming the erosion is universal, not M3-specific.
+(`get_miss` corroborates the miss weakness independently: PoMap's dTLB misses run
+**2–4× hashbrown's** — it probes one huge array while a SwissTable miss resolves in
+the small, TLB-friendly control array.)
 
 **Two hard limits of this measurement:**
 - **`LLC-loads`/`LLC-load-misses` are `<not supported>` on the VM** (no L3 PMU
