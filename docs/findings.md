@@ -43,9 +43,12 @@ and a larger per-slot footprint (the inline hash).
   compare rather than a key `cmp`, and (c) an AoS inline-hash layout that makes a
   probe one cache line. We are not aware of this hash-prefix-ordered flat
   open-addressing design in prior work (search not yet complete — §10).
-- **(C2) Bandwidth-favorability (empirical).** PoMap's write/bulk operations are
-  sequential-streaming and bandwidth-bound; its deficits vs SIMD open addressing
-  on laptop/desktop parts *invert into wins* on high-bandwidth server CPUs.
+- **(C2) Server-favorability (empirical).** PoMap's write/bulk operations are
+  sequential/streaming; SwissTable's are scatter (rehash). PoMap's deficits on
+  laptop/desktop parts *invert into wins* on many-core servers — driven by
+  **random-access cost (memory latency + per-core cache size + TLB), not
+  bandwidth** (single-thread bandwidth is actually *lower* on the Zen 5c server
+  than the M3; §5.3).
 - **(C3) A mapped design space.** A set of measured negative results (§6) that
   justify the specific design choices (AoS over SoA tags, backshift over
   tombstones, memset-then-write over single-pass rebuild).
@@ -53,8 +56,9 @@ and a larger per-slot footprint (the inline hash).
 **Central empirical claim.** PoMap is a *deterministic* hash map whose point-read
 and update performance **matches or beats** SwissTable-class tables (hashbrown)
 on every microarchitecture tested, and whose bulk/write performance **inverts from
-deficit to win as memory bandwidth grows** (laptop/desktop → server). The unifying
-mechanism is the **memory hierarchy**, and the advantage is therefore largest
+deficit to win on many-core servers** (laptop/desktop → server) — driven by the
+cost of *random* memory access (latency + cache + TLB), not bandwidth (§5.3). The
+unifying mechanism is the **memory hierarchy**, and the advantage is largest
 exactly where real large-map workloads live — **cold, low-locality access**:
 
 - *Cold reads.* A PoMap lookup keeps the hash inline with its (K, V), so probe +
@@ -68,8 +72,9 @@ exactly where real large-map workloads live — **cold, low-locality access**:
   hashbrown's SIMD throughput wins** — a crossover (§5.6), not a blanket read win,
   and misses are the exception even cold.
 - *Cold writes.* PoMap's inserts/repacks/backshifts are sequential streaming;
-  SwissTable growth rehashes (scatter). Cold and bandwidth-bound, sequential wins
-  — hence the server-CPU inversion.
+  SwissTable growth rehashes (scatter — random writes). When random access is
+  expensive relative to sequential (high latency / small per-core cache / TLB
+  pressure — the server regime), sequential wins — hence the server-CPU inversion.
 
 We argue cold/low-locality access is *more* representative of real workloads
 (large keyspaces, point lookups, low temporal locality) than the cache-resident
@@ -265,15 +270,31 @@ dominated by the larger (colder) sizes; the per-size sweep (§5.6) shows the win
 a cold/large-working-set phenomenon with a warm-regime crossover, and that
 *misses* are a genuine weak spot. Read §5.2 and §5.6 together.
 
-### 5.3 The write/bulk inversion (key result)
+### 5.3 The write/bulk inversion (key result) — it is random-access cost, NOT bandwidth
 
-`shrink_to`: 1.11× (M) → 1.17× (Zen 4) → **0.38×** (Zen 5c) — PoMap shrinks 2.6×
-*faster* than hashbrown on the high-BW part. `remove_hits` and `insert_allocate`
-move the same direction (to 0.58× and 0.81×). Mechanism: PoMap's repack/backshift
-are sequential streaming writes; hashbrown rehashes (scatter). When bandwidth is
-the binding constraint, sequential wins. **We previously (wrongly) characterized
-shrink_to's deficit as a fixed ~1.55× "intrinsic" cost; the three-platform trend
-shows it is microarchitecture-dependent and bandwidth-driven.**
+`shrink_to`: 1.11× (M3) → 1.17× (Zen 4) → **0.37×** (Zen 5c); `remove_hits` and
+`insert_allocate` move the same way on the server (0.59×, 0.79×). PoMap's
+repack/backshift are **sequential, streaming, prefetchable** writes; hashbrown
+rehashes (**scatter** — random writes, latency- and TLB-bound). PoMap wins these
+where random access is expensive *relative to* sequential.
+
+**Correction (2026-06-19): this is NOT "bandwidth-favorability."** The
+`bench_bandwidth` single-thread STREAM mountain shows the Zen 5c VM has **less than
+half** the M3's single-thread DRAM bandwidth (44.5 vs 100 GB/s — EPYC has modest
+*per-core* bandwidth despite huge *aggregate* socket bandwidth; Apple Silicon has
+unusually high single-core bandwidth). Yet PoMap's write/bulk advantage is *larger*
+on the lower-per-thread-bandwidth Zen 5c. A bandwidth story predicts the opposite.
+The driver is **random-access cost — memory latency + per-core cache size + TLB
+pressure**, which is high on a many-core (virtualized) server and low on the M3
+(huge caches, low latency). The M3's caches absorb hashbrown's scatter; the
+server's don't. (The earlier "shrink is ~1.55× intrinsic" was also wrong — it's
+environment-dependent, just not via bandwidth.)
+
+**[TODO] confirm with a latency measurement** (pointer-chase / `lat_mem_rd`-style)
+per platform — the STREAM mountain measures throughput and *refutes* bandwidth, but
+a latency curve would positively establish the random-access-cost mechanism. The
+perf `dTLB` data is consistent (PoMap's *miss* weakness is TLB pressure; hashbrown's
+*write* scatter is symmetrically TLB-heavy).
 
 ### 5.4 The two residual losses
 
@@ -571,18 +592,18 @@ growth-independent (provisioned builds).
 
 1. **Reads/updates beat hashbrown everywhere** (measured, robust) — a
    *deterministic* hash table matching or beating SwissTable-class point-read
-   performance, with the margin growing as access gets colder/bandwidth grows
-   (the 1-miss vs 2-miss cache-line mechanism, §1). The cold-read isolation
-   benchmark (§5.6) is the key experiment to make this claim airtight.
-2. **Write/bulk operations are bandwidth-bound and invert from deficit to win on
-   high-BW server CPUs** (measured direction robust; magnitudes VM-soft pending
-   bare metal).
-3. The only durable losses are the small-cache-resident miss-scan and the pure
-   insert shift tax; both narrow with bandwidth and neither has a fix that
-   preserves the read wins.
-4. The design is at/near its optimum on three microarchitectures — the optimizer
+   performance, with the margin growing as access gets colder/larger (the
+   fewer-instructions + fewer-L1-misses mechanism, perf-confirmed, §5.6).
+2. **Write/bulk operations invert from deficit to win on many-core servers**
+   (measured direction robust across M3 / Zen 5c; magnitudes VM-soft pending bare
+   metal). The driver is **random-access cost (latency + cache + TLB), not
+   bandwidth** — single-thread bandwidth is *lower* on the Zen 5c than the M3 (§5.3).
+3. The only durable losses are the small-cache-resident miss-scan (a TLB/locality
+   effect) and the pure insert shift tax; neither has a fix that preserves the
+   read wins.
+4. The design is at/near its optimum on the architectures tested — the optimizer
    found no validated gain on the latest — so the contribution is the
-   architecture and its bandwidth-favorability, not further micro-optimization.
+   architecture and its server-favorability, not further micro-optimization.
 
 ## 10. Related work and positioning
 

@@ -932,6 +932,64 @@ fn bench_bandwidth(_c: &mut Criterion) {
     black_box(&a);
 }
 
+/// Pointer-chase latency "mountain": load-to-use latency of a dependent random
+/// load chain at working-set sizes spanning L1 → DRAM. Each element is the index
+/// of the next, forming a single random cycle (Sattolo), so loads are serialized
+/// and unpredictable — ILP and prefetch cannot hide them, isolating latency
+/// (vs `bench_bandwidth`, which measures throughput). The cache "cliffs" reveal
+/// each platform's cache sizes; the DRAM plateau is its random-access latency.
+/// Together they separate the write/bulk inversion's candidate drivers — cache
+/// residency vs raw latency (vs TLB/page-walk, visible as a high DRAM plateau).
+/// Single-threaded, pinned by the caller's `taskset`.
+fn bench_latency(_c: &mut Criterion) {
+    use std::time::Instant;
+
+    let configs: [(usize, &str); 6] = [
+        (1 << 11, "16 KiB (L1)"),
+        (1 << 14, "128 KiB (L2)"),
+        (1 << 17, "1 MiB (L2/L3)"),
+        (1 << 20, "8 MiB (L3)"),
+        (1 << 23, "64 MiB (L3/DRAM)"),
+        (1 << 24, "128 MiB (DRAM)"),
+    ];
+    let max_n = 1usize << 24;
+    let mut next = vec![0usize; max_n];
+    let mut rng = StdRng::seed_from_u64(0x1A7E11C7);
+
+    println!("\n{:<20} {:>12} {:>14}", "working set", "size", "latency ns");
+    println!("{}", "-".repeat(48));
+    for (n, label) in configs {
+        let next = &mut next[..n];
+        // Single random cycle over [0, n) via Sattolo's algorithm: position k of a
+        // cyclic order points at position k+1, so chasing visits all n with no
+        // short sub-cycles. Build `order` then link it into `next`.
+        let mut order: Vec<usize> = (0..n).collect();
+        for i in (1..n).rev() {
+            order.swap(i, rng.random_range(0..i)); // j in [0,i): single n-cycle
+        }
+        for k in 0..n {
+            next[order[k]] = order[(k + 1) % n];
+        }
+        // ~64M dependent loads (min 1 full cycle); each can't start until the prior
+        // load retires, so wall-time / count ≈ load-to-use latency.
+        let chases = (64_000_000usize / n).max(1) * n;
+        let mut p = order[0];
+        let t0 = Instant::now();
+        for _ in 0..chases {
+            p = next[p];
+        }
+        let secs = t0.elapsed().as_secs_f64();
+        black_box(p);
+        println!(
+            "{:<20} {:>9} KiB {:>13.2}",
+            label,
+            n * 8 / 1024,
+            secs / chases as f64 * 1e9
+        );
+    }
+    black_box(&next);
+}
+
 fn bench_memory_footprint(c: &mut Criterion) {
     // Reports the REAL retained heap footprint of each map (net bytes held after
     // a build-from-empty), measured by the tracking global allocator — not a
@@ -997,7 +1055,8 @@ criterion_group!(
     bench_remove_misses,
     bench_shrink_to,
     bench_memory_footprint,
-    bench_bandwidth
+    bench_bandwidth,
+    bench_latency
 );
 
 criterion_main!(benches);
