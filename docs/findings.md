@@ -43,23 +43,27 @@ and a larger per-slot footprint (the inline hash).
   compare rather than a key `cmp`, and (c) an AoS inline-hash layout that makes a
   probe one cache line. We are not aware of this hash-prefix-ordered flat
   open-addressing design in prior work (search not yet complete — §10).
-- **(C2) Server-favorability (empirical).** PoMap's write/bulk operations are
-  sequential/streaming; SwissTable's are scatter (rehash). PoMap's deficits on
-  laptop/desktop parts *invert into wins* on many-core servers — driven by
-  **random-access cost (memory latency + per-core cache size + TLB), not
-  bandwidth** (single-thread bandwidth is actually *lower* on the Zen 5c server
-  than the M3; §5.3).
+- **(C2) Sequential-vs-scatter write behavior (empirical).** PoMap's writes are
+  sequential/streaming; SwissTable's are scatter (rehash). On *cold/large* working
+  sets PoMap's writes **tie on high-per-core-bandwidth Apple parts and win on
+  low-per-core-bandwidth AMD EPYC** (bare-metal *and* virtualized) — its sequential
+  pattern uses scarce bandwidth efficiently where scatter wastes it.
+  **Virtualization extends the win to medium sizes** (nested page walks punish
+  scatter). It is NOT a clean "server inversion," NOT bandwidth-*favorability*
+  (Apple has the most bandwidth and least write advantage), and NOT a pure
+  virtualization artifact (§5.3). On warm/medium sizes PoMap loses writes everywhere.
 - **(C3) A mapped design space.** A set of measured negative results (§6) that
   justify the specific design choices (AoS over SoA tags, backshift over
   tombstones, memset-then-write over single-pass rebuild).
 
 **Central empirical claim.** PoMap is a *deterministic* hash map whose point-read
 and update performance **matches or beats** SwissTable-class tables (hashbrown)
-on every microarchitecture tested, and whose bulk/write performance **inverts from
-deficit to win on many-core servers** (laptop/desktop → server) — driven by the
-cost of *random* memory access (latency + cache + TLB), not bandwidth (§5.3). The
-unifying mechanism is the **memory hierarchy**, and the advantage is largest
-exactly where real large-map workloads live — **cold, low-locality access**:
+on every microarchitecture tested. Its writes follow a warm→cold crossover and, on
+**cold/large** working sets, **tie on Apple and win on low-per-core-bandwidth AMD**
+(extended to medium sizes under virtualization) — there is no universal write
+inversion (§5.3). The unifying read mechanism is the **memory hierarchy**, and the
+advantage is largest exactly where real large-map workloads live — **cold,
+low-locality access**:
 
 - *Cold reads.* A PoMap lookup keeps the hash inline with its (K, V), so probe +
   filter + fetch hit one contiguous region; a SwissTable lookup touches the
@@ -129,19 +133,24 @@ it (all other workloads provision via `with_capacity` and never grow mid-measure
 
 | Tag | CPU | µarch | Environment | rustc | Notes |
 |---|---|---|---|---|---|
-| M-series | Apple M3 Max (Mac15,9), 16-core (12P+4E), 128 GB unified | Apple M3 | macOS, AC power | 1.96.0 | dev machine; remove anchors *soft* (see 4.4) |
-| Zen 4 | AMD EPYC 9354P | Zen 4 | Linux, near-bare-metal | 1.90 | first x86 reference |
-| Zen 5c | AMD EPYC 9845 "Turin Dense" | Zen 5c | Linux, **virtualized 8-vCPU guest**, AVX-512 (vp2intersect/vaes/gfni) | **[TODO]** | host-managed turbo/governor; ~3% noise floor |
+| M5 | Apple M5 Max, 18-core, 128 GB unified | Apple M5 | macOS, AC power | 1.96.0 | newest dev machine; remove anchors *soft* (see 4.4) |
+| M3 | Apple M3 Max (Mac15,9), 16-core (12P+4E), 128 GB unified | Apple M3 | macOS, AC power | 1.96.0 | remove anchors *soft* (see 4.4) |
+| EPYC 9354P | AMD EPYC 9354P, 32-core, 755 GB | Zen 4 | Linux, **bare-metal** | 1.90 | bare-metal x86 reference (settles §5.3) |
+| Zen 5c (VM) | AMD EPYC 9845 "Turin Dense" | Zen 5c | Linux, **virtualized 8-vCPU guest**, AVX-512 (vp2intersect/vaes/gfni) | **[TODO]** | host-managed turbo/governor; ~3% noise floor; nested page walks (see §5.3) |
 
 Single-threaded streaming-throughput (STREAM-triad) curves, captured by the
 `bench_bandwidth` probe in the harness (working set = 3 arrays of f64), give the
-per-platform bandwidth x-axis for §5.3. M3 Max (single core, `taskset`/idle):
-~226 GB/s in L1, ~142 GB/s in L3 (12 MiB WS), ~100 GB/s in DRAM (384 MiB WS).
-**[TODO]** capture the same curve on Zen 4 and Zen 5c (the probe ships in the
-bench; just run it) — those two numbers are what turn §5.3 from a 3-point trend
-into a throughput correlation.
+per-platform bandwidth x-axis for §5.3. **Single-thread DRAM bandwidth (DRAM-WS
+end of the mountain): Apple ~100–124 GB/s (M3/M5) vs AMD EPYC ~41–44 GB/s per
+core** — Apple Silicon has unusually high single-core bandwidth; EPYC has modest
+*per-core* bandwidth despite huge *aggregate* socket bandwidth. This inverse split
+(Apple high, AMD low) is the axis §5.3's write crossover tracks. Single-thread
+pointer-chase DRAM *latency* (`bench_latency` mountain): M5 ~81 ns, M3 ~118 ns,
+EPYC 9354P (bare) ~102 ns — note EPYC's latency is *lower* than the M3's, which is
+why latency does **not** explain the write result.
 
-**[TODO]** Zen 5c rustc version.
+**[TODO]** Zen 5c rustc version; `bench_latency` mountain on the Zen 5c VM (its
+data file predates the probe).
 
 ### 4.2 Software
 
@@ -228,13 +237,14 @@ Caveat carried in the harness header: single-map `get_miss` is PoMap-pessimistic
 cold-miss is the main suite's multi-map-sweep `get_misses`. Treat matrix
 `get_miss` rows as a lower bound on PoMap's miss competitiveness.
 
-**Run on every platform** (M3 Max, Zen 4 9354P, Zen 5c 9845), idle box:
+**Run on every platform** (M5, M3 Max, EPYC 9354P bare-metal, Zen 5c 9845 VM),
+idle box:
 ```
 scripts/run_cold.sh        # → cold-<host>.csv
 ```
-then collate the per-host CSVs. **[TODO]** capture Zen 4 + Zen 5c; the crossover
-working-set should track each platform's LLC size, and the high-bandwidth Zen 5c
-should show a larger, earlier cold win.
+then collate the per-host CSVs. Captured on all four (§5.6); the crossover
+working-set tracks each platform's LLC size, and the lower-per-core-bandwidth AMD
+parts show the earlier/broader cold win.
 
 ## 5. Results
 
@@ -243,21 +253,29 @@ should show a larger, earlier cold win.
 Lower is better; `<1.0` means PoMap beats hashbrown. Each column is normalized
 within that platform's own run.
 
-| Workload | M-series | Zen 4 (9354P) | Zen 5c (9845) |
-|---|---|---|---|
-| get_hits | 0.65 | 0.64 | **0.51** |
-| get_misses | 0.83 | 0.94 | 0.87 |
-| get_hotset | 0.68 | 0.52 | **0.50** |
-| update_existing | 0.62 | 0.47 | **0.32** |
-| remove_hits | ~1.2 *(soft)* | 0.98 | **0.58** |
-| remove_misses | 0.89 | 1.16 | 1.13 |
-| insert_allocate | 1.08 | 1.09 | **0.81** |
-| insert_preallocated | 1.66–1.81 | 1.47 | **1.14** |
-| shrink_to | 1.11 | 1.17 | **0.38** |
-| **groups won (<1.0)** | 6 / 9 | 6 / 9 *(remove_hits ≈ parity)* | **7 / 9** |
+| Workload | M5 | M3 *(soft rm)* | EPYC 9354P (bare) | Zen 5c (VM) |
+|---|---|---|---|---|
+| get_hits | 0.69 | 0.65 | 0.65 | **0.52** |
+| get_misses | 0.86 | 0.83 | 0.97 | 0.94 |
+| get_hotset | 0.76 | 0.68 | 0.52 | **0.53** |
+| update_existing | 0.59 | 0.62 | 0.46 | **0.30** |
+| remove_hits | 1.86 *(soft)* | ~1.2 *(soft)* | 1.06 | **0.59** |
+| remove_misses | 1.00 | 0.89 | 1.22 | 1.12 |
+| insert_allocate | 1.20 | 1.08 | 1.07 | **0.80** |
+| insert_preallocated | 1.77 | 1.66–1.81 | 1.49 | 1.15 |
+| shrink_to | 1.18 | 1.11 | 1.35 | **0.37** |
+| **groups won (<1.0)** | 4–5 / 9 | 6 / 9 | 4 / 9 | **7 / 9** |
 
-Bolded Zen 5c cells are the **inversions**: operations that are deficits on the
-lower-bandwidth parts become wins on the high-bandwidth server CPU.
+Reads/update win on **all four**. The write/bulk cells, however, **do not show a
+clean "server inversion"**: `shrink_to`, `insert_allocate`, and `remove_hits` win
+*only on the Zen 5c VM* (0.37 / 0.80 / 0.59) and **lose on the bare-metal EPYC
+9354P** (1.35 / 1.07 / 1.06) — same vendor, opposite result. The main-suite write
+workloads sit at **medium/warm working sets** (~2–19 MB), inside the warm→cold
+crossover, where **virtualization** (nested page walks taxing hashbrown's scatter)
+is what flips them — not bandwidth, and not bare-metal architecture. The honest
+write picture is the **per-size cold matrix** (§5.6), where cold/large writes tie
+on Apple and win on AMD bare-metal *and* VM. Treat these main-suite write
+aggregates as crossover-region samples, not a property.
 
 ### 5.2 Reads and updates
 
@@ -270,31 +288,53 @@ dominated by the larger (colder) sizes; the per-size sweep (§5.6) shows the win
 a cold/large-working-set phenomenon with a warm-regime crossover, and that
 *misses* are a genuine weak spot. Read §5.2 and §5.6 together.
 
-### 5.3 The write/bulk inversion (key result) — it is random-access cost, NOT bandwidth
+### 5.3 Writes: a crossover that depends on the machine (4-platform reconciliation)
 
-`shrink_to`: 1.11× (M3) → 1.17× (Zen 4) → **0.37×** (Zen 5c); `remove_hits` and
-`insert_allocate` move the same way on the server (0.59×, 0.79×). PoMap's
-repack/backshift are **sequential, streaming, prefetchable** writes; hashbrown
-rehashes (**scatter** — random writes, latency- and TLB-bound). PoMap wins these
-where random access is expensive *relative to* sequential.
+There is **no universal write "inversion"** — and the story took two wrong turns
+before the bare-metal EPYC settled it (recorded honestly here because both
+overclaims could recur). Writes follow the **same warm→cold crossover as reads**,
+and the cold-write *outcome* is **architecture-dependent**.
 
-**Correction (2026-06-19): this is NOT "bandwidth-favorability."** The
-`bench_bandwidth` single-thread STREAM mountain shows the Zen 5c VM has **less than
-half** the M3's single-thread DRAM bandwidth (44.5 vs 100 GB/s — EPYC has modest
-*per-core* bandwidth despite huge *aggregate* socket bandwidth; Apple Silicon has
-unusually high single-core bandwidth). Yet PoMap's write/bulk advantage is *larger*
-on the lower-per-thread-bandwidth Zen 5c. A bandwidth story predicts the opposite.
-The driver is **random-access cost — memory latency + per-core cache size + TLB
-pressure**, which is high on a many-core (virtualized) server and low on the M3
-(huge caches, low latency). The M3's caches absorb hashbrown's scatter; the
-server's don't. (The earlier "shrink is ~1.55× intrinsic" was also wrong — it's
-environment-dependent, just not via bandwidth.)
+**Cold/large writes (per-size cold matrix, 128 MiB working set, pm/hb):**
 
-**[TODO] confirm with a latency measurement** (pointer-chase / `lat_mem_rd`-style)
-per platform — the STREAM mountain measures throughput and *refutes* bandwidth, but
-a latency curve would positively establish the random-access-cost mechanism. The
-perf `dTLB` data is consistent (PoMap's *miss* weakness is TLB pressure; hashbrown's
-*write* scatter is symmetrically TLB-heavy).
+| op | M5 | M3 | EPYC 9354P (bare) | EPYC 9845 (VM) |
+|---|---|---|---|---|
+| insert | 1.05 | 1.06 | **0.70** | **0.75** |
+| remove | 1.00 | 0.81 | **0.90** | **0.79** |
+
+So **cold/large writes ~tie on Apple and win on AMD** — and crucially the
+*bare-metal* AMD wins (0.70×), so this is **not** a virtualization artifact. It is
+an architecture effect that tracks **single-thread bandwidth, inversely**: AMD
+EPYC has ~41–44 GB/s per core vs Apple's ~100–124 (M3/M5); PoMap's sequential
+writes use scarce bandwidth efficiently (full cache lines, prefetchable) while
+hashbrown's scatter-rehash wastes it (partial lines, unpredictable). When bandwidth
+is abundant (Apple) the waste is free → tie; when scarce (AMD) it bites → PoMap
+wins. (Note: raw DRAM *latency* does **not** explain it — bare-metal EPYC's 102 ns
+is *lower* than the M3's 118 ns yet it wins; the `bench_latency` mountains are M5
+81 ns, M3 118, EPYC-bare 102. So it is bandwidth-efficiency / cache-line utilization,
+not latency.)
+
+**Virtualization separately amplifies it at *medium* sizes.** The main-suite
+`shrink_to` (a ~2–19 MB working set, inside the crossover) is **0.37× on the Zen 5c
+VM but 1.35× on the bare-metal EPYC** — same vendor, opposite result. Under
+virtualization a TLB miss is a 2D (nested) page walk, which punishes hashbrown's
+scatter at sizes that are cache-resident bare-metal but TLB-thrashing in a guest.
+So the eye-catching "shrink 2.7× faster" was the **VM at a medium working set**, not
+a general property.
+
+**Two corrections to retire:** (1) the original "bandwidth-favorability / scales to
+high-BW servers" — wrong direction (Apple has the *most* bandwidth and the *least*
+write advantage); (2) the panic "the inversion was all virtualization" — also wrong
+(bare-metal AMD wins cold/large writes). The honest claim: **cold/large writes tie
+on Apple and win on low-per-core-bandwidth AMD, with virtualization extending the
+win to medium sizes.** The **main-suite write aggregates are a poor summary** — they
+sit at medium/warm sizes inside the crossover; the per-size cold matrix is the
+honest view.
+
+**[TODO]** add the `bench_latency` mountain on the Zen 5c (its file predates the
+probe) so all four platforms have it; an `amd_l3`/raw-event perf run would give the
+DRAM-miss counts the generic `LLC-load-misses` cannot (it reads `<not supported>`
+on AMD even bare-metal — §5.6).
 
 ### 5.4 The two residual losses
 
@@ -404,32 +444,38 @@ biased here; fair = main-suite sweep). Numbers are single-run, median-of-3 —
 **trust the trends, not individual cells** (a few points, e.g. 64 B at 48 MiB, are
 visibly noisy).
 
-**Two-machine cold matrix (M3 Max vs Zen 5c EPYC 9845; `cold-*.csv`).** The
-crossover is microarchitecture-dependent, and the **server CPU broadens PoMap's
-advantage** — exactly the direction the bandwidth thesis predicts:
+**Four-machine cold matrix (M5, M3 Max, EPYC 9354P bare-metal, EPYC 9845 VM;
+`cold-*.csv`).** The crossover is microarchitecture-dependent. The read win is
+universal; the **write outcome splits by vendor along the single-thread-bandwidth
+axis** (§5.3), and the bare-metal AMD is what settles the mechanism:
 
-- **get_hit:** both win cold (128 MiB: M3 0.63–0.85×, Zen 5c 0.67–0.92×). But the
-  crossover moves *earlier* on the server: for values ≥16 B, Zen 5c PoMap wins
-  get_hit at *every* size including warm/cache-resident (16 B @ 0.1–1 MiB:
-  0.63–0.83×), whereas on M3 hashbrown wins warm and PoMap only takes over past
-  the LLC (~16–48 MiB). At 8 B both still show the warm→cold crossover (hashbrown's
-  SIMD edge survives for the tiniest entry).
-- **Cold writes INVERT on the server.** At 48–128 MiB, Zen 5c PoMap *wins* insert
-  (0.73–0.87×) and remove (0.80–0.85×) across value sizes; on lower-bandwidth M3
-  these are only ~parity. Streaming repack/backshift beats scatter-rehash once
-  bandwidth binds — the §5.3 inversion, now seen directly in the cold regime.
-- **get_miss loses on both at all sizes** (M3 1.1–2.3×, Zen 5c 1.1–2.6×). The
-  robust weak spot (single-map biased here; fair = main-suite sweep).
-- **Value-size read erosion is universal, not M3-specific** (corrected). Both
-  machines' cold get_hit advantage shrinks as values grow: M3 0.63→0.85, Zen 5c
-  cold-end 0.67→0.92 (8→64 B). perf on Zen 5c explains it (below): an instruction +
-  IPC effect from the entry straddling cache lines, not a miss-count one. (Zen 5c
-  still wins *more broadly across sizes* than M3 — the crossover is earlier — but
-  the cold-end ratio erodes with payload on both.)
+- **get_hit:** all four win cold. Crossover moves *earlier* on the AMD parts: for
+  values ≥16 B the EPYCs win get_hit at essentially every size including
+  warm/cache-resident, whereas on Apple hashbrown wins warm and PoMap takes over
+  past the LLC. At 8 B all show the warm→cold crossover (hashbrown's SIMD edge
+  survives for the tiniest entry).
+- **Cold/large writes split by vendor (128 MiB WS, pm/hb):**
 
-Caveats: Zen 5c is a **virtualized 8-vCPU slice of a 160-core part** (ratios
-meaningful, absolutes VM-soft); single run, median-of-3 — several cells are noisy
-(trust the trends, not individual cells). **Zen 4 (9354P) matrix not yet captured.**
+  | op | M5 | M3 | EPYC 9354P (bare) | EPYC 9845 (VM) |
+  |---|---|---|---|---|
+  | insert | 1.05 | 1.06 | **0.70** | **0.75** |
+  | remove | 1.00 | 0.81 | **0.90** | **0.79** |
+
+  Cold writes **tie on Apple and win on AMD — including the bare-metal EPYC
+  9354P**, so this is *not* a virtualization artifact. It tracks single-thread
+  bandwidth inversely (AMD ~41–44 GB/s/core scarce → PoMap's full-cache-line
+  streaming wins; Apple ~100–124 abundant → scatter's waste is free → tie). Raw
+  latency does not explain it (EPYC-bare 102 ns < M3 118 ns yet EPYC wins).
+- **get_miss loses on all at all sizes** (1.1–2.6×). The robust weak spot
+  (single-map biased here; fair = main-suite sweep).
+- **Value-size read erosion is universal** (corrected): cold get_hit advantage
+  shrinks as values grow (M3 0.63→0.85; Zen 5c cold-end 0.67→0.92, 8→64 B). perf on
+  Zen 5c explains it (below): an instruction + IPC effect from the entry straddling
+  cache lines, not a miss-count one.
+
+Caveats: Zen 5c is a **virtualized 8-vCPU slice** (ratios meaningful, absolutes
+VM-soft); single run, median-of-3 — several cells are noisy (trust trends, not
+individual cells).
 **Mechanism — perf-measured (Zen 5c VM, `get_hit`, 256 MiB WS, 30 passes).**
 Per-op counters, pomap vs hashbrown:
 
@@ -513,16 +559,19 @@ result.)
 
 ## 7. Threats to validity / open items
 
-- **Bandwidth thesis: probe now exists; two platforms still to capture.** The
-  `bench_bandwidth` STREAM-triad mountain is in the harness and captured on M3 Max
-  (§4.1). **[TODO]** run it on Zen 4 and Zen 5c and plot each workload's pomap/hb
-  ratio against that platform's throughput at the workload's working-set size —
-  this is the single most important addition for a convincing paper, and is now
-  one bench run per box away.
-- **Zen 5c magnitudes are VM-soft.** Shared host, host-managed turbo/governor;
-  the *direction* of the inversions is far beyond the ~3% noise floor, but the
-  exact factors (0.38×, 0.81×) need a **bare-metal high-bandwidth run** to be
-  quotable.
+- **Bandwidth/latency probes captured on three of four; correlation holds.** The
+  `bench_bandwidth` STREAM-triad and `bench_latency` pointer-chase mountains are in
+  the harness and captured on M5, M3, and EPYC 9354P (bare). They establish the
+  inverse-bandwidth axis behind §5.3 (Apple ~100–124 vs AMD ~41–44 GB/s/core).
+  **[TODO]** run both on the Zen 5c VM (its data file predates the probes) to
+  complete the four-platform correlation.
+- **Zen 5c magnitudes are VM-soft, and its main-suite write "inversions" are a
+  medium-size virtualization effect.** Shared host, host-managed turbo/governor;
+  the bare-metal EPYC 9354P shows those same main-suite write ops *losing* (shrink
+  1.35, insert_allocate 1.07), so the Zen 5c factors (0.37×, 0.80×) are not a
+  general property — see §5.1/§5.3. The robust, machine-independent write result is
+  the per-size **cold matrix** (cold/large writes tie on Apple, win on AMD
+  bare-metal *and* VM).
 - **`perf` was blocked on Zen 5c** (`perf_event_paranoid=4`, no sudo), so the
   shift-vs-scan conclusion rests on an indirect probe with a confound (the
   scan-merge also dropped the empty-slot early-exit). Needs direct profiling.
@@ -594,16 +643,21 @@ growth-independent (provisioned builds).
    *deterministic* hash table matching or beating SwissTable-class point-read
    performance, with the margin growing as access gets colder/larger (the
    fewer-instructions + fewer-L1-misses mechanism, perf-confirmed, §5.6).
-2. **Write/bulk operations invert from deficit to win on many-core servers**
-   (measured direction robust across M3 / Zen 5c; magnitudes VM-soft pending bare
-   metal). The driver is **random-access cost (latency + cache + TLB), not
-   bandwidth** — single-thread bandwidth is *lower* on the Zen 5c than the M3 (§5.3).
+2. **Cold/large writes tie on Apple and win on AMD** (measured across four
+   machines, *including bare-metal* EPYC 9354P, so not a VM artifact). The outcome
+   tracks single-thread bandwidth inversely — PoMap's full-cache-line streaming
+   beats hashbrown's scatter-rehash where per-core bandwidth is scarce (AMD
+   ~41–44 GB/s) and ties where it is abundant (Apple ~100–124). Virtualization
+   *extends* the win to medium working sets (nested page walks). It is **not** a
+   universal server inversion, **not** bandwidth-favorability (Apple has the most
+   bandwidth and least write advantage), and **not** raw latency (EPYC-bare 102 ns <
+   M3 118 ns yet EPYC wins) (§5.3). On warm/medium sizes PoMap loses writes.
 3. The only durable losses are the small-cache-resident miss-scan (a TLB/locality
-   effect) and the pure insert shift tax; neither has a fix that preserves the
-   read wins.
+   effect) and the pure insert shift tax (warm/medium writes); neither has a fix
+   that preserves the read wins.
 4. The design is at/near its optimum on the architectures tested — the optimizer
-   found no validated gain on the latest — so the contribution is the
-   architecture and its server-favorability, not further micro-optimization.
+   found no validated gain on the latest — so the contribution is the structure
+   (C1) and the measured read/write behavior, not further micro-optimization.
 
 ## 10. Related work and positioning
 
@@ -661,12 +715,13 @@ is exactly PoMap's `stored > hash` cutoff. **This must be cited and is the obvio
 2. A modern **flat AoS inline-hash layout** and the analysis of its cache/bandwidth
    behavior on contemporary hardware (the 1974 work predates the memory wall and
    SIMD tables entirely).
-3. The empirical **bandwidth-favorability** result (C2).
+3. The empirical **read win across all hardware + the cold/large-write crossover
+   that favors low-per-core-bandwidth machines** (C2).
 
 So the novelty position is: **(C1) the prefix-ordered structure is claimed as a
 novel synthesis** — global hash-order via prefix addressing + AoS inline hash +
 deterministic iteration — extending the ordered-hashing lineage, **and (C2) the
-bandwidth argument** is the empirical contribution. **[TODO]** complete the
+measured read/write behavior** is the empirical contribution. **[TODO]** complete the
 literature search before asserting C1 as *new* rather than *underexplored*:
 beyond Amble–Knuth, check its descendants, "self-organizing"/"last-come-first-
 served" hashing, Robin Hood variants that maintain order, MSD-radix / histogram
