@@ -332,14 +332,16 @@ impl<K: Key, V: Value, H: BuildHasher, const GROWTH: usize> PoMap<K, V, H, GROWT
         let mut pos = self.meta.ideal_slot(hash);
         loop {
             let stored = self.slots.hash_at(pos);
-            if stored > hash {
-                return None; // also catches EMPTY_HASH (u64::MAX)
-            }
+            // Hit-biased order: test equality before the terminator — most
+            // lookups hit at or near the ideal slot, so the common path takes
+            // one branch instead of two.
             if stored == hash {
                 let Entry { key: k, value: v, .. } = unsafe { &*(*entries.add(pos)).as_ptr() };
                 if k == key {
                     return Some(v);
                 }
+            } else if stored > hash {
+                return None; // also catches EMPTY_HASH (u64::MAX)
             }
             pos += 1;
         }
