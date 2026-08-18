@@ -23,6 +23,7 @@ use ahash::AHasher;
 use alloc::alloc::{alloc, dealloc, handle_alloc_error};
 use core::{
     alloc::Layout,
+    borrow::Borrow,
     fmt,
     hash::{BuildHasher, Hash},
     iter::FusedIterator,
@@ -126,7 +127,7 @@ impl<V: Clone> Value for V {}
 /// raw `u64` reads in `hash_at` (and the 0xFF vacancy memset) are layout-safe
 /// for any K/V — a plain tuple's repr(Rust) field order is unspecified.
 #[repr(C)]
-struct Entry<K, V> {
+struct SlotEntry<K, V> {
     hash: u64,
     key: K,
     value: V,
@@ -139,7 +140,7 @@ struct Entry<K, V> {
 struct Slots<K: Key, V: Value> {
     ptr: NonNull<u8>,
     total_slots: usize,
-    entries: *mut MaybeUninit<Entry<K, V>>,
+    entries: *mut MaybeUninit<SlotEntry<K, V>>,
     layout: Layout,
     _marker: PhantomData<(K, V)>,
 }
@@ -159,14 +160,14 @@ impl<K: Key, V: Value> Slots<K, V> {
     }
 
     fn try_new(total_slots: usize) -> Result<Self, TryReserveError> {
-        let layout = Layout::array::<MaybeUninit<Entry<K, V>>>(total_slots)
+        let layout = Layout::array::<MaybeUninit<SlotEntry<K, V>>>(total_slots)
             .map_err(|_| TryReserveError::CapacityOverflow)?
             .pad_to_align();
 
         let ptr = unsafe { alloc(layout) };
         let ptr = NonNull::new(ptr).ok_or(TryReserveError::AllocError { layout })?;
 
-        let entries = ptr.as_ptr() as *mut MaybeUninit<Entry<K, V>>;
+        let entries = ptr.as_ptr() as *mut MaybeUninit<SlotEntry<K, V>>;
         // EMPTY_HASH is u64::MAX = all 0xFF bytes, so one memset over the whole
         // allocation marks every slot's hash vacant in a single pass. The K/V
         // bytes are clobbered too but are MaybeUninit and never read while
@@ -342,8 +343,15 @@ impl<K: Key, V: Value, H: BuildHasher, const GROWTH: usize> PoMap<K, V, H, GROWT
     }
 
     /// Returns a reference to the value corresponding to `key`.
+    ///
+    /// The key may be any borrowed form of the map's key type, with matching
+    /// `Hash` and `Eq` (e.g. query a `String`-keyed map with `&str`).
     #[inline]
-    pub fn get(&self, key: &K) -> Option<&V> {
+    pub fn get<Q>(&self, key: &Q) -> Option<&V>
+    where
+        K: Borrow<Q>,
+        Q: Hash + Eq + ?Sized,
+    {
         let hash = encode_hash(self.hash_builder.hash_one(key));
         let entries = self.slots.entries;
         let mut pos = self.meta.ideal_slot(hash);
@@ -353,8 +361,8 @@ impl<K: Key, V: Value, H: BuildHasher, const GROWTH: usize> PoMap<K, V, H, GROWT
             // lookups hit at or near the ideal slot, so the common path takes
             // one branch instead of two.
             if stored == hash {
-                let Entry { key: k, value: v, .. } = unsafe { &*(*entries.add(pos)).as_ptr() };
-                if k == key {
+                let SlotEntry { key: k, value: v, .. } = unsafe { &*(*entries.add(pos)).as_ptr() };
+                if k.borrow() == key {
                     return Some(v);
                 }
             } else if stored > hash {
@@ -366,7 +374,11 @@ impl<K: Key, V: Value, H: BuildHasher, const GROWTH: usize> PoMap<K, V, H, GROWT
 
     /// Returns a mutable reference to the value corresponding to `key`.
     #[inline]
-    pub fn get_mut(&mut self, key: &K) -> Option<&mut V> {
+    pub fn get_mut<Q>(&mut self, key: &Q) -> Option<&mut V>
+    where
+        K: Borrow<Q>,
+        Q: Hash + Eq + ?Sized,
+    {
         let hash = encode_hash(self.hash_builder.hash_one(key));
         let entries = self.slots.entries;
         let mut pos = self.meta.ideal_slot(hash);
@@ -377,7 +389,7 @@ impl<K: Key, V: Value, H: BuildHasher, const GROWTH: usize> PoMap<K, V, H, GROWT
             }
             if stored == hash {
                 let entry = unsafe { &mut *(*entries.add(pos)).as_mut_ptr() };
-                if entry.key == *key {
+                if entry.key.borrow() == key {
                     return Some(&mut entry.value);
                 }
             }
@@ -387,7 +399,11 @@ impl<K: Key, V: Value, H: BuildHasher, const GROWTH: usize> PoMap<K, V, H, GROWT
 
     /// Returns a reference to the key-value pair corresponding to `key`.
     #[inline]
-    pub fn get_key_value(&self, key: &K) -> Option<(&K, &V)> {
+    pub fn get_key_value<Q>(&self, key: &Q) -> Option<(&K, &V)>
+    where
+        K: Borrow<Q>,
+        Q: Hash + Eq + ?Sized,
+    {
         let hash = encode_hash(self.hash_builder.hash_one(key));
         let entries = self.slots.entries;
         let mut pos = self.meta.ideal_slot(hash);
@@ -397,8 +413,8 @@ impl<K: Key, V: Value, H: BuildHasher, const GROWTH: usize> PoMap<K, V, H, GROWT
                 return None;
             }
             if stored == hash {
-                let Entry { key: k, value: v, .. } = unsafe { &*(*entries.add(pos)).as_ptr() };
-                if k == key {
+                let SlotEntry { key: k, value: v, .. } = unsafe { &*(*entries.add(pos)).as_ptr() };
+                if k.borrow() == key {
                     return Some((k, v));
                 }
             }
@@ -408,7 +424,11 @@ impl<K: Key, V: Value, H: BuildHasher, const GROWTH: usize> PoMap<K, V, H, GROWT
 
     /// Returns `true` if the map contains the given key.
     #[inline]
-    pub fn contains_key(&self, key: &K) -> bool {
+    pub fn contains_key<Q>(&self, key: &Q) -> bool
+    where
+        K: Borrow<Q>,
+        Q: Hash + Eq + ?Sized,
+    {
         self.get(key).is_some()
     }
 
@@ -425,7 +445,7 @@ impl<K: Key, V: Value, H: BuildHasher, const GROWTH: usize> PoMap<K, V, H, GROWT
         // Fast path: ideal slot vacant → direct write, no scan needed.
         if self.slots.hash_at(ideal) == EMPTY_HASH {
             unsafe {
-                *self.slots.entries.add(ideal) = MaybeUninit::new(Entry { hash, key, value });
+                *self.slots.entries.add(ideal) = MaybeUninit::new(SlotEntry { hash, key, value });
             }
             self.len += 1;
             return None;
@@ -448,7 +468,7 @@ impl<K: Key, V: Value, H: BuildHasher, const GROWTH: usize> PoMap<K, V, H, GROWT
                     return self.insert(key, value);
                 }
                 unsafe {
-                    *entries.add(pos) = MaybeUninit::new(Entry { hash, key, value });
+                    *entries.add(pos) = MaybeUninit::new(SlotEntry { hash, key, value });
                 }
                 self.len += 1;
                 return None;
@@ -495,21 +515,127 @@ impl<K: Key, V: Value, H: BuildHasher, const GROWTH: usize> PoMap<K, V, H, GROWT
         let shift = empty_pos - pos;
         unsafe {
             ptr::copy(entries.add(pos), entries.add(pos + 1), shift);
-            *entries.add(pos) = MaybeUninit::new(Entry { hash, key, value });
+            *entries.add(pos) = MaybeUninit::new(SlotEntry { hash, key, value });
         }
         self.len += 1;
         None
     }
 
+    /// Gets the entry for `key` for in-place manipulation.
+    ///
+    /// ```
+    /// use pomap::PoMap;
+    /// let mut counts: PoMap<&str, u32> = PoMap::new();
+    /// for word in ["a", "b", "a"] {
+    ///     *counts.entry(word).or_insert(0) += 1;
+    /// }
+    /// assert_eq!(counts["a"], 2);
+    /// ```
+    #[inline]
+    pub fn entry(&mut self, key: K) -> Entry<'_, K, V, H, GROWTH> {
+        let hash = encode_hash(self.hash_builder.hash_one(&key));
+        let mut pos = self.meta.ideal_slot(hash);
+        loop {
+            let stored = self.slots.hash_at(pos);
+            if stored == hash {
+                let entry = unsafe { &*(*self.slots.entries.add(pos)).as_ptr() };
+                if entry.key == key {
+                    return Entry::Occupied(OccupiedEntry { map: self, pos });
+                }
+            } else if stored > hash {
+                return Entry::Vacant(VacantEntry { map: self, key });
+            }
+            pos += 1;
+        }
+    }
+
+    /// Returns the first key-value pair in iteration (hash) order.
+    ///
+    /// Because iteration order is canonical, this is a *deterministic*
+    /// "arbitrary element": the same map contents always yield the same
+    /// first entry, regardless of insertion history.
+    #[inline]
+    pub fn first_key_value(&self) -> Option<(&K, &V)> {
+        if self.len == 0 {
+            return None;
+        }
+        let mut i = 0;
+        while self.slots.hash_at(i) == EMPTY_HASH {
+            i += 1;
+        }
+        let SlotEntry { key: k, value: v, .. } =
+            unsafe { &*(*self.slots.entries.add(i)).as_ptr() };
+        Some((k, v))
+    }
+
+    /// Returns the last key-value pair in iteration (hash) order.
+    #[inline]
+    pub fn last_key_value(&self) -> Option<(&K, &V)> {
+        if self.len == 0 {
+            return None;
+        }
+        let mut i = self.slots.total_slots - 1;
+        while self.slots.hash_at(i) == EMPTY_HASH {
+            i -= 1;
+        }
+        let SlotEntry { key: k, value: v, .. } =
+            unsafe { &*(*self.slots.entries.add(i)).as_ptr() };
+        Some((k, v))
+    }
+
+    /// Removes and returns the first key-value pair in iteration (hash)
+    /// order. Repeated `pop_first` drains the map in canonical order —
+    /// a reproducible work-queue regardless of how the map was built.
+    #[inline]
+    pub fn pop_first(&mut self) -> Option<(K, V)> {
+        if self.len == 0 {
+            return None;
+        }
+        let mut i = 0;
+        while self.slots.hash_at(i) == EMPTY_HASH {
+            i += 1;
+        }
+        let SlotEntry { key: k, value: v, .. } =
+            unsafe { (*self.slots.entries.add(i)).assume_init_read() };
+        self.backshift(i);
+        self.len -= 1;
+        Some((k, v))
+    }
+
+    /// Removes and returns the last key-value pair in iteration (hash) order.
+    #[inline]
+    pub fn pop_last(&mut self) -> Option<(K, V)> {
+        if self.len == 0 {
+            return None;
+        }
+        let mut i = self.slots.total_slots - 1;
+        while self.slots.hash_at(i) == EMPTY_HASH {
+            i -= 1;
+        }
+        let SlotEntry { key: k, value: v, .. } =
+            unsafe { (*self.slots.entries.add(i)).assume_init_read() };
+        self.backshift(i);
+        self.len -= 1;
+        Some((k, v))
+    }
+
     /// Removes the entry for `key`, returning the value if present.
     #[inline]
-    pub fn remove(&mut self, key: &K) -> Option<V> {
+    pub fn remove<Q>(&mut self, key: &Q) -> Option<V>
+    where
+        K: Borrow<Q>,
+        Q: Hash + Eq + ?Sized,
+    {
         self.remove_entry(key).map(|(_, v)| v)
     }
 
     /// Removes a key from the map, returning the key-value pair if present.
     #[inline]
-    pub fn remove_entry(&mut self, key: &K) -> Option<(K, V)> {
+    pub fn remove_entry<Q>(&mut self, key: &Q) -> Option<(K, V)>
+    where
+        K: Borrow<Q>,
+        Q: Hash + Eq + ?Sized,
+    {
         let hash = encode_hash(self.hash_builder.hash_one(key));
         let entries = self.slots.entries;
         let mut pos = self.meta.ideal_slot(hash);
@@ -520,8 +646,8 @@ impl<K: Key, V: Value, H: BuildHasher, const GROWTH: usize> PoMap<K, V, H, GROWT
             }
             if stored == hash {
                 let entry = unsafe { &*(*entries.add(pos)).as_ptr() };
-                if entry.key == *key {
-                    let Entry { key: k, value: v, .. } = unsafe { (*entries.add(pos)).assume_init_read() };
+                if entry.key.borrow() == key {
+                    let SlotEntry { key: k, value: v, .. } = unsafe { (*entries.add(pos)).assume_init_read() };
                     self.backshift(pos);
                     self.len -= 1;
                     return Some((k, v));
@@ -860,13 +986,169 @@ impl<K: Key, V: Value, H: BuildHasher, const GROWTH: usize> PoMap<K, V, H, GROWT
 }
 
 // ---------------------------------------------------------------------------
+// Entry API
+// ---------------------------------------------------------------------------
+
+/// A view into a single map slot, occupied or vacant, returned by
+/// [`PoMap::entry`].
+pub enum Entry<'a, K: Key, V: Value, H: BuildHasher, const GROWTH: usize> {
+    /// The key is present.
+    Occupied(OccupiedEntry<'a, K, V, H, GROWTH>),
+    /// The key is absent.
+    Vacant(VacantEntry<'a, K, V, H, GROWTH>),
+}
+
+/// A view into an occupied map slot.
+pub struct OccupiedEntry<'a, K: Key, V: Value, H: BuildHasher, const GROWTH: usize> {
+    map: &'a mut PoMap<K, V, H, GROWTH>,
+    pos: usize,
+}
+
+/// A view into a vacant map slot, holding the key that would be inserted.
+pub struct VacantEntry<'a, K: Key, V: Value, H: BuildHasher, const GROWTH: usize> {
+    map: &'a mut PoMap<K, V, H, GROWTH>,
+    key: K,
+}
+
+impl<'a, K: Key, V: Value, H: BuildHasher, const GROWTH: usize> Entry<'a, K, V, H, GROWTH> {
+    /// Inserts `default` if vacant; returns a mutable reference to the value.
+    #[inline]
+    pub fn or_insert(self, default: V) -> &'a mut V {
+        match self {
+            Entry::Occupied(o) => o.into_mut(),
+            Entry::Vacant(v) => v.insert(default),
+        }
+    }
+
+    /// Inserts the result of `default()` if vacant; returns a mutable
+    /// reference to the value.
+    #[inline]
+    pub fn or_insert_with<F: FnOnce() -> V>(self, default: F) -> &'a mut V {
+        match self {
+            Entry::Occupied(o) => o.into_mut(),
+            Entry::Vacant(v) => v.insert(default()),
+        }
+    }
+
+    /// Inserts `V::default()` if vacant; returns a mutable reference.
+    #[inline]
+    pub fn or_default(self) -> &'a mut V
+    where
+        V: Default,
+    {
+        self.or_insert_with(V::default)
+    }
+
+    /// Applies `f` to the value if occupied, then returns the entry.
+    #[inline]
+    pub fn and_modify<F: FnOnce(&mut V)>(mut self, f: F) -> Self {
+        if let Entry::Occupied(ref mut o) = self {
+            f(o.get_mut());
+        }
+        self
+    }
+
+    /// Returns a reference to the entry's key.
+    #[inline]
+    pub fn key(&self) -> &K {
+        match self {
+            Entry::Occupied(o) => o.key(),
+            Entry::Vacant(v) => v.key(),
+        }
+    }
+}
+
+impl<'a, K: Key, V: Value, H: BuildHasher, const GROWTH: usize>
+    OccupiedEntry<'a, K, V, H, GROWTH>
+{
+    /// Returns a reference to the key.
+    #[inline]
+    pub fn key(&self) -> &K {
+        let entry = unsafe { &*(*self.map.slots.entries.add(self.pos)).as_ptr() };
+        &entry.key
+    }
+
+    /// Returns a reference to the value.
+    #[inline]
+    pub fn get(&self) -> &V {
+        let entry = unsafe { &*(*self.map.slots.entries.add(self.pos)).as_ptr() };
+        &entry.value
+    }
+
+    /// Returns a mutable reference to the value.
+    #[inline]
+    pub fn get_mut(&mut self) -> &mut V {
+        let entry = unsafe { &mut *(*self.map.slots.entries.add(self.pos)).as_mut_ptr() };
+        &mut entry.value
+    }
+
+    /// Converts the entry into a mutable reference tied to the map's lifetime.
+    #[inline]
+    pub fn into_mut(self) -> &'a mut V {
+        let entry = unsafe { &mut *(*self.map.slots.entries.add(self.pos)).as_mut_ptr() };
+        &mut entry.value
+    }
+
+    /// Replaces the value, returning the old one.
+    #[inline]
+    pub fn insert(&mut self, value: V) -> V {
+        mem::replace(self.get_mut(), value)
+    }
+
+    /// Removes the entry, returning the value.
+    #[inline]
+    pub fn remove(self) -> V {
+        self.remove_entry().1
+    }
+
+    /// Removes the entry, returning the key-value pair.
+    #[inline]
+    pub fn remove_entry(self) -> (K, V) {
+        let SlotEntry { key: k, value: v, .. } =
+            unsafe { (*self.map.slots.entries.add(self.pos)).assume_init_read() };
+        self.map.backshift(self.pos);
+        self.map.len -= 1;
+        (k, v)
+    }
+}
+
+impl<'a, K: Key, V: Value, H: BuildHasher, const GROWTH: usize>
+    VacantEntry<'a, K, V, H, GROWTH>
+{
+    /// Returns a reference to the key that would be inserted.
+    #[inline]
+    pub fn key(&self) -> &K {
+        &self.key
+    }
+
+    /// Returns ownership of the key without inserting.
+    #[inline]
+    pub fn into_key(self) -> K {
+        self.key
+    }
+
+    /// Inserts the value, returning a mutable reference to it.
+    ///
+    /// The insert may grow or shift the table, so the slot is re-located
+    /// afterward (the key is cloned for the re-lookup; `Key: Clone`).
+    #[inline]
+    pub fn insert(self, value: V) -> &'a mut V {
+        let key = self.key.clone();
+        self.map.insert(self.key, value);
+        self.map
+            .get_mut(&key)
+            .expect("vacant entry insert must succeed")
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Iterator types
 // ---------------------------------------------------------------------------
 
 /// Iterator over shared references to key-value pairs in deterministic order.
 #[must_use]
 pub struct Iter<'a, K: Key, V: Value> {
-    entries: *const MaybeUninit<Entry<K, V>>,
+    entries: *const MaybeUninit<SlotEntry<K, V>>,
     /// Next slot the occupancy refill will scan.
     index: usize,
     total_slots: usize,
@@ -935,7 +1217,7 @@ impl<'a, K: Key, V: Value> Iterator for Iter<'a, K, V> {
         self.mask &= self.mask - 1;
         self.remaining -= 1;
         let idx = self.mask_base + bit;
-        let Entry { key: k, value: v, .. } = unsafe { &*(*self.entries.add(idx)).as_ptr() };
+        let SlotEntry { key: k, value: v, .. } = unsafe { &*(*self.entries.add(idx)).as_ptr() };
         Some((k, v))
     }
 
@@ -957,7 +1239,7 @@ impl<K: Key, V: Value> FusedIterator for Iter<'_, K, V> {}
 /// Iterator over mutable references to key-value pairs in deterministic order.
 #[must_use]
 pub struct IterMut<'a, K: Key, V: Value> {
-    entries: *mut MaybeUninit<Entry<K, V>>,
+    entries: *mut MaybeUninit<SlotEntry<K, V>>,
     /// Next slot the occupancy refill will scan.
     index: usize,
     total_slots: usize,
@@ -1152,7 +1434,7 @@ impl<K: Key, V: Value> Iterator for IntoIter<K, V> {
             }
             self.remaining -= 1;
             // Mark consumed so Slots::drop doesn't double-drop it.
-            let Entry { key: k, value: v, .. } =
+            let SlotEntry { key: k, value: v, .. } =
                 unsafe { (*self.slots.entries.add(idx)).assume_init_read() };
             unsafe {
                 *(self.slots.entries.add(idx) as *mut u64) = EMPTY_HASH;
@@ -1182,7 +1464,7 @@ impl<K: Key, V: Value> FusedIterator for IntoIter<K, V> {}
 /// When dropped, any remaining entries are consumed and dropped.
 #[must_use]
 pub struct Drain<'a, K: Key, V: Value> {
-    entries: *mut MaybeUninit<Entry<K, V>>,
+    entries: *mut MaybeUninit<SlotEntry<K, V>>,
     index: usize,
     total_slots: usize,
     remaining: usize,
@@ -1205,7 +1487,7 @@ impl<'a, K: Key, V: Value> Iterator for Drain<'a, K, V> {
                 continue;
             }
             self.remaining -= 1;
-            let Entry { key: k, value: v, .. } =
+            let SlotEntry { key: k, value: v, .. } =
                 unsafe { (*self.entries.add(idx)).assume_init_read() };
             unsafe {
                 *(self.entries.add(idx) as *mut u64) = EMPTY_HASH;
@@ -1368,7 +1650,7 @@ impl<K: Key, V: Value, H: BuildHasher + Clone, const GROWTH: usize> Clone
             if self.slots.hash_at(i) != EMPTY_HASH {
                 unsafe {
                     let e = &*(*self.slots.entries.add(i)).as_ptr();
-                    *new_slots.entries.add(i) = MaybeUninit::new(Entry {
+                    *new_slots.entries.add(i) = MaybeUninit::new(SlotEntry {
                         hash: e.hash,
                         key: e.key.clone(),
                         value: e.value.clone(),
@@ -1455,11 +1737,19 @@ impl<K: Key, V: Value + Hash, H: BuildHasher, const GROWTH: usize> Hash
     }
 }
 
-impl<K: Key, V: Value, H: BuildHasher, const GROWTH: usize> Index<&K> for PoMap<K, V, H, GROWTH> {
+impl<K: Key, V: Value, H: BuildHasher, Q, const GROWTH: usize> Index<&Q>
+    for PoMap<K, V, H, GROWTH>
+where
+    K: Borrow<Q>,
+    Q: Hash + Eq + ?Sized,
+{
     type Output = V;
 
+    /// # Panics
+    ///
+    /// Panics if the key is not present in the map.
     #[inline]
-    fn index(&self, key: &K) -> &Self::Output {
+    fn index(&self, key: &Q) -> &Self::Output {
         self.get(key).expect("key not found")
     }
 }
@@ -2229,6 +2519,86 @@ mod tests {
         for (k, v) in &reference {
             assert_eq!(m.get(k), Some(v));
         }
+    }
+
+    #[test]
+    fn borrowed_key_lookups() {
+        let mut m: PoMap<std::string::String, u32> = PoMap::new();
+        m.insert("alpha".into(), 1);
+        m.insert("beta".into(), 2);
+        assert_eq!(m.get("alpha"), Some(&1));
+        assert!(m.contains_key("beta"));
+        assert_eq!(m["beta"], 2);
+        assert_eq!(m.get_key_value("alpha").map(|(k, _)| k.as_str()), Some("alpha"));
+        *m.get_mut("beta").unwrap() = 20;
+        assert_eq!(m.remove("beta"), Some(20));
+        assert_eq!(m.get("beta"), None);
+    }
+
+    #[test]
+    fn entry_api() {
+        let mut m: PoMap<u64, u64> = PoMap::new();
+        assert_eq!(*m.entry(1).or_insert(10), 10);
+        assert_eq!(*m.entry(1).or_insert(99), 10); // occupied: keeps existing
+        *m.entry(1).or_insert(0) += 5;
+        assert_eq!(m[&1], 15);
+        m.entry(2).and_modify(|v| *v += 1).or_insert(100);
+        assert_eq!(m[&2], 100);
+        m.entry(2).and_modify(|v| *v += 1).or_insert(100);
+        assert_eq!(m[&2], 101);
+        assert_eq!(*m.entry(3).or_default(), 0);
+        match m.entry(1) {
+            Entry::Occupied(o) => {
+                assert_eq!(*o.key(), 1);
+                assert_eq!(o.remove(), 15);
+            }
+            Entry::Vacant(_) => panic!("expected occupied"),
+        }
+        assert_eq!(m.get(&1), None);
+        match m.entry(4) {
+            Entry::Vacant(v) => {
+                assert_eq!(v.into_key(), 4);
+            }
+            Entry::Occupied(_) => panic!("expected vacant"),
+        }
+        assert_eq!(m.get(&4), None);
+        // Entry under growth: fill enough to trigger a grow via entries.
+        for k in 10..200u64 {
+            *m.entry(k).or_insert(k) += 1;
+        }
+        for k in 10..200u64 {
+            assert_eq!(m[&k], k + 1);
+        }
+    }
+
+    #[test]
+    fn first_last_pop_deterministic() {
+        let mk = |order: &[u64]| {
+            let mut m: PoMap<u64, u64> = PoMap::new();
+            for &k in order {
+                m.insert(k, k);
+            }
+            m
+        };
+        let a = mk(&[1, 2, 3, 4, 5]);
+        let b = mk(&[5, 3, 1, 4, 2]);
+        assert_eq!(a.first_key_value(), b.first_key_value());
+        assert_eq!(a.last_key_value(), b.last_key_value());
+
+        // pop_first drains both maps in the identical canonical order.
+        let (mut a, mut b) = (a, b);
+        let da: alloc::vec::Vec<_> = core::iter::from_fn(|| a.pop_first()).collect();
+        let db: alloc::vec::Vec<_> = core::iter::from_fn(|| b.pop_first()).collect();
+        assert_eq!(da, db);
+        assert_eq!(da.len(), 5);
+        assert!(a.is_empty());
+
+        // pop_last is the reverse drain.
+        let mut c = mk(&[1, 2, 3, 4, 5]);
+        let dc: alloc::vec::Vec<_> = core::iter::from_fn(|| c.pop_last()).collect();
+        let mut rev = da.clone();
+        rev.reverse();
+        assert_eq!(dc, rev);
     }
 
     /// Ord over maps is a lawful total order on content-distinct maps.
