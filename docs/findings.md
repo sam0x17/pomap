@@ -934,18 +934,17 @@ growth-independent (provisioned builds).
 
 ## 10. Related work and positioning
 
-> **[DRAFT — bibliographic details to verify before submission.]** Works are
-> named at the confidence level we have; exact authors/venues/years are marked
-> *(verify)* where we are not certain. In a finished paper this belongs in §2.
+> **Bibliographic details verified 2026-08-18** (web search; page numbers
+> spot-checked for the anchors). In a finished paper this belongs in §2.
 > A dedicated literature search is still owed for the closest prior art on
 > *sorted / order-preserving open addressing* (see end).
 
 **SIMD open-addressing tables (the primary baseline).** Google's *SwissTable* /
 Abseil `flat_hash_map` (Kulukundis, "Designing a Fast, Efficient, Cache-friendly
-Hash Table, Step by Step", CppCon 2017 *(verify)*) stores a parallel array of
+Hash Table, Step by Step", CppCon 2017) stores a parallel array of
 1-byte control tags and probes 16 at a time with SSE2/NEON. `hashbrown`
-(Amanieu d'Antras *(verify)*) is the Rust port and backs `std::collections::HashMap`.
-Facebook's *F14* (Folly; Bronson & Shi, "Open-sourcing F14", 2019 *(verify)*) is
+(Amanieu d'Antras) is the Rust port and backs `std::collections::HashMap`.
+Facebook's *F14* (Folly; Bronson & Shi, "Open-sourcing F14", Facebook Engineering, April 2019) is
 a related SIMD-chunked design with both AoS (`F14Value`) and indirected (`F14Node`)
 layouts. **Contrast:** these are *unordered* and store the discriminator (control
 byte / tag) in a *separate* array (SoA). PoMap is *hash-ordered* with deterministic
@@ -954,10 +953,10 @@ bytes/slot for a single-cache-line probe and exact (collision-free) filtering. O
 own SoA-tag prototype reproduced the SwissTable approach and lost on reads (§6),
 which motivated the AoS choice.
 
-**Probe-sequence-optimizing schemes.** Robin Hood hashing (Celis, 1986 *(verify)*)
-equalizes probe distances; Hopscotch (Herlihy, Shavit, Tzafrir, 2008 *(verify)*)
-and Cuckoo hashing (Pagh & Rodler, 2001 *(verify)*) bound worst-case lookup.
-Skarupke's `ska::flat_hash_map` / "bytell" (blog, *(verify)*) popularized several
+**Probe-sequence-optimizing schemes.** Robin Hood hashing (Celis, Larson & Munro, FOCS 1985, pp. 281-288; Celis's 1986 U. Waterloo thesis)
+equalizes probe distances; Hopscotch (Herlihy, Shavit & Tzafrir, DISC 2008)
+and Cuckoo hashing (Pagh & Rodler, ESA 2001; *J. Algorithms* 51(2), 2004) bound worst-case lookup.
+Skarupke's `ska::flat_hash_map` / "bytell" (blog posts + C++Now talk, 2017-2018) popularized several
 of these in C++. **Contrast:** all are unordered and optimize the *probe*; PoMap
 instead keeps the array globally *sorted by hash*, which is what makes both
 deterministic iteration and the early-terminating `stored > hash` scan possible,
@@ -965,7 +964,7 @@ at the cost of shifting on insert.
 
 **Ordered and deterministic-iteration maps.** `std::collections::BTreeMap` is the
 standard ordered map: a cache-conscious B-tree, comparison-based, O(log n),
-ordered by the *key*'s `Ord`. The `indexmap` crate (bluss *(verify)*) gives
+ordered by the *key*'s `Ord`. The `indexmap` crate (bluss) gives
 deterministic *insertion* order via a separate index vector over a SwissTable.
 **Contrast:** PoMap is ordered by *hash* (not key order — an important caveat for
 users, since `Ord` on the key does not imply iteration order), is hash-based and
@@ -975,7 +974,7 @@ and log-factor, or IndexMap's extra indirection, are not wanted.
 
 **Closest prior art #1: ordered hashing and ordered linear probing (the base
 structure — must anchor against).** Amble & Knuth, "Ordered hash tables" (*The
-Computer Journal* 17(2), 1974 *(verify page/issue)*) keep entries within a probe
+Computer Journal* 17(2), May 1974, pp. 135-142) keep entries within a probe
 sequence in order of a key/signature so an *unsuccessful* search terminates early
 — exactly PoMap's `stored > hash` cutoff. Critically, the modern theory
 literature treats the hash-ordered linear-probing table as a **standard known
@@ -988,24 +987,26 @@ Braverman & Kuszmaul give tight analyses of ordered vs unordered linear probing
 practical follow-on with experiments. **Therefore C1 does not claim the base
 structure.** PoMap's deltas over this line: (1) *prefix* home-slot addressing
 makes home-bucket order equal **global** hash order → **deterministic whole-map
-iteration**, a property the OLP literature never surfaces or exploits; (2) the
+iteration** surfaced as an API feature (the OLP line itself never exploits
+iteration order; the *history-independence* literature claims the related
+canonical-content property — see below); (2) the
 modern **flat AoS inline-full-hash layout** and its measured cache behavior
 (that literature predates or ignores SwissTable-class baselines; no head-to-head
 of an engineered OLP table vs production SIMD tables exists that we know of);
 (3) the **streaming-resize consequence** (C2). The tombstone tension is engaged
 directly by our family A/B (§6.1): tombstone benefit grows with load factor,
 and the canonical engine's low-load + backshift choice is measured, not assumed.
-Also check: Cleary, "Compact Hash Tables Using Bidirectional Linear Probing"
-(*IEEE Trans. Computers*, 1984 *(verify)*) — also maintains hash order.
+Cleary 1984 is addressed as prior-art #4 below (resolved 2026-08-18).
 
 **Closest prior art #2: growth-invariant hash ordering (the C2 resize
 mechanism).** Two lines use "order by a hash-derived key so growth preserves
 structure," both for *concurrent chained* tables: **split-ordered lists** (Shalev
-& Shavit, "Split-ordered lists: lock-free extensible hash tables," *J. ACM* 2006
-*(verify)*) keep all items in one list sorted by **bit-reversed** hash so
+& Shavit, "Split-ordered lists: lock-free extensible hash tables," *J. ACM*
+53(3), 2006) keep all items in one list sorted by **bit-reversed** hash so
 doubling the bucket array moves nothing (buckets are lazy pointers into the
-list); **relativistic / RCU-resizable hash tables** (Triplett, McKenney & Walpole,
-USENIX ATC 2011 *(verify)*, and related patents) keep chains sorted by hash and
+list); **relativistic / RCU-resizable hash tables** (Triplett, McKenney & Walpole, "Resizable,
+Scalable, Concurrent Hash Tables via Relativistic Programming," USENIX ATC
+2011, and related patents) keep chains sorted by hash and
 choose high-order-bit ("prefix") hashing precisely so chain order survives
 doubling, enabling single-pass cross-linking resize concurrent with readers.
 PoMap is the **flat open-addressing realization of the same invariant** — MSB
@@ -1019,18 +1020,17 @@ bit-reversed addressing and per-cell seqlocks) and inverted to prefix order afte
 hitting exactly those limitations — locality and iteration order. The
 **cursor-spacing gap injection** during the resize pass is PMA-flavored (packed
 memory arrays redistribute gaps in sorted arrays — Itai, Konheim & Rodeh 1981;
-Bender et al. adaptive PMA *(verify)*), but PMAs are comparison-sorted,
+Bender & Hu, adaptive PMA, *TODS* 2007), but PMAs are comparison-sorted,
 search-indexed structures; we know of no hash table that deliberately re-seeds
 displacement gaps at resize.
 
 **Closest prior art #3: overlapping neighborhoods and bounded probes (the §6
-window/cascade variant).** Hopscotch hashing (Herlihy, Shavit & Tzafrir, 2008
-*(verify)*) is the established overlapping-neighborhood scheme: every home
+window/cascade variant).** Hopscotch hashing (Herlihy, Shavit & Tzafrir, DISC 2008) is the established overlapping-neighborhood scheme: every home
 bucket owns H consecutive slots, neighborhoods overlap, and displacement hops
 items into holes — **destroying order** (bitmap bookkeeping tracks membership).
 Bounded-probe-then-grow is also known practice (Skarupke's `flat_hash_map`
-bounds Robin Hood probes at log₂(n) and grows on violation — blog, 2017
-*(verify)*). The family's `main_soa` variant combines both with **order
+bounds Robin Hood probes at log₂(n) and grows on violation — "I Wrote the
+Fastest Hashtable," blog, 2017). The family's `main_soa` variant combines both with **order
 preservation**: cascade displacement shifts a *contiguous sorted run* right by
 one, each shifted entry remaining inside its own window, extent capped — giving
 worst-case-bounded probes in a hash-ordered table. We found no ordered Hopscotch
@@ -1039,6 +1039,41 @@ canonical engine is the **unbounded limit** of the same overlapping-region
 structure (region boundaries are data-defined by the sort itself); fixed disjoint
 buckets appear nowhere in the mature family.
 
+**Closest prior art #4: the same invariant, opposite direction — compact
+hashing (RESOLVED 2026-08-18).** Cleary, "Compact Hash Tables Using
+Bidirectional Linear Probing" (*IEEE Trans. Computers* 33(9), 1984,
+pp. 828-834) keeps entries clustered/ordered by home bucket precisely so that
+most hash bits need not be stored (quotienting: store a key fragment plus a
+few bookkeeping bits) — the lineage that leads to quotient filters. PoMap uses
+the same order-maintenance invariant in the opposite direction: store the
+**full** 64-bit hash to make probes exact (collision-free filtering) and the
+resize **hash-free** (§5.7's String inversion is this choice paying off).
+Order-maintained open addressing thus spans a memory/compute dial: quotienting
+at one end (less memory, recompute hashes), PoMap at the other (more memory,
+never recompute). Both ends belong in the design-space figure.
+
+**Closest prior art #5: history independence and deterministic layout.**
+Uniquely-represented ("anti-persistence") data structures (Naor & Teague,
+STOC 2001), strongly history-independent hashing (Blelloch & Golovin, FOCS
+2007), and phase-concurrent deterministic hash tables (Shun & Blelloch, PPoPP
+2014 — linear probing with a priority order; quiescent array content
+independent of operation history) establish canonical-layout hashing, motivated
+by privacy and parallel determinism. **Precision required by this line:** PoMap
+guarantees canonical *iteration order* (hash order, always) but NOT canonical
+*bytes* — cursor-spacing gap seeding makes physical slot positions depend on
+the growth history (with_capacity-then-fill vs incremental growth yield
+different gap placements). So the claim is "deterministic iteration order,"
+never "history-independent layout." PoMap's delta from this line: the property
+is surfaced as an iteration/reproducibility API feature and combined with the
+prefix-addressing payoffs (streaming resize, locality); theirs is exact layout
+canonicity for security/parallelism. Checked and clean: LCFS hashing (Poblete
+& Munro, *J. Algorithms* 1989) orders by arrival, not hash — no overlap.
+
+**Ordered-Hopscotch search: CLOSED (2026-08, two targeted searches).** No
+order-preserving / sorted-neighborhood Hopscotch variant exists in the
+literature we can find; the §6 cascade mechanism's novelty claim stands as
+"no prior found," to be softened only if a referee produces one.
+
 **Novelty position (summary).** The base structure is *ordered linear probing*
 (established); the claims are: **C1** the prefix-addressed flat synthesis —
 global order, deterministic iteration, one-cache-line AoS probes, hash-not-key
@@ -1046,7 +1081,8 @@ ordering; **C2** the growth-invariant streaming resize in flat open addressing
 (chained precedents cited above) with its measured cross-platform write behavior;
 **C3** the measured family Pareto frontier including the order-preserving
 bounded-window mechanism and the tombstone A/B that connects the engineering to
-the FOCS'21/'24 theory line. Remaining search obligations: Cleary 1984,
-Amble–Knuth descendants, self-organizing/LCFS hashing, any prior
-"deterministic-iteration hash map" claim, MSD-radix/histogram hash bucketing,
-and ordered-Hopscotch variants.
+the FOCS'21/'24 theory line. Search obligations resolved 2026-08-18: Cleary 1984 (prior-art #4),
+LCFS/self-organizing (no overlap), deterministic-iteration claims (the
+history-independence line, prior-art #5), ordered-Hopscotch (closed, none
+found). Still open (lower priority): a systematic MSD-radix/histogram hash
+bucketing sweep and a walk of Amble-Knuth's citation graph.
