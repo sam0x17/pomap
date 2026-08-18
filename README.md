@@ -26,8 +26,8 @@ in the hash) — pays repeatedly:
   `symmetric_difference` (and `| & - ^`, `append`) are O(n+m) sorted merges
   with compact-canonical outputs — no probing, and no re-hashing, which makes
   them faster than clone+extend once keys are expensive to hash (measured:
-  0.91× hashbrown with 128-B String keys; cheap u64 keys still favor
-  clone+extend).
+  0.90× hashbrown with 128-B String keys; near-parity at 1M disjoint u64,
+  where clone+extend is nearly a memcpy).
 - **The map itself is `Eq`, `Ord`, `PartialOrd`, and `Hash`**: canonical
   iteration order makes map-level comparison and hashing lawful — maps as keys
   in maps, sets of maps, `sort()`able collections of maps. Key comparisons

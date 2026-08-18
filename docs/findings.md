@@ -727,17 +727,18 @@ shifting — and their outputs are **born compact-canonical** (tested:
 merge trusts stored hashes, so like map-`Ord`/`Hash` it requires the
 per-type-deterministic hasher discipline.
 
-**Measured vs hashbrown's conventional union (clone + extend), M5, single
-runs:** with u64 keys PoMap *loses* — 2.6×/2.3× at 100k, 1.5×/2.5× at 1M
-(disjoint/half-overlap) — because clone+extend is a near-memcpy plus ~2 ns
-inserts, while the merge walk pays the same unpredictable per-slot skip branch
-the naive iterator did (§5.8), twice (count + place passes). **With 128-byte
-String keys PoMap wins (0.911×) even with the naive walk** — hashbrown's
-extend re-hashes every key, PoMap's merge never hashes. Identified headroom:
-a masked-occupancy walk (the §5.8 fix, unapplied here) should close much of
-the u64 gap. Honest framing: the feature's guarantees are semantic
-(O(n+m) independent of hasher cost, canonical outputs, deterministic); its
-speed advantage begins where hashing is expensive — consistent with §5.7.
+**Measured vs hashbrown's conventional union (clone + extend), M5.** The
+first (naive per-slot walk) implementation lost on u64 keys — 2.3-2.6× at
+100k, 1.5-2.5× at 1M — the same unpredictable skip-branch pathology as the
+naive iterator (§5.8). **Applying the same masked-occupancy fix to the merge
+walk recovered it** (medians of 3): u64 100k 1.66×/1.49× (disjoint/half),
+**1M-disjoint 1.07× — near parity**, 1M-half 1.69×; **128-byte String keys
+win at 0.90×** (hashbrown's extend re-hashes every key; the merge never
+hashes — the §5.7 mechanism). Residual u64 gap: clone+extend's baseline is a
+near-memcpy clone plus ~2 ns inserts — hard to beat when hashing is free; the
+crossover to PoMap wins sits wherever key hashing stops being free. Framing:
+the guarantees are semantic (O(n+m) independent of hasher cost, canonical
+outputs, deterministic); the speed win begins with non-trivial keys.
 
 ## 6. The design space: a measured Pareto frontier, plus negative results
 

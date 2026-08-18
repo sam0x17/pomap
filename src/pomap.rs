@@ -987,52 +987,42 @@ impl<K: Key, V: Value, H: BuildHasher, const GROWTH: usize> PoMap<K, V, H, GROWT
 
     /// Walks the two hash-sorted tables in lockstep, invoking `f` once per
     /// merged key in canonical (hash, key) order with the entry (or entries)
-    /// holding it. The trailing vacant slot guarantees each side's skip scan
-    /// terminates.
+    /// holding it. Occupied slots are located with the same branchless
+    /// 64-slot occupancy masks as `Iter` (§ the per-slot skip branch is
+    /// unpredictable at typical densities and would dominate the merge).
     fn merge_walk<'m>(
         &'m self,
         other: &'m Self,
         mut f: impl FnMut(u64, MergeItem<'m, K, V>),
     ) {
-        let a = &self.slots;
-        let b = &other.slots;
-        let (mut i, mut j) = (0usize, 0usize);
+        let mut a = OccCursor::new(&self.slots);
+        let mut b = OccCursor::new(&other.slots);
         loop {
-            while a.hash_at(i) == EMPTY_HASH && i + 1 < a.total_slots {
-                i += 1;
-            }
-            while b.hash_at(j) == EMPTY_HASH && j + 1 < b.total_slots {
-                j += 1;
-            }
-            let ha = a.hash_at(i);
-            let hb = b.hash_at(j);
-            let ea = (ha != EMPTY_HASH).then(|| unsafe { &*(*a.entries.add(i)).as_ptr() });
-            let eb = (hb != EMPTY_HASH).then(|| unsafe { &*(*b.entries.add(j)).as_ptr() });
-            match (ea, eb) {
+            match (a.peek(), b.peek()) {
                 (None, None) => return,
-                (Some(x), None) => {
+                (Some((ha, x)), None) => {
                     f(ha, MergeItem::Left(x));
-                    i += 1;
+                    a.pop();
                 }
-                (None, Some(y)) => {
+                (None, Some((hb, y))) => {
                     f(hb, MergeItem::Right(y));
-                    j += 1;
+                    b.pop();
                 }
-                (Some(x), Some(y)) => {
+                (Some((ha, x)), Some((hb, y))) => {
                     use core::cmp::Ordering::*;
                     match ha.cmp(&hb).then_with(|| x.key.cmp(&y.key)) {
                         Less => {
                             f(ha, MergeItem::Left(x));
-                            i += 1;
+                            a.pop();
                         }
                         Greater => {
                             f(hb, MergeItem::Right(y));
-                            j += 1;
+                            b.pop();
                         }
                         Equal => {
                             f(ha, MergeItem::Both(x, y));
-                            i += 1;
-                            j += 1;
+                            a.pop();
+                            b.pop();
                         }
                     }
                 }
@@ -1189,6 +1179,59 @@ enum MergeMode {
     Intersection,
     Difference,
     SymmetricDifference,
+}
+
+/// Branchless cursor over a table's occupied slots in position (= canonical)
+/// order: refills a 64-slot occupancy mask with a predictable cmp/set/or pass,
+/// then pops set bits — the same scheme as `Iter::next`.
+struct OccCursor<'m, K: Key, V: Value> {
+    slots: &'m Slots<K, V>,
+    mask: u64,
+    base: usize,
+    /// Next slot the refill will scan.
+    scan: usize,
+}
+
+impl<'m, K: Key, V: Value> OccCursor<'m, K, V> {
+    #[inline]
+    fn new(slots: &'m Slots<K, V>) -> Self {
+        Self { slots, mask: 0, base: 0, scan: 0 }
+    }
+
+    /// Returns the front occupied slot's (hash, entry) without consuming it.
+    #[inline]
+    fn peek(&mut self) -> Option<(u64, &'m SlotEntry<K, V>)> {
+        while self.mask == 0 {
+            if self.scan >= self.slots.total_slots {
+                return None;
+            }
+            let n = (self.slots.total_slots - self.scan).min(64);
+            let mut m = 0u64;
+            if n == 64 {
+                for j in 0..64 {
+                    let occ = (self.slots.hash_at(self.scan + j) != EMPTY_HASH) as u64;
+                    m |= occ << j;
+                }
+            } else {
+                for j in 0..n {
+                    let occ = (self.slots.hash_at(self.scan + j) != EMPTY_HASH) as u64;
+                    m |= occ << j;
+                }
+            }
+            self.mask = m;
+            self.base = self.scan;
+            self.scan += n;
+        }
+        let idx = self.base + self.mask.trailing_zeros() as usize;
+        let entry = unsafe { &*(*self.slots.entries.add(idx)).as_ptr() };
+        Some((self.slots.hash_at(idx), entry))
+    }
+
+    /// Consumes the front occupied slot.
+    #[inline]
+    fn pop(&mut self) {
+        self.mask &= self.mask - 1;
+    }
 }
 
 /// One merged element: present on the left, the right, or both sides.
