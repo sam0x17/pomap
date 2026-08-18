@@ -2621,7 +2621,7 @@ mod tests {
         assert_eq!(x.cmp(&z), z.cmp(&x).reverse());
         // transitivity over the three distinct maps, whatever the direction:
         let mut v = [&x, &y, &z];
-        v.sort_by(|a, b| a.cmp(b));
+        v.sort();
         assert!(v[0].cmp(v[1]) != Ordering::Greater && v[1].cmp(v[2]) != Ordering::Greater);
         assert!(v[0].cmp(v[2]) != Ordering::Greater);
     }
