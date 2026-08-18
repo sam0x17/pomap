@@ -1,0 +1,76 @@
+    Finished `bench` profile [optimized] target(s) in 0.05s
+     Running benches/audit_bench.rs (target/release/deps/audit_bench-7ad259b3a3971f6a)
+Gnuplot not found, using plotters backend
+Benchmarking get_hits_fixed/pomap
+Benchmarking get_hits_fixed/pomap: Warming up for 3.0000 s
+Benchmarking get_hits_fixed/pomap: Collecting 100 samples in estimated 5.0977 s (212k iterations)
+Benchmarking get_hits_fixed/pomap: Analyzing
+get_hits_fixed/pomap    time:   [22.583 µs 22.673 µs 22.764 µs]
+Found 10 outliers among 100 measurements (10.00%)
+  5 (5.00%) high mild
+  5 (5.00%) high severe
+Benchmarking get_hits_fixed/hashbrown
+Benchmarking get_hits_fixed/hashbrown: Warming up for 3.0000 s
+Benchmarking get_hits_fixed/hashbrown: Collecting 100 samples in estimated 5.1455 s (152k iterations)
+Benchmarking get_hits_fixed/hashbrown: Analyzing
+get_hits_fixed/hashbrown
+                        time:   [34.844 µs 35.759 µs 36.874 µs]
+Found 6 outliers among 100 measurements (6.00%)
+  5 (5.00%) high mild
+  1 (1.00%) high severe
+Benchmarking get_hits_fixed/std_hashmap
+Benchmarking get_hits_fixed/std_hashmap: Warming up for 3.0000 s
+Benchmarking get_hits_fixed/std_hashmap: Collecting 100 samples in estimated 5.0267 s (172k iterations)
+Benchmarking get_hits_fixed/std_hashmap: Analyzing
+get_hits_fixed/std_hashmap
+                        time:   [29.416 µs 29.610 µs 29.857 µs]
+Found 11 outliers among 100 measurements (11.00%)
+  6 (6.00%) high mild
+  5 (5.00%) high severe
+Comparison for group 'get_hits_fixed':
+  Higher is better; best performer is 1.00 (typical).
+      1st get_hits_fixed/pomap:       1.000 (22.673 µs), rank: [30.6% faster than 2nd]
+      2nd get_hits_fixed/std_hashmap: 0.766 (29.610 µs), rank: [30.6% slower than 1st, 20.8% faster than 3rd]
+      3rd get_hits_fixed/hashbrown:   0.634 (35.759 µs), rank: [20.8% slower than 2nd]
+
+Benchmarking get_hits_vary/pomap
+Benchmarking get_hits_vary/pomap: Warming up for 3.0000 s
+Benchmarking get_hits_vary/pomap: Collecting 100 samples in estimated 5.4833 s (50k iterations)
+Benchmarking get_hits_vary/pomap: Analyzing
+get_hits_vary/pomap     time:   [108.63 µs 109.22 µs 109.87 µs]
+Found 4 outliers among 100 measurements (4.00%)
+  3 (3.00%) high mild
+  1 (1.00%) high severe
+Benchmarking get_hits_vary/hashbrown
+Benchmarking get_hits_vary/hashbrown: Warming up for 3.0000 s
+Benchmarking get_hits_vary/hashbrown: Collecting 100 samples in estimated 5.8111 s (35k iterations)
+Benchmarking get_hits_vary/hashbrown: Analyzing
+get_hits_vary/hashbrown time:   [163.08 µs 163.90 µs 164.75 µs]
+Found 3 outliers among 100 measurements (3.00%)
+  3 (3.00%) high mild
+Benchmarking get_hits_vary/std_hashmap
+Benchmarking get_hits_vary/std_hashmap: Warming up for 3.0000 s
+Benchmarking get_hits_vary/std_hashmap: Collecting 100 samples in estimated 5.1277 s (35k iterations)
+Benchmarking get_hits_vary/std_hashmap: Analyzing
+get_hits_vary/std_hashmap
+                        time:   [141.58 µs 142.43 µs 143.41 µs]
+Found 9 outliers among 100 measurements (9.00%)
+  7 (7.00%) high mild
+  2 (2.00%) high severe
+Comparison for group 'get_hits_vary':
+  Higher is better; best performer is 1.00 (typical).
+      1st get_hits_vary/pomap:       1.000 (109.22 µs), rank: [30.4% faster than 2nd]
+      2nd get_hits_vary/std_hashmap: 0.767 (142.43 µs), rank: [30.4% slower than 1st, 15.1% faster than 3rd]
+      3rd get_hits_vary/hashbrown:   0.666 (163.90 µs), rank: [15.1% slower than 2nd]
+
+Benchmarking rng_overhead/loop_only
+Benchmarking rng_overhead/loop_only: Warming up for 3.0000 s
+Benchmarking rng_overhead/loop_only: Collecting 100 samples in estimated 5.0573 s (394k iterations)
+Benchmarking rng_overhead/loop_only: Analyzing
+rng_overhead/loop_only  time:   [12.806 µs 12.827 µs 12.852 µs]
+Found 5 outliers among 100 measurements (5.00%)
+  1 (1.00%) low mild
+  2 (2.00%) high mild
+  2 (2.00%) high severe
+
+AUDIT_DONE

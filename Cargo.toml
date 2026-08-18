@@ -60,3 +60,7 @@ harness = false
 [[bench]]
 name = "bench_graph"
 harness = false
+
+[[bench]]
+name = "audit_bench"
+harness = false

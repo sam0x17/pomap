@@ -236,6 +236,37 @@ to 100k; 50 evenly-spaced sizes per group.
   ~3% (a neighbor spike can skew one implementation's measurement window).
   Sub-3% effects are not validatable there; large-workload groups are stable to
   <1%.
+- **Thermal-state audit (2026-08-18, M5, `audit_bench.rs`): the get-class groups
+  are warm-regime, and it does not matter.** The per-size RNG seeds are fixed, so
+  every criterion iteration touches the same ~100 keys per map (~a few hundred KB
+  across the sweep) — measured: identical work runs 22.7 µs warm (fixed seeds)
+  vs 109.2 µs with per-iteration-varying seeds (a true mixed warm/cold sweep),
+  confirming residency. **But the pomap/hashbrown ratio is robust to thermal
+  state: 0.63× fixed/warm vs 0.67× varying/cold-sweep.** The read win is not a
+  warm-cache artifact. Report suite numbers as "sweep aggregate," and cite this
+  A/B when a referee asks.
+- **RNG dilution: reported ratios are conservative.** The timed get loops include
+  per-size `StdRng` setup plus one `random_range` per get — an overhead measured
+  at **12.8 µs/iteration** (loop-only baseline), i.e. ~56% of pomap's warm get
+  number and ~36% of hashbrown's. This equal additive constant compresses every
+  ratio toward 1.0: net of overhead, the warm get_hits ratio is ≈**0.43×**, not
+  the reported 0.63×. All main-suite read ratios therefore *understate* the
+  advantage. A dilution-free harness (pre-generated index arrays, no RNG in the
+  timed loop) is used by the optimizer loop bench; the cross-machine
+  `pomap_bench` numbers are kept as-is for continuity, with this caveat.
+- **Smaller harness notes (audited 2026-08-18):** `remove_hits`/`shrink_to` run
+  against fresh clones per batch (the ~large setup clone evicts caches →
+  cold-ish) while `remove_misses`/`update_existing` reuse maps across iterations
+  (warm) — thermal regimes differ *between* groups; per-group cross-impl fairness
+  is unaffected. `update_existing` touches only `keys[0..100]` (warm by design).
+  `get_hotset`'s per-map seed collapses to the same sequence for all maps with
+  ≥1000 entries (benign — the hot set is shared by design). The criterion fork's
+  `comparison_benchmark_group` is reporting-only (rank summary; measurement
+  machinery is upstream criterion). All impls share one fixed-key `ahash`
+  builder: layouts are deterministic across runs (good for reproducibility), but
+  results sample a *single* hash seeding — repeating headline tables under k
+  random hash seeds is owed for the paper. No iteration-order benchmark exists
+  yet; deterministic iteration is a headline feature and should be measured.
 
 ### 4.5 Statistical reporting
 
@@ -706,15 +737,11 @@ result.)
   (background load present; Mac remove anchor soft). The in-run ordering is
   robust; magnitudes need an AMD re-run (`family_bench.rs` is portable — run via
   the same collection scripts).
-- **Main-suite thermal state needs an explicit answer (audit in progress,
-  2026-08-18).** The get-class benchmarks seed their per-size RNG identically on
-  every criterion iteration, so each iteration touches the same ~100 keys per map
-  (~a few hundred KB across the sweep) — after warm-up those lines may be
-  cache-resident, making the main-suite read numbers *warm-regime*. That would
-  not invalidate them (both maps warm equally) but would change their *label*:
-  the §5.1 read wins would be "warm sweep" numbers, to be reconciled with the
-  per-size cold matrix (§5.6) where warm/cache-resident reads favor hashbrown at
-  small sizes. An A/B (fixed seeds vs iteration-varying seeds) settles it.
+- **Main-suite thermal state: RESOLVED (2026-08-18, §4.4).** The get-class groups
+  are warm-regime as suspected (fixed per-size seeds → resident touched set), but
+  the A/B shows the ratio is thermal-robust (0.63× warm vs 0.67× true sweep) —
+  the read win stands; label the numbers "sweep aggregate." The same audit
+  quantified RNG dilution (§4.4): reported read ratios are conservative.
 
 ## 8. Reproducibility
 
