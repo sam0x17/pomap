@@ -206,7 +206,11 @@ preserving zero-branch probes and `compact()`'s canonical bytes. **Methods
 lesson (pairs with §3's repr(C) and the Eq-under-collision bug in C1): design
 invariants that hold "with probability 1" under an honest hasher must still
 be *enforced*, because the hasher is caller-supplied; an adversarial-hasher
-test (total collision at the top of the range) now guards it.**
+test (total collision at the top of the range) now guards it.** The full
+unsafe surface (probes, shifts, repack-retry, masked iterators at both ends,
+merge walks, Entry, disjoint borrows, collision canonicalization) passes
+**Miri with zero findings** (52-test subset, 2026-08-18; the multi-minute
+fuzz tests are excluded from interpretation and run natively) — now in CI.
 
 ## 4. Experimental methodology
 

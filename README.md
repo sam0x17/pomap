@@ -99,7 +99,9 @@ Numbers are only comparable **within a run** (normalize to the in-run
 
 ## Status
 
-Production-grade surface, research-grade provenance: fuzzed against
+Production-grade surface, research-grade provenance: **Miri-clean** (zero
+UB findings across the 52-test subset covering every unsafe path; the
+multi-minute fuzz tests run under the native harness), fuzzed against
 `std::HashMap` (50k-op randomized runs, both growth factors, `u64` and
 `String` payloads), adversarial-hasher hardened (total-collision and
 tail-clustering tests guard the no-bounds-check probe invariant), and
