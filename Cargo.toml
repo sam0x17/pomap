@@ -28,6 +28,7 @@ crossterm = { version = "0.28", optional = true }
 
 [dev-dependencies]
 criterion = { git = "https://github.com/sam0x17/criterion.rs.git", branch = "master" }
+wide = { version = "0.7", default-features = false }
 hashbrown = "0.14"
 rand = { version = "0.10.0-rc.5", features = ["std"] }
 proptest = "1"
@@ -67,4 +68,12 @@ harness = false
 
 [[bench]]
 name = "loop_bench"
+harness = false
+
+[[bench]]
+name = "iter_bench"
+harness = false
+
+[[bench]]
+name = "family_bench"
 harness = false

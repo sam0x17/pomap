@@ -737,6 +737,18 @@ result.)
   (background load present; Mac remove anchor soft). The in-run ordering is
   robust; magnitudes need an AMD re-run (`family_bench.rs` is portable — run via
   the same collection scripts).
+- **Instruction-layout effects rival small optimizations (2026-08-18 optimizer
+  loop).** A same-run A/B harness (`loop_bench`: candidate vs frozen-snapshot
+  engine) with a measured identical-code noise floor (±5% single-run, ±0.5%
+  median-of-3) validated one micro-optimization (hit-biased compare order in
+  `get`: −2 to −5% on get_hits across 7 runs) and *rejected* the same reorder in
+  three sibling functions after bisection showed its apparent −8%/+10% effects
+  were **code-layout artifacts** (they moved groups whose code was untouched and
+  vanished/reappeared with unrelated edits). Consequence for the paper: effects
+  below ~5% on this class of hardware need cross-configuration validation (or
+  layout randomization / PGO) before being reported; and the engine is otherwise
+  at its optimum under this suite — the optimizer found exactly one durable
+  improvement.
 - **Main-suite thermal state: RESOLVED (2026-08-18, §4.4).** The get-class groups
   are warm-regime as suspected (fixed per-size seeds → resident touched set), but
   the A/B shows the ratio is thermal-robust (0.63× warm vs 0.67× true sweep) —

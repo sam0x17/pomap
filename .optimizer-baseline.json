@@ -35,6 +35,19 @@
       "optimization": "none (noise-floor calibration, cand==base)",
       "kept": null,
       "result": "identical-code cand/base spread 0.971-1.048 -> single-run validation impossible for <5% effects; median-of-3 protocol adopted"
+    },
+    {
+      "iteration": 1,
+      "optimization": "hit-biased compare order in get() (equality before stored>hash terminator)",
+      "commit": "0a9085a",
+      "kept": true,
+      "result": "get_hits 0.95-0.98 across 7 runs (all favorable, ~-3%); hotset 0.98-1.00; misses/update flat; remove_hits median 1.004 (single 1.083 reading was noise); tests pass. Kept on 7/7 consistency; note: below the pre-registered 5% magnitude bar, which iter0 noise data overstated."
+    },
+    {
+      "iteration": 2,
+      "optimization": "same reorder in get_mut + get_key_value + remove_entry (bundle), then bisected to remove_entry-only",
+      "kept": false,
+      "result": "bundle: remove_misses -8% (median 0.918) BUT insert_preallocated +10% (median 1.099, 3/3 adverse, insert code untouched -> instruction-layout effect). Bisect (remove_entry only): remove_misses win VANISHED (median 1.001), small adverse drift remained (ins_prealloc 1.024, remove_hits 1.021). Both effects were code-layout lottery, not semantics. Reverted entirely. FINDING: at the 2-10% scale on M5, instruction-layout effects rival real optimizations; only get()'s reorder survived cross-configuration validation."
     }
   ],
   "failed_attempts_precedent": [

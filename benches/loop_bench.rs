@@ -32,6 +32,8 @@ type BenchValue = u64;
 type BenchHasherBuilder = BuildHasherDefault<AHasher>;
 
 type Cand = PoMap<BenchKey, BenchValue, BenchHasherBuilder, 4>;
+type CandG2 = PoMap<BenchKey, BenchValue, BenchHasherBuilder, 2>;
+type CandG8 = PoMap<BenchKey, BenchValue, BenchHasherBuilder, 8>;
 type Base = base_snapshot::PoMap<BenchKey, BenchValue, BenchHasherBuilder, 4>;
 type Hb = HashbrownMap<BenchKey, BenchValue, BenchHasherBuilder>;
 
@@ -133,6 +135,10 @@ fn bench_insert_allocate(c: &mut Criterion) {
         };
     }
     variant!(Cand, "cand");
+    // Growth-factor dial points (G4 is the default `cand`): only this group
+    // depends on GROWTH — all other groups provision via with_capacity.
+    variant!(CandG2, "cand_g2");
+    variant!(CandG8, "cand_g8");
     variant!(Base, "base");
     variant!(Hb, "hashbrown");
     group.finish();

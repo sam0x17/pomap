@@ -515,7 +515,7 @@ fn bench_update(c: &mut Criterion) {
                 let size = *size;
                 for idx in 0..GETS_PER_ROUND {
                     let key = &keys[idx % size];
-                    let val = update_values[idx % size];
+                    let val = update_values[idx % size].clone();
                     if let Some(v) = map.get_mut(key) {
                         black_box(*v = val);
                     }
@@ -533,7 +533,7 @@ fn bench_update(c: &mut Criterion) {
                 let size = *size;
                 for idx in 0..GETS_PER_ROUND {
                     let key = &keys[idx % size];
-                    let val = update_values[idx % size];
+                    let val = update_values[idx % size].clone();
                     if let Some(v) = map.get_mut(key) {
                         black_box(*v = val);
                     }
@@ -551,7 +551,7 @@ fn bench_update(c: &mut Criterion) {
                 let size = *size;
                 for idx in 0..GETS_PER_ROUND {
                     let key = &keys[idx % size];
-                    let val = update_values[idx % size];
+                    let val = update_values[idx % size].clone();
                     if let Some(v) = map.get_mut(key) {
                         black_box(*v = val);
                     }
