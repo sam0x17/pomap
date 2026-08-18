@@ -83,12 +83,16 @@ for i in 1 2 3; do
 done
 echo
 
-echo "==> [8/8] methodology probes (audit_bench)"
+echo "==> [8/9] set-algebra + bulk-build bench (union_bench)"
+$pin cargo bench --bench union_bench > "union-${slug}.txt" 2>&1 || true
+echo
+
+echo "==> [9/9] methodology probes (audit_bench)"
 $pin cargo bench --bench audit_bench > "audit-${slug}.txt" 2>&1 || true
 echo
 
 echo "== DONE — copy these back: =="
 ls -1 "loop-${slug}"-r*.txt "bench-${slug}"-g*.txt "cold-${slug}.csv" \
       "family-${slug}.txt" "string-${slug}.txt" "iter-${slug}"-r*.txt \
-      "audit-${slug}.txt" 2>/dev/null
+      "union-${slug}.txt" "audit-${slug}.txt" 2>/dev/null
 ls -1 "perf-"*.csv 2>/dev/null | tail -1

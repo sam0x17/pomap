@@ -727,7 +727,9 @@ shifting — and their outputs are **born compact-canonical** (tested:
 merge trusts stored hashes, so like map-`Ord`/`Hash` it requires the
 per-type-deterministic hasher discipline.
 
-**Measured vs hashbrown's conventional union (clone + extend), M5.** The
+**Measured vs hashbrown's conventional union (clone + extend), M5** *(late-night
+runs on battery power after a relocation — in-run ratios only; magnitudes
+soft; the pristine collection supersedes)*. The
 first (naive per-slot walk) implementation lost on u64 keys — 2.3-2.6× at
 100k, 1.5-2.5× at 1M — the same unpredictable skip-branch pathology as the
 naive iterator (§5.8). **Applying the same masked-occupancy fix to the merge

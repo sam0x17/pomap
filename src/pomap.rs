@@ -799,6 +799,8 @@ impl<K: Key, V: Value, H: BuildHasher, const GROWTH: usize> PoMap<K, V, H, GROWT
             index: 0,
             total_slots: self.slots.total_slots,
             remaining: self.len,
+            mask: 0,
+            mask_base: 0,
             _marker: PhantomData,
         };
         self.len = 0;
@@ -1697,8 +1699,12 @@ impl<K: Key, V: Value> FusedIterator for ValuesMut<'_, K, V> {}
 #[must_use]
 pub struct IntoIter<K: Key, V: Value> {
     slots: Slots<K, V>,
+    /// Next slot the occupancy refill will scan.
     index: usize,
     remaining: usize,
+    /// Occupancy bits for slots `[mask_base, mask_base + 64)`, consumed LSB-first.
+    mask: u64,
+    mask_base: usize,
 }
 
 impl<K: Key, V: Value> Iterator for IntoIter<K, V> {
@@ -1706,22 +1712,40 @@ impl<K: Key, V: Value> Iterator for IntoIter<K, V> {
 
     #[inline]
     fn next(&mut self) -> Option<Self::Item> {
-        while self.index < self.slots.total_slots {
-            let idx = self.index;
-            self.index += 1;
-            if self.slots.hash_at(idx) == EMPTY_HASH {
-                continue;
-            }
-            self.remaining -= 1;
-            // Mark consumed so Slots::drop doesn't double-drop it.
-            let SlotEntry { key: k, value: v, .. } =
-                unsafe { (*self.slots.entries.add(idx)).assume_init_read() };
-            unsafe {
-                *(self.slots.entries.add(idx) as *mut u64) = EMPTY_HASH;
-            }
-            return Some((k, v));
+        // Same branchless 64-slot occupancy-mask scheme as `Iter::next`.
+        // Consumed slots are marked EMPTY so `Slots::drop` (which this
+        // iterator owns) doesn't double-drop them.
+        if self.remaining == 0 {
+            return None;
         }
-        None
+        while self.mask == 0 {
+            let n = (self.slots.total_slots - self.index).min(64);
+            let mut m = 0u64;
+            if n == 64 {
+                for j in 0..64 {
+                    let occ = (self.slots.hash_at(self.index + j) != EMPTY_HASH) as u64;
+                    m |= occ << j;
+                }
+            } else {
+                for j in 0..n {
+                    let occ = (self.slots.hash_at(self.index + j) != EMPTY_HASH) as u64;
+                    m |= occ << j;
+                }
+            }
+            self.mask = m;
+            self.mask_base = self.index;
+            self.index += n;
+        }
+        let bit = self.mask.trailing_zeros() as usize;
+        self.mask &= self.mask - 1;
+        self.remaining -= 1;
+        let idx = self.mask_base + bit;
+        let SlotEntry { key: k, value: v, .. } =
+            unsafe { (*self.slots.entries.add(idx)).assume_init_read() };
+        unsafe {
+            *(self.slots.entries.add(idx) as *mut u64) = EMPTY_HASH;
+        }
+        Some((k, v))
     }
 
     #[inline]
@@ -1745,9 +1769,13 @@ impl<K: Key, V: Value> FusedIterator for IntoIter<K, V> {}
 #[must_use]
 pub struct Drain<'a, K: Key, V: Value> {
     entries: *mut MaybeUninit<SlotEntry<K, V>>,
+    /// Next slot the occupancy refill will scan.
     index: usize,
     total_slots: usize,
     remaining: usize,
+    /// Occupancy bits for slots `[mask_base, mask_base + 64)`, consumed LSB-first.
+    mask: u64,
+    mask_base: usize,
     _marker: PhantomData<&'a mut (K, V)>,
 }
 
@@ -1755,26 +1783,53 @@ pub struct Drain<'a, K: Key, V: Value> {
 unsafe impl<K: Key + Send, V: Value + Send> Send for Drain<'_, K, V> {}
 unsafe impl<K: Key + Sync, V: Value + Sync> Sync for Drain<'_, K, V> {}
 
+impl<K: Key, V: Value> Drain<'_, K, V> {
+    /// Locates the next occupied slot (shared by `next` and `drop`), marking
+    /// nothing; returns its index.
+    #[inline]
+    fn next_occupied(&mut self) -> Option<usize> {
+        if self.remaining == 0 {
+            return None;
+        }
+        while self.mask == 0 {
+            let n = (self.total_slots - self.index).min(64);
+            let mut m = 0u64;
+            if n == 64 {
+                for j in 0..64 {
+                    let occ = (unsafe { *(self.entries.add(self.index + j) as *const u64) }
+                        != EMPTY_HASH) as u64;
+                    m |= occ << j;
+                }
+            } else {
+                for j in 0..n {
+                    let occ = (unsafe { *(self.entries.add(self.index + j) as *const u64) }
+                        != EMPTY_HASH) as u64;
+                    m |= occ << j;
+                }
+            }
+            self.mask = m;
+            self.mask_base = self.index;
+            self.index += n;
+        }
+        let bit = self.mask.trailing_zeros() as usize;
+        self.mask &= self.mask - 1;
+        self.remaining -= 1;
+        Some(self.mask_base + bit)
+    }
+}
+
 impl<'a, K: Key, V: Value> Iterator for Drain<'a, K, V> {
     type Item = (K, V);
 
     #[inline]
     fn next(&mut self) -> Option<Self::Item> {
-        while self.index < self.total_slots {
-            let idx = self.index;
-            self.index += 1;
-            if unsafe { *(self.entries.add(idx) as *const u64) } == EMPTY_HASH {
-                continue;
-            }
-            self.remaining -= 1;
-            let SlotEntry { key: k, value: v, .. } =
-                unsafe { (*self.entries.add(idx)).assume_init_read() };
-            unsafe {
-                *(self.entries.add(idx) as *mut u64) = EMPTY_HASH;
-            }
-            return Some((k, v));
+        let idx = self.next_occupied()?;
+        let SlotEntry { key: k, value: v, .. } =
+            unsafe { (*self.entries.add(idx)).assume_init_read() };
+        unsafe {
+            *(self.entries.add(idx) as *mut u64) = EMPTY_HASH;
         }
-        None
+        Some((k, v))
     }
 
     #[inline]
@@ -1794,19 +1849,13 @@ impl<K: Key, V: Value> FusedIterator for Drain<'_, K, V> {}
 
 impl<K: Key, V: Value> Drop for Drain<'_, K, V> {
     fn drop(&mut self) {
-        // Consume remaining entries so they are dropped.
-        while self.index < self.total_slots {
-            let idx = self.index;
-            self.index += 1;
-            if unsafe { *(self.entries.add(idx) as *const u64) } == EMPTY_HASH {
-                continue;
-            }
+        // Consume and drop any remaining entries, marking their slots vacant.
+        while let Some(idx) = self.next_occupied() {
             unsafe {
                 ptr::drop_in_place((*self.entries.add(idx)).as_mut_ptr());
                 *(self.entries.add(idx) as *mut u64) = EMPTY_HASH;
             }
         }
-        self.remaining = 0;
     }
 }
 
@@ -1913,6 +1962,8 @@ impl<K: Key, V: Value, H: BuildHasher, const GROWTH: usize> IntoIterator
             slots,
             index: 0,
             remaining: len,
+            mask: 0,
+            mask_base: 0,
         }
     }
 }
