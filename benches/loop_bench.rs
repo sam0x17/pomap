@@ -13,6 +13,10 @@
 //! Iteration 0 runs with cand == base: every cand/base ratio should be 1.00,
 //! and the observed spread IS the per-group noise floor for keep/revert calls.
 
+// Benchmark harness: style lints are silenced wholesale -- timed workload
+// code must stay byte-comparable with the recorded methodology.
+#![allow(clippy::all, unused_imports, dead_code)]
+
 extern crate alloc;
 
 use std::{collections::HashSet, hash::BuildHasherDefault, hint::black_box};
@@ -24,7 +28,7 @@ use pomap::PoMap;
 use rand::{Rng, SeedableRng, rngs::StdRng};
 
 #[path = "support/base_snapshot.rs"]
-#[allow(dead_code)]
+#[allow(dead_code, unused_imports, clippy::all)]
 mod base_snapshot;
 
 type BenchKey = u64;

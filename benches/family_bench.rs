@@ -17,6 +17,10 @@
 //!
 //! Workload constants and seeds are identical to `pomap_bench.rs`.
 
+// Benchmark harness: style lints are silenced wholesale -- timed workload
+// code must stay byte-comparable with the recorded methodology.
+#![allow(clippy::all, unused_imports, dead_code)]
+
 use std::{
     alloc::{GlobalAlloc, Layout, System},
     collections::{HashMap, HashSet},
@@ -85,19 +89,19 @@ use rand::{Rng, SeedableRng, rngs::StdRng};
 extern crate alloc;
 
 #[path = "support/family/v_pomap3.rs"]
-#[allow(dead_code)]
+#[allow(dead_code, unused_imports, clippy::all)]
 mod v_pomap3;
 #[path = "support/family/v_oldsimd.rs"]
-#[allow(dead_code)]
+#[allow(dead_code, unused_imports, clippy::all)]
 mod v_oldsimd;
 #[path = "support/family/v_main_soa.rs"]
-#[allow(dead_code)]
+#[allow(dead_code, unused_imports, clippy::all)]
 mod v_main_soa;
 #[path = "support/family/v_tags_soa.rs"]
-#[allow(dead_code)]
+#[allow(dead_code, unused_imports, clippy::all)]
 mod v_tags_soa;
 #[path = "support/family/v_tags2_soa.rs"]
-#[allow(dead_code)]
+#[allow(dead_code, unused_imports, clippy::all)]
 mod v_tags2_soa;
 
 type BenchKey = u64;

@@ -4,7 +4,11 @@ version = "0.1.0"
 edition = "2024"
 authors = ["sam0x17"]
 license = "MIT OR Apache-2.0"
-description = "A Prefix-Ordered Hash Map (PoMap)"
+description = "Prefix-ordered hash map: deterministic iteration order, canonical representation via compact(), map-level Eq/Ord/Hash, one-cache-line probes, streaming hash-free resize"
+repository = "https://github.com/sam0x17/pomap"
+readme = "README.md"
+keywords = ["hashmap", "deterministic", "ordered", "no-std", "canonical"]
+categories = ["data-structures", "no-std"]
 
 [workspace.lints.clippy]
 missing_const_for_fn = "deny"

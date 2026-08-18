@@ -18,6 +18,10 @@
 //! Output: CSV to stdout — `value_bytes,op,n,ws_mb,pomap_ns,hashbrown_ns,std_ns`.
 //! Run via `scripts/run_cold.sh` (captures platform metadata, pins a core).
 
+// Benchmark harness: style lints are silenced wholesale -- timed workload
+// code must stay byte-comparable with the recorded methodology.
+#![allow(clippy::all, unused_imports, dead_code)]
+
 use std::collections::HashMap as StdMap;
 use std::hash::BuildHasherDefault;
 use std::hint::black_box;

@@ -9,6 +9,10 @@
 //! Maps are built identically (same keys/values/seeds as the main suite's
 //! generators); PoMap and the hash maps provision via with_capacity.
 
+// Benchmark harness: style lints are silenced wholesale -- timed workload
+// code must stay byte-comparable with the recorded methodology.
+#![allow(clippy::all, unused_imports, dead_code)]
+
 use std::{collections::BTreeMap, collections::HashMap, hash::BuildHasherDefault, hint::black_box};
 
 use ahash::AHasher;

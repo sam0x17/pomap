@@ -13,6 +13,10 @@
 //! Groups: get_hits_fixed (current semantics), get_hits_vary (per-iteration
 //! seeds), rng_overhead (identical loop, no map access).
 
+// Benchmark harness: style lints are silenced wholesale -- timed workload
+// code must stay byte-comparable with the recorded methodology.
+#![allow(clippy::all, unused_imports, dead_code)]
+
 use std::{cell::Cell, collections::HashMap, hash::BuildHasherDefault, hint::black_box};
 
 use ahash::AHasher;

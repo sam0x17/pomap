@@ -10,6 +10,10 @@
 //!
 //! Usage: cold_perf <pomap|hashbrown|std> <get_hit|get_miss> <value_words> <ws_mb> <passes>
 
+// Benchmark harness: style lints are silenced wholesale -- timed workload
+// code must stay byte-comparable with the recorded methodology.
+#![allow(clippy::all, unused_imports, dead_code)]
+
 use std::collections::HashMap as StdMap;
 use std::hash::BuildHasherDefault;
 use std::hint::black_box;

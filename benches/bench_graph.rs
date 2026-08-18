@@ -5,6 +5,10 @@
 //! Benchmarks: insert_allocate, insert_preallocated, get_hits, get_misses,
 //!             update_existing, get_hotset, remove_hits, remove_misses, shrink_to
 
+// Benchmark harness: style lints are silenced wholesale -- timed workload
+// code must stay byte-comparable with the recorded methodology.
+#![allow(clippy::all, unused_imports, dead_code)]
+
 use std::{
     alloc::{GlobalAlloc, Layout, System},
     collections::{HashMap, HashSet},

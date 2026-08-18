@@ -1,3 +1,7 @@
+// Benchmark harness: style lints are silenced wholesale -- timed workload
+// code must stay byte-comparable with the recorded methodology.
+#![allow(clippy::all, unused_imports, dead_code)]
+
 use std::{hash::BuildHasherDefault, hint::black_box};
 
 use ahash::AHasher;
