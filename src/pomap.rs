@@ -683,6 +683,26 @@ impl<K: Key, V: Value, H: BuildHasher, const GROWTH: usize> PoMap<K, V, H, GROWT
         self.shrink_to(self.len);
     }
 
+    /// Repacks the map into its minimal table, producing a **canonical
+    /// representation**: after `compact()`, every entry position, every gap,
+    /// and the allocation size are a pure function of the map's *contents* —
+    /// two maps with equal contents are structurally identical after
+    /// compaction, regardless of the insertion/removal/growth history that
+    /// produced them. (Byte-for-byte identity additionally requires the
+    /// payload types' in-memory representation to be canonical — true for
+    /// primitives; types with padding or heap pointers canonicalize
+    /// structurally, not bytewise.)
+    ///
+    /// This is on-demand history independence: iteration order is canonical
+    /// at *all* times; the live layout is deliberately history-dependent
+    /// (grow-time cursor spacing trades layout canonicity for insert
+    /// performance), and `compact()` restores representation canonicity.
+    /// Unlike [`shrink_to_fit`](Self::shrink_to_fit), it repacks even when
+    /// the table is already minimally sized.
+    pub fn compact(&mut self) {
+        self.rebuild(ideal_range_for(self.len), false);
+    }
+
     /// Reserves capacity for at least `additional` more elements.
     ///
     /// # Panics
@@ -2005,6 +2025,69 @@ mod tests {
         let mut expect = sorted.clone();
         expect.retain(|&k| k != 55);
         assert_eq!(seq, expect);
+    }
+
+    /// After `compact()`, two content-equal maps built by wildly different
+    /// histories are byte-identical (u64 payloads: no padding, no pointers).
+    #[test]
+    fn compact_produces_canonical_bytes() {
+        // History A: build-from-empty in ascending order, with transient
+        // entries inserted and removed along the way (growth path exercised).
+        let mut a: PoMap<u64, u64> = PoMap::new();
+        for k in 0..500u64 {
+            a.insert(k, k * 3);
+            if k % 7 == 0 {
+                a.insert(1_000_000 + k, 1); // transient
+            }
+        }
+        for k in 0..500u64 {
+            if k % 7 == 0 {
+                a.remove(&(1_000_000 + k));
+            }
+        }
+
+        // History B: pre-provisioned table (different initial geometry),
+        // descending insertion order, its own transient churn.
+        let mut b: PoMap<u64, u64> = PoMap::with_capacity(4096);
+        for k in (0..500u64).rev() {
+            b.insert(k, k * 3);
+        }
+        for k in 0..50u64 {
+            b.insert(2_000_000 + k, 9);
+        }
+        for k in 0..50u64 {
+            b.remove(&(2_000_000 + k));
+        }
+
+        assert_eq!(a, b);
+        a.compact();
+        b.compact();
+        assert_eq!(a, b, "compact must preserve contents");
+
+        // Structural identity: same geometry...
+        assert_eq!(a.slots.total_slots, b.slots.total_slots);
+        assert_eq!(a.slots.layout.size(), b.slots.layout.size());
+        // ...and byte identity of the full allocations.
+        let bytes_a =
+            unsafe { core::slice::from_raw_parts(a.slots.ptr.as_ptr(), a.slots.layout.size()) };
+        let bytes_b =
+            unsafe { core::slice::from_raw_parts(b.slots.ptr.as_ptr(), b.slots.layout.size()) };
+        assert_eq!(bytes_a, bytes_b, "compacted representations must be canonical");
+
+        // And a third, freshly built + compacted map agrees too.
+        let mut c: PoMap<u64, u64> = PoMap::new();
+        for k in (0..500u64).step_by(2).chain((0..500u64).skip(1).step_by(2)) {
+            c.insert(k, k * 3);
+        }
+        c.compact();
+        let bytes_c =
+            unsafe { core::slice::from_raw_parts(c.slots.ptr.as_ptr(), c.slots.layout.size()) };
+        assert_eq!(bytes_a, bytes_c);
+
+        // Map still fully functional after compaction.
+        for k in 0..500u64 {
+            assert_eq!(a.get(&k), Some(&(k * 3)));
+        }
     }
 
     /// Ord over maps is a lawful total order on content-distinct maps.
