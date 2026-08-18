@@ -2322,6 +2322,11 @@ impl<K: Key, V: Value, H: BuildHasher, const GROWTH: usize> Extend<(K, V)>
 {
     #[inline]
     fn extend<T: IntoIterator<Item = (K, V)>>(&mut self, iter: T) {
+        let iter = iter.into_iter();
+        // Provision for the lower bound up front so a sized extend performs
+        // at most one resize instead of a growth cascade.
+        let (lower, _) = iter.size_hint();
+        self.reserve(lower);
         for (key, value) in iter {
             self.insert(key, value);
         }
@@ -2354,6 +2359,20 @@ impl<K: Key, V: Value, H: BuildHasher + Default, const GROWTH: usize> FromIterat
         let mut map = PoMap::with_capacity_and_hasher(lower, H::default());
         map.extend(iter);
         map
+    }
+}
+
+impl<K: Key, V: Value, H: BuildHasher + Default, const GROWTH: usize, const N: usize>
+    From<[(K, V); N]> for PoMap<K, V, H, GROWTH>
+{
+    /// ```
+    /// use pomap::PoMap;
+    /// let m: PoMap<i32, &str> = PoMap::from([(1, "a"), (2, "b")]);
+    /// assert_eq!(m[&2], "b");
+    /// ```
+    #[inline]
+    fn from(arr: [(K, V); N]) -> Self {
+        arr.into_iter().collect()
     }
 }
 
