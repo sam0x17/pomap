@@ -627,6 +627,30 @@ the small, TLB-friendly control array.)
 (Tooling note: an `ops=` parse bug blanked the first CSVs; data above came from the
 captured perf stderr. Fixed — re-runs now populate `perf-<cpu>_<Nc>.csv` directly.)
 
+### 5.7 Iteration throughput (first measurement, 2026-08-18, M5, `iter_bench`)
+
+Whole-map iteration (sum keys+values; medians of 3; ratio vs hashbrown):
+
+| entries | pomap | hashbrown | std | BTreeMap |
+|---|---|---|---|---|
+| 1k | 2.36× (1.20 ns/e) | 1.00 (0.51) | 1.00 | 1.22 (0.62) |
+| 100k | 4.40× (5.26 ns/e) | 1.00 (1.20) | 0.99 | 1.60 (1.91) |
+| 1M | 2.49× (4.93 ns/e) | 1.00 (1.98) | 1.00 | 2.44 (4.84) |
+
+**PoMap iteration is a loss, and the mechanism is instructive.** The iterator
+takes one *unpredictable* branch per slot over a 24-byte stride; hashbrown's
+iterator SIMD-scans its compact control bytes and skips 16 empties at a time.
+The ratio tracks slot density exactly: worst at 100k (with_capacity provisioning
+lands at ~38% density just above a power-of-two boundary), mildest near ~48%.
+This is the AoS tradeoff on a third axis — inline hashes buy one-cache-line
+probes (§5.2) but cannot be SIMD-skipped during iteration; the SoA family
+variants would iterate at hashbrown speed (unmeasured, expected). **Honest
+headline: deterministic hash-order iteration at BTreeMap-class throughput
+(≈parity with BTreeMap at 1M) with O(1) point operations** — the feature is the
+determinism and the point-op speed, not iteration throughput. A branch-lighter
+unrolled iterator is a plausible mitigation (untested; candidate for the
+optimizer loop).
+
 ## 6. The design space: a measured Pareto frontier, plus negative results
 
 ### 6.1 Family benchmark (all seven engines, one harness)

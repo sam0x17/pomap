@@ -1,0 +1,431 @@
+    Finished `bench` profile [optimized] target(s) in 0.05s
+     Running benches/iter_bench.rs (target/release/deps/iter_bench-4d8e904216b8a806)
+Gnuplot not found, using plotters backend
+Benchmarking iterate_1000/pomap
+Benchmarking iterate_1000/pomap: Warming up for 3.0000 s
+Benchmarking iterate_1000/pomap: Collecting 100 samples in estimated 5.0014 s (4.3M iterations)
+Benchmarking iterate_1000/pomap: Analyzing
+iterate_1000/pomap      time:   [1.1656 µs 1.1686 µs 1.1718 µs]
+Found 6 outliers among 100 measurements (6.00%)
+  1 (1.00%) low mild
+  3 (3.00%) high mild
+  2 (2.00%) high severe
+Benchmarking iterate_1000/hashbrown
+Benchmarking iterate_1000/hashbrown: Warming up for 3.0000 s
+Benchmarking iterate_1000/hashbrown: Collecting 100 samples in estimated 5.0004 s (9.3M iterations)
+Benchmarking iterate_1000/hashbrown: Analyzing
+iterate_1000/hashbrown  time:   [509.76 ns 512.50 ns 515.59 ns]
+Found 3 outliers among 100 measurements (3.00%)
+  2 (2.00%) high mild
+  1 (1.00%) high severe
+Benchmarking iterate_1000/std_hashmap
+Benchmarking iterate_1000/std_hashmap: Warming up for 3.0000 s
+Benchmarking iterate_1000/std_hashmap: Collecting 100 samples in estimated 5.0007 s (9.7M iterations)
+Benchmarking iterate_1000/std_hashmap: Analyzing
+iterate_1000/std_hashmap
+                        time:   [507.84 ns 509.81 ns 512.00 ns]
+Found 3 outliers among 100 measurements (3.00%)
+  3 (3.00%) high mild
+Benchmarking iterate_1000/btreemap
+Benchmarking iterate_1000/btreemap: Warming up for 3.0000 s
+Benchmarking iterate_1000/btreemap: Collecting 100 samples in estimated 5.0005 s (8.0M iterations)
+Benchmarking iterate_1000/btreemap: Analyzing
+iterate_1000/btreemap   time:   [622.22 ns 623.07 ns 624.01 ns]
+Found 2 outliers among 100 measurements (2.00%)
+  1 (1.00%) high mild
+  1 (1.00%) high severe
+Comparison for group 'iterate_1000':
+  Higher is better; best performer is 1.00 (typical).
+      1st iterate_1000/std_hashmap: 1.000 (0.5098 µs), rank: [0.5% faster than 2nd]
+      2nd iterate_1000/hashbrown:   0.995 (0.5125 µs), rank: [0.5% slower than 1st, 21.6% faster than 3rd]
+      3rd iterate_1000/btreemap:    0.818 (0.6231 µs), rank: [21.6% slower than 2nd, 87.5% faster than 4th]
+      4th iterate_1000/pomap:       0.436 (1.1686 µs), rank: [87.5% slower than 3rd]
+
+Benchmarking iterate_100000/pomap
+Benchmarking iterate_100000/pomap: Warming up for 3.0000 s
+Benchmarking iterate_100000/pomap: Collecting 100 samples in estimated 5.1712 s (10k iterations)
+Benchmarking iterate_100000/pomap: Analyzing
+iterate_100000/pomap    time:   [519.25 µs 526.09 µs 534.34 µs]
+Found 3 outliers among 100 measurements (3.00%)
+  3 (3.00%) high severe
+Benchmarking iterate_100000/hashbrown
+Benchmarking iterate_100000/hashbrown: Warming up for 3.0000 s
+Benchmarking iterate_100000/hashbrown: Collecting 100 samples in estimated 5.4575 s (45k iterations)
+Benchmarking iterate_100000/hashbrown: Analyzing
+iterate_100000/hashbrown
+                        time:   [119.67 µs 119.88 µs 120.13 µs]
+Found 9 outliers among 100 measurements (9.00%)
+  1 (1.00%) low mild
+  5 (5.00%) high mild
+  3 (3.00%) high severe
+Benchmarking iterate_100000/std_hashmap
+Benchmarking iterate_100000/std_hashmap: Warming up for 3.0000 s
+Benchmarking iterate_100000/std_hashmap: Collecting 100 samples in estimated 5.3866 s (45k iterations)
+Benchmarking iterate_100000/std_hashmap: Analyzing
+iterate_100000/std_hashmap
+                        time:   [117.85 µs 118.17 µs 118.53 µs]
+Found 8 outliers among 100 measurements (8.00%)
+  4 (4.00%) high mild
+  4 (4.00%) high severe
+Benchmarking iterate_100000/btreemap
+Benchmarking iterate_100000/btreemap: Warming up for 3.0000 s
+Benchmarking iterate_100000/btreemap: Collecting 100 samples in estimated 5.8522 s (30k iterations)
+Benchmarking iterate_100000/btreemap: Analyzing
+iterate_100000/btreemap time:   [191.03 µs 191.58 µs 192.16 µs]
+Found 7 outliers among 100 measurements (7.00%)
+  2 (2.00%) low mild
+  3 (3.00%) high mild
+  2 (2.00%) high severe
+Comparison for group 'iterate_100000':
+  Higher is better; best performer is 1.00 (typical).
+      1st iterate_100000/std_hashmap: 1.000 (118.17 µs), rank: [1.4% faster than 2nd]
+      2nd iterate_100000/hashbrown:   0.986 (119.88 µs), rank: [1.4% slower than 1st, 59.8% faster than 3rd]
+      3rd iterate_100000/btreemap:    0.617 (191.58 µs), rank: [59.8% slower than 2nd, 174.6% faster than 4th]
+      4th iterate_100000/pomap:       0.225 (526.09 µs), rank: [174.6% slower than 3rd]
+
+Benchmarking iterate_1000000/pomap
+Benchmarking iterate_1000000/pomap: Warming up for 3.0000 s
+Benchmarking iterate_1000000/pomap: Collecting 100 samples in estimated 5.4193 s (1100 iterations)
+Benchmarking iterate_1000000/pomap: Analyzing
+iterate_1000000/pomap   time:   [4.9232 ms 4.9284 ms 4.9338 ms]
+Found 4 outliers among 100 measurements (4.00%)
+  4 (4.00%) high mild
+Benchmarking iterate_1000000/hashbrown
+Benchmarking iterate_1000000/hashbrown: Warming up for 3.0000 s
+
+Warning: Unable to complete 100 samples in 5.0s. You may wish to increase target time to 10.0s, enable flat sampling, or reduce sample count to 40.
+Benchmarking iterate_1000000/hashbrown: Collecting 100 samples in estimated 9.9676 s (5050 iterations)
+Benchmarking iterate_1000000/hashbrown: Analyzing
+iterate_1000000/hashbrown
+                        time:   [1.9761 ms 1.9849 ms 1.9969 ms]
+Found 6 outliers among 100 measurements (6.00%)
+  2 (2.00%) low mild
+  2 (2.00%) high mild
+  2 (2.00%) high severe
+Benchmarking iterate_1000000/std_hashmap
+Benchmarking iterate_1000000/std_hashmap: Warming up for 3.0000 s
+
+Warning: Unable to complete 100 samples in 5.0s. You may wish to increase target time to 9.9s, enable flat sampling, or reduce sample count to 40.
+Benchmarking iterate_1000000/std_hashmap: Collecting 100 samples in estimated 9.9337 s (5050 iterations)
+Benchmarking iterate_1000000/std_hashmap: Analyzing
+iterate_1000000/std_hashmap
+                        time:   [1.9736 ms 1.9846 ms 2.0000 ms]
+Found 6 outliers among 100 measurements (6.00%)
+  1 (1.00%) low mild
+  2 (2.00%) high mild
+  3 (3.00%) high severe
+Benchmarking iterate_1000000/btreemap
+Benchmarking iterate_1000000/btreemap: Warming up for 3.0000 s
+Benchmarking iterate_1000000/btreemap: Collecting 100 samples in estimated 5.0099 s (1000 iterations)
+Benchmarking iterate_1000000/btreemap: Analyzing
+iterate_1000000/btreemap
+                        time:   [4.7847 ms 4.8459 ms 4.9123 ms]
+Found 7 outliers among 100 measurements (7.00%)
+  5 (5.00%) high mild
+  2 (2.00%) high severe
+Comparison for group 'iterate_1000000':
+  Higher is better; best performer is 1.00 (typical).
+      1st iterate_1000000/std_hashmap: 1.000 (1.9846 ms), rank: [0.0% faster than 2nd]
+      2nd iterate_1000000/hashbrown:   1.000 (1.9849 ms), rank: [0.0% slower than 1st, 144.1% faster than 3rd]
+      3rd iterate_1000000/btreemap:    0.410 (4.8459 ms), rank: [144.1% slower than 2nd, 1.7% faster than 4th]
+      4th iterate_1000000/pomap:       0.403 (4.9284 ms), rank: [1.7% slower than 3rd]
+
+    Finished `bench` profile [optimized] target(s) in 0.04s
+     Running benches/iter_bench.rs (target/release/deps/iter_bench-4d8e904216b8a806)
+Gnuplot not found, using plotters backend
+Benchmarking iterate_1000/pomap
+Benchmarking iterate_1000/pomap: Warming up for 3.0000 s
+Benchmarking iterate_1000/pomap: Collecting 100 samples in estimated 5.0036 s (4.2M iterations)
+Benchmarking iterate_1000/pomap: Analyzing
+iterate_1000/pomap      time:   [1.2005 µs 1.2020 µs 1.2037 µs]
+                        change: [+2.1304% +2.6050% +3.0454%] (p = 0.00 < 0.05)
+                        Performance has regressed.
+Found 11 outliers among 100 measurements (11.00%)
+  2 (2.00%) low severe
+  1 (1.00%) low mild
+  5 (5.00%) high mild
+  3 (3.00%) high severe
+Benchmarking iterate_1000/hashbrown
+Benchmarking iterate_1000/hashbrown: Warming up for 3.0000 s
+Benchmarking iterate_1000/hashbrown: Collecting 100 samples in estimated 5.0025 s (9.8M iterations)
+Benchmarking iterate_1000/hashbrown: Analyzing
+iterate_1000/hashbrown  time:   [507.61 ns 509.17 ns 510.94 ns]
+                        change: [−0.9394% −0.0756% +1.0171%] (p = 0.89 > 0.05)
+                        No change in performance detected.
+Found 9 outliers among 100 measurements (9.00%)
+  6 (6.00%) high mild
+  3 (3.00%) high severe
+Benchmarking iterate_1000/std_hashmap
+Benchmarking iterate_1000/std_hashmap: Warming up for 3.0000 s
+Benchmarking iterate_1000/std_hashmap: Collecting 100 samples in estimated 5.0008 s (9.5M iterations)
+Benchmarking iterate_1000/std_hashmap: Analyzing
+iterate_1000/std_hashmap
+                        time:   [519.93 ns 521.64 ns 523.33 ns]
+                        change: [+1.9988% +2.4775% +2.9562%] (p = 0.00 < 0.05)
+                        Performance has regressed.
+Found 2 outliers among 100 measurements (2.00%)
+  2 (2.00%) high mild
+Benchmarking iterate_1000/btreemap
+Benchmarking iterate_1000/btreemap: Warming up for 3.0000 s
+Benchmarking iterate_1000/btreemap: Collecting 100 samples in estimated 5.0000 s (8.0M iterations)
+Benchmarking iterate_1000/btreemap: Analyzing
+iterate_1000/btreemap   time:   [622.58 ns 623.60 ns 624.66 ns]
+                        change: [−0.2696% −0.0227% +0.2172%] (p = 0.85 > 0.05)
+                        No change in performance detected.
+Found 1 outliers among 100 measurements (1.00%)
+  1 (1.00%) high mild
+Comparison for group 'iterate_1000':
+  Higher is better; best performer is 1.00 (typical).
+      1st iterate_1000/hashbrown:   1.000 (0.5092 µs), change: [+0.001, −0.0756%], rank: [2.5% faster than 2nd]
+      2nd iterate_1000/std_hashmap: 0.976 (0.5216 µs), change: [-0.024, +2.4775%], rank: [2.5% slower than 1st, 19.5% faster than 3rd]
+      3rd iterate_1000/btreemap:    0.816 (0.6236 µs), change: [0.000, −0.0227%], rank: [19.5% slower than 2nd, 92.8% faster than 4th]
+      4th iterate_1000/pomap:       0.424 (1.2020 µs), change: [-0.011, +2.6050%], rank: [92.8% slower than 3rd]
+
+Benchmarking iterate_100000/pomap
+Benchmarking iterate_100000/pomap: Warming up for 3.0000 s
+Benchmarking iterate_100000/pomap: Collecting 100 samples in estimated 5.1766 s (10k iterations)
+Benchmarking iterate_100000/pomap: Analyzing
+iterate_100000/pomap    time:   [512.23 µs 515.24 µs 518.28 µs]
+                        change: [−2.4685% −1.2225% −0.0749%] (p = 0.05 < 0.05)
+                        Change within noise threshold.
+Benchmarking iterate_100000/hashbrown
+Benchmarking iterate_100000/hashbrown: Warming up for 3.0000 s
+Benchmarking iterate_100000/hashbrown: Collecting 100 samples in estimated 5.4208 s (45k iterations)
+Benchmarking iterate_100000/hashbrown: Analyzing
+iterate_100000/hashbrown
+                        time:   [119.27 µs 119.60 µs 120.11 µs]
+                        change: [−0.6744% −0.4014% −0.0436%] (p = 0.01 < 0.05)
+                        Change within noise threshold.
+Found 10 outliers among 100 measurements (10.00%)
+  2 (2.00%) low mild
+  3 (3.00%) high mild
+  5 (5.00%) high severe
+Benchmarking iterate_100000/std_hashmap
+Benchmarking iterate_100000/std_hashmap: Warming up for 3.0000 s
+Benchmarking iterate_100000/std_hashmap: Collecting 100 samples in estimated 5.3801 s (45k iterations)
+Benchmarking iterate_100000/std_hashmap: Analyzing
+iterate_100000/std_hashmap
+                        time:   [118.31 µs 118.48 µs 118.70 µs]
+                        change: [+0.0779% +0.3445% +0.5819%] (p = 0.01 < 0.05)
+                        Change within noise threshold.
+Found 9 outliers among 100 measurements (9.00%)
+  2 (2.00%) low mild
+  4 (4.00%) high mild
+  3 (3.00%) high severe
+Benchmarking iterate_100000/btreemap
+Benchmarking iterate_100000/btreemap: Warming up for 3.0000 s
+Benchmarking iterate_100000/btreemap: Collecting 100 samples in estimated 5.8344 s (30k iterations)
+Benchmarking iterate_100000/btreemap: Analyzing
+iterate_100000/btreemap time:   [190.32 µs 191.14 µs 192.05 µs]
+                        change: [−0.8805% −0.4033% +0.0604%] (p = 0.09 > 0.05)
+                        No change in performance detected.
+Found 9 outliers among 100 measurements (9.00%)
+  3 (3.00%) low mild
+  5 (5.00%) high mild
+  1 (1.00%) high severe
+Comparison for group 'iterate_100000':
+  Higher is better; best performer is 1.00 (typical).
+      1st iterate_100000/std_hashmap: 1.000 (118.48 µs), change: [0.000, +0.3445%], rank: [0.9% faster than 2nd]
+      2nd iterate_100000/hashbrown:   0.991 (119.60 µs), change: [+0.007, −0.4014%], rank: [0.9% slower than 1st, 59.8% faster than 3rd]
+      3rd iterate_100000/btreemap:    0.620 (191.14 µs), change: [+0.005, −0.4033%], rank: [59.8% slower than 2nd, 169.6% faster than 4th]
+      4th iterate_100000/pomap:       0.230 (515.24 µs), change: [+0.004, −1.2225%], rank: [169.6% slower than 3rd]
+
+Benchmarking iterate_1000000/pomap
+Benchmarking iterate_1000000/pomap: Warming up for 3.0000 s
+Benchmarking iterate_1000000/pomap: Collecting 100 samples in estimated 5.4009 s (1100 iterations)
+Benchmarking iterate_1000000/pomap: Analyzing
+iterate_1000000/pomap   time:   [4.9217 ms 4.9310 ms 4.9416 ms]
+                        change: [−0.1608% +0.0526% +0.3084%] (p = 0.66 > 0.05)
+                        No change in performance detected.
+Found 7 outliers among 100 measurements (7.00%)
+  6 (6.00%) high mild
+  1 (1.00%) high severe
+Benchmarking iterate_1000000/hashbrown
+Benchmarking iterate_1000000/hashbrown: Warming up for 3.0000 s
+
+Warning: Unable to complete 100 samples in 5.0s. You may wish to increase target time to 10.0s, enable flat sampling, or reduce sample count to 40.
+Benchmarking iterate_1000000/hashbrown: Collecting 100 samples in estimated 9.9566 s (5050 iterations)
+Benchmarking iterate_1000000/hashbrown: Analyzing
+iterate_1000000/hashbrown
+                        time:   [1.9703 ms 1.9714 ms 1.9725 ms]
+                        change: [−0.9709% −0.4399% −0.0447%] (p = 0.05 > 0.05)
+                        No change in performance detected.
+Found 7 outliers among 100 measurements (7.00%)
+  3 (3.00%) low mild
+  3 (3.00%) high mild
+  1 (1.00%) high severe
+Benchmarking iterate_1000000/std_hashmap
+Benchmarking iterate_1000000/std_hashmap: Warming up for 3.0000 s
+
+Warning: Unable to complete 100 samples in 5.0s. You may wish to increase target time to 9.9s, enable flat sampling, or reduce sample count to 40.
+Benchmarking iterate_1000000/std_hashmap: Collecting 100 samples in estimated 9.9309 s (5050 iterations)
+Benchmarking iterate_1000000/std_hashmap: Analyzing
+iterate_1000000/std_hashmap
+                        time:   [1.9630 ms 1.9653 ms 1.9678 ms]
+                        change: [−0.8044% −0.3493% −0.0030%] (p = 0.09 > 0.05)
+                        No change in performance detected.
+Found 10 outliers among 100 measurements (10.00%)
+  1 (1.00%) low mild
+  8 (8.00%) high mild
+  1 (1.00%) high severe
+Benchmarking iterate_1000000/btreemap
+Benchmarking iterate_1000000/btreemap: Warming up for 3.0000 s
+Benchmarking iterate_1000000/btreemap: Collecting 100 samples in estimated 5.4030 s (1100 iterations)
+Benchmarking iterate_1000000/btreemap: Analyzing
+iterate_1000000/btreemap
+                        time:   [4.7856 ms 4.8346 ms 4.8850 ms]
+                        change: [−1.8860% −0.2326% +1.4544%] (p = 0.78 > 0.05)
+                        No change in performance detected.
+Comparison for group 'iterate_1000000':
+  Higher is better; best performer is 1.00 (typical).
+      1st iterate_1000000/std_hashmap: 1.000 (1.9653 ms), change: [0.000, −0.3493%], rank: [0.3% faster than 2nd]
+      2nd iterate_1000000/hashbrown:   0.997 (1.9714 ms), change: [+0.001, −0.4399%], rank: [0.3% slower than 1st, 145.2% faster than 3rd]
+      3rd iterate_1000000/btreemap:    0.407 (4.8346 ms), change: [0.000, −0.2326%], rank: [145.2% slower than 2nd, 2.0% faster than 4th]
+      4th iterate_1000000/pomap:       0.399 (4.9310 ms), change: [-0.002, +0.0526%], rank: [2.0% slower than 3rd]
+
+    Finished `bench` profile [optimized] target(s) in 0.04s
+     Running benches/iter_bench.rs (target/release/deps/iter_bench-4d8e904216b8a806)
+Gnuplot not found, using plotters backend
+Benchmarking iterate_1000/pomap
+Benchmarking iterate_1000/pomap: Warming up for 3.0000 s
+Benchmarking iterate_1000/pomap: Collecting 100 samples in estimated 5.0046 s (4.1M iterations)
+Benchmarking iterate_1000/pomap: Analyzing
+iterate_1000/pomap      time:   [1.2123 µs 1.2165 µs 1.2203 µs]
+                        change: [+0.6496% +0.9885% +1.3506%] (p = 0.00 < 0.05)
+                        Change within noise threshold.
+Found 4 outliers among 100 measurements (4.00%)
+  4 (4.00%) low mild
+Benchmarking iterate_1000/hashbrown
+Benchmarking iterate_1000/hashbrown: Warming up for 3.0000 s
+Benchmarking iterate_1000/hashbrown: Collecting 100 samples in estimated 5.0024 s (9.8M iterations)
+Benchmarking iterate_1000/hashbrown: Analyzing
+iterate_1000/hashbrown  time:   [508.58 ns 509.68 ns 510.74 ns]
+                        change: [−1.6577% −0.7274% −0.0330%] (p = 0.08 > 0.05)
+                        No change in performance detected.
+Benchmarking iterate_1000/std_hashmap
+Benchmarking iterate_1000/std_hashmap: Warming up for 3.0000 s
+Benchmarking iterate_1000/std_hashmap: Collecting 100 samples in estimated 5.0023 s (9.8M iterations)
+Benchmarking iterate_1000/std_hashmap: Analyzing
+iterate_1000/std_hashmap
+                        time:   [506.70 ns 508.87 ns 511.45 ns]
+                        change: [−3.1866% −2.7568% −2.3370%] (p = 0.00 < 0.05)
+                        Performance has improved.
+Found 3 outliers among 100 measurements (3.00%)
+  2 (2.00%) high mild
+  1 (1.00%) high severe
+Benchmarking iterate_1000/btreemap
+Benchmarking iterate_1000/btreemap: Warming up for 3.0000 s
+Benchmarking iterate_1000/btreemap: Collecting 100 samples in estimated 5.0029 s (8.0M iterations)
+Benchmarking iterate_1000/btreemap: Analyzing
+iterate_1000/btreemap   time:   [629.65 ns 631.00 ns 632.51 ns]
+                        change: [+1.1301% +1.5718% +2.1905%] (p = 0.00 < 0.05)
+                        Performance has regressed.
+Found 16 outliers among 100 measurements (16.00%)
+  5 (5.00%) low mild
+  3 (3.00%) high mild
+  8 (8.00%) high severe
+Comparison for group 'iterate_1000':
+  Higher is better; best performer is 1.00 (typical).
+      1st iterate_1000/std_hashmap: 1.000 (0.5089 µs), change: [+0.019, −2.7568%], rank: [0.2% faster than 2nd]
+      2nd iterate_1000/hashbrown:   0.998 (0.5097 µs), change: [-0.002, −0.7274%], rank: [0.2% slower than 1st, 23.8% faster than 3rd]
+      3rd iterate_1000/btreemap:    0.806 (0.6310 µs), change: [-0.020, +1.5718%], rank: [23.8% slower than 2nd, 92.8% faster than 4th]
+      4th iterate_1000/pomap:       0.418 (1.2165 µs), change: [-0.008, +0.9885%], rank: [92.8% slower than 3rd]
+
+Benchmarking iterate_100000/pomap
+Benchmarking iterate_100000/pomap: Warming up for 3.0000 s
+Benchmarking iterate_100000/pomap: Collecting 100 samples in estimated 5.4218 s (10k iterations)
+Benchmarking iterate_100000/pomap: Analyzing
+iterate_100000/pomap    time:   [529.70 µs 533.62 µs 537.71 µs]
+                        change: [+2.7531% +3.5808% +4.5215%] (p = 0.00 < 0.05)
+                        Performance has regressed.
+Found 2 outliers among 100 measurements (2.00%)
+  1 (1.00%) low mild
+  1 (1.00%) high mild
+Benchmarking iterate_100000/hashbrown
+Benchmarking iterate_100000/hashbrown: Warming up for 3.0000 s
+Benchmarking iterate_100000/hashbrown: Collecting 100 samples in estimated 5.5078 s (45k iterations)
+Benchmarking iterate_100000/hashbrown: Analyzing
+iterate_100000/hashbrown
+                        time:   [118.33 µs 118.51 µs 118.75 µs]
+                        change: [−0.4494% +0.0213% +0.5288%] (p = 0.93 > 0.05)
+                        No change in performance detected.
+Found 7 outliers among 100 measurements (7.00%)
+  5 (5.00%) high mild
+  2 (2.00%) high severe
+Benchmarking iterate_100000/std_hashmap
+Benchmarking iterate_100000/std_hashmap: Warming up for 3.0000 s
+Benchmarking iterate_100000/std_hashmap: Collecting 100 samples in estimated 5.4356 s (45k iterations)
+Benchmarking iterate_100000/std_hashmap: Analyzing
+iterate_100000/std_hashmap
+                        time:   [120.92 µs 121.78 µs 122.67 µs]
+                        change: [+0.7167% +1.2275% +1.8181%] (p = 0.00 < 0.05)
+                        Change within noise threshold.
+Found 2 outliers among 100 measurements (2.00%)
+  2 (2.00%) high mild
+Benchmarking iterate_100000/btreemap
+Benchmarking iterate_100000/btreemap: Warming up for 3.0000 s
+Benchmarking iterate_100000/btreemap: Collecting 100 samples in estimated 5.9261 s (30k iterations)
+Benchmarking iterate_100000/btreemap: Analyzing
+iterate_100000/btreemap time:   [189.02 µs 189.59 µs 190.17 µs]
+                        change: [−0.6800% −0.2052% +0.3093%] (p = 0.40 > 0.05)
+                        No change in performance detected.
+Found 4 outliers among 100 measurements (4.00%)
+  3 (3.00%) high mild
+  1 (1.00%) high severe
+Comparison for group 'iterate_100000':
+  Higher is better; best performer is 1.00 (typical).
+      1st iterate_100000/hashbrown:   1.000 (118.51 µs), change: [0.000, +0.0213%], rank: [2.8% faster than 2nd]
+      2nd iterate_100000/std_hashmap: 0.973 (121.78 µs), change: [-0.012, +1.2275%], rank: [2.8% slower than 1st, 55.7% faster than 3rd]
+      3rd iterate_100000/btreemap:    0.625 (189.59 µs), change: [+0.001, −0.2052%], rank: [55.7% slower than 2nd, 181.5% faster than 4th]
+      4th iterate_100000/pomap:       0.222 (533.62 µs), change: [-0.008, +3.5808%], rank: [181.5% slower than 3rd]
+
+Benchmarking iterate_1000000/pomap
+Benchmarking iterate_1000000/pomap: Warming up for 3.0000 s
+Benchmarking iterate_1000000/pomap: Collecting 100 samples in estimated 5.4173 s (1100 iterations)
+Benchmarking iterate_1000000/pomap: Analyzing
+iterate_1000000/pomap   time:   [4.9211 ms 4.9285 ms 4.9369 ms]
+                        change: [−0.3262% −0.0514% +0.2038%] (p = 0.70 > 0.05)
+                        No change in performance detected.
+Found 5 outliers among 100 measurements (5.00%)
+  1 (1.00%) low mild
+  1 (1.00%) high mild
+  3 (3.00%) high severe
+Benchmarking iterate_1000000/hashbrown
+Benchmarking iterate_1000000/hashbrown: Warming up for 3.0000 s
+
+Warning: Unable to complete 100 samples in 5.0s. You may wish to increase target time to 10.0s, enable flat sampling, or reduce sample count to 40.
+Benchmarking iterate_1000000/hashbrown: Collecting 100 samples in estimated 9.9807 s (5050 iterations)
+Benchmarking iterate_1000000/hashbrown: Analyzing
+iterate_1000000/hashbrown
+                        time:   [1.9774 ms 1.9801 ms 1.9828 ms]
+                        change: [+0.1620% +0.2893% +0.4164%] (p = 0.00 < 0.05)
+                        Change within noise threshold.
+Found 4 outliers among 100 measurements (4.00%)
+  4 (4.00%) high mild
+Benchmarking iterate_1000000/std_hashmap
+Benchmarking iterate_1000000/std_hashmap: Warming up for 3.0000 s
+Benchmarking iterate_1000000/std_hashmap: Collecting 100 samples in estimated 5.1514 s (2600 iterations)
+Benchmarking iterate_1000000/std_hashmap: Analyzing
+iterate_1000000/std_hashmap
+                        time:   [1.9686 ms 1.9707 ms 1.9730 ms]
+                        change: [+0.1818% +0.3375% +0.4974%] (p = 0.00 < 0.05)
+                        Change within noise threshold.
+Found 2 outliers among 100 measurements (2.00%)
+  2 (2.00%) high mild
+Benchmarking iterate_1000000/btreemap
+Benchmarking iterate_1000000/btreemap: Warming up for 3.0000 s
+Benchmarking iterate_1000000/btreemap: Collecting 100 samples in estimated 5.4525 s (1100 iterations)
+Benchmarking iterate_1000000/btreemap: Analyzing
+iterate_1000000/btreemap
+                        time:   [4.7478 ms 4.8021 ms 4.8595 ms]
+                        change: [−2.1399% −0.6736% +1.0088%] (p = 0.40 > 0.05)
+                        No change in performance detected.
+Found 3 outliers among 100 measurements (3.00%)
+  3 (3.00%) high mild
+Comparison for group 'iterate_1000000':
+  Higher is better; best performer is 1.00 (typical).
+      1st iterate_1000000/std_hashmap: 1.000 (1.9707 ms), change: [0.000, +0.3375%], rank: [0.5% faster than 2nd]
+      2nd iterate_1000000/hashbrown:   0.995 (1.9801 ms), change: [0.000, +0.2893%], rank: [0.5% slower than 1st, 142.5% faster than 3rd]
+      3rd iterate_1000000/btreemap:    0.410 (4.8021 ms), change: [+0.004, −0.6736%], rank: [142.5% slower than 2nd, 2.6% faster than 4th]
+      4th iterate_1000000/pomap:       0.400 (4.9285 ms), change: [+0.002, −0.0514%], rank: [2.6% slower than 3rd]
+
