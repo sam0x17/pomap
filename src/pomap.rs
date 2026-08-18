@@ -847,6 +847,199 @@ impl<K: Key, V: Value, H: BuildHasher, const GROWTH: usize> PoMap<K, V, H, GROWT
         self.rebuild(ideal_range_for(self.len), false);
     }
 
+    // -----------------------------------------------------------------------
+    // Set algebra: streaming merges over two hash-sorted tables
+    // -----------------------------------------------------------------------
+
+    /// Returns a new map with every key from `self` and `other`; on keys
+    /// present in both, **`other`'s value wins** (matching `extend`
+    /// semantics).
+    ///
+    /// Runs in **O(n + m)** as a streaming merge of the two hash-sorted
+    /// tables — no re-hashing, no probing, no shifting — and the result is
+    /// **compact-canonical** (identical bytes to building the same contents
+    /// and calling [`compact`](Self::compact)).
+    ///
+    /// Like the map-level `Ord`/`Hash` impls, this requires both maps to use
+    /// the same per-type-deterministic hasher (true for the defaults): the
+    /// merge trusts the stored hashes.
+    ///
+    /// ```
+    /// use pomap::PoMap;
+    /// let a: PoMap<u32, &str> = [(1, "a"), (2, "a")].into_iter().collect();
+    /// let b: PoMap<u32, &str> = [(2, "b"), (3, "b")].into_iter().collect();
+    /// let u = a.union(&b);
+    /// assert_eq!(u.len(), 3);
+    /// assert_eq!(u[&2], "b"); // right-biased
+    /// ```
+    pub fn union(&self, other: &Self) -> Self
+    where
+        H: Clone,
+    {
+        self.merge_build(other, MergeMode::Union)
+    }
+
+    /// Returns a new map with the keys present in **both** maps, with values
+    /// taken from `self`. O(n + m) streaming merge; compact-canonical result.
+    pub fn intersection(&self, other: &Self) -> Self
+    where
+        H: Clone,
+    {
+        self.merge_build(other, MergeMode::Intersection)
+    }
+
+    /// Returns a new map with the keys of `self` that are **not** in `other`.
+    /// O(n + m) streaming merge; compact-canonical result.
+    pub fn difference(&self, other: &Self) -> Self
+    where
+        H: Clone,
+    {
+        self.merge_build(other, MergeMode::Difference)
+    }
+
+    /// Returns a new map with the keys present in **exactly one** of the two
+    /// maps. O(n + m) streaming merge; compact-canonical result.
+    pub fn symmetric_difference(&self, other: &Self) -> Self
+    where
+        H: Clone,
+    {
+        self.merge_build(other, MergeMode::SymmetricDifference)
+    }
+
+    /// Moves all entries of `other` into `self`, leaving `other` empty. On
+    /// duplicate keys `other`'s value wins ([`BTreeMap::append`] parity).
+    /// Implemented as a streaming [`union`](Self::union) rebuild.
+    ///
+    /// [`BTreeMap::append`]: alloc::collections::BTreeMap::append
+    pub fn append(&mut self, other: &mut Self)
+    where
+        H: Clone,
+    {
+        *self = self.union(other);
+        other.clear();
+    }
+
+    /// Core of the set operations: a two-pass sorted merge. Pass 1 counts the
+    /// result; pass 2 places cloned entries with the canonical cursor walk
+    /// (retrying at a doubled table on tail overflow, like `rebuild`), so the
+    /// output is exactly what `compact()` would produce for those contents.
+    fn merge_build(&self, other: &Self, mode: MergeMode) -> Self
+    where
+        H: Clone,
+    {
+        // Pass 1: count emissions.
+        let mut count = 0usize;
+        self.merge_walk(other, |_, item| {
+            if mode.pick::<K, V>(&item).is_some() {
+                count += 1;
+            }
+        });
+
+        // Pass 2 (with doubling retry): place emissions in canonical order.
+        let mut target = ideal_range_for(count);
+        'retry: loop {
+            let new_total = target
+                .checked_add(padding_for(target))
+                .expect("PoMap capacity overflow");
+            let new_slots = Slots::<K, V>::new(new_total);
+            let new_meta = Meta::new(target);
+            let last_usable = new_total - 1;
+            let mut cursor = 0usize;
+            let mut placed = 0usize;
+            let mut overflow = false;
+            self.merge_walk(other, |hash, item| {
+                if overflow {
+                    return;
+                }
+                let Some(entry) = mode.pick::<K, V>(&item) else {
+                    return;
+                };
+                cursor = cursor.max(new_meta.ideal_slot(hash));
+                if cursor >= last_usable {
+                    overflow = true;
+                    return;
+                }
+                unsafe {
+                    *new_slots.entries.add(cursor) = MaybeUninit::new(SlotEntry {
+                        hash,
+                        key: entry.key.clone(),
+                        value: entry.value.clone(),
+                    });
+                }
+                cursor += 1;
+                placed += 1;
+            });
+            if overflow {
+                // `new_slots` drops normally: it owns the clones placed so far.
+                target = target.checked_mul(2).expect("PoMap capacity overflow");
+                continue 'retry;
+            }
+            debug_assert_eq!(placed, count);
+            return Self {
+                len: count,
+                grow_threshold: target * LOAD_NUM / LOAD_DEN,
+                meta: new_meta,
+                slots: new_slots,
+                hash_builder: self.hash_builder.clone(),
+            };
+        }
+    }
+
+    /// Walks the two hash-sorted tables in lockstep, invoking `f` once per
+    /// merged key in canonical (hash, key) order with the entry (or entries)
+    /// holding it. The trailing vacant slot guarantees each side's skip scan
+    /// terminates.
+    fn merge_walk<'m>(
+        &'m self,
+        other: &'m Self,
+        mut f: impl FnMut(u64, MergeItem<'m, K, V>),
+    ) {
+        let a = &self.slots;
+        let b = &other.slots;
+        let (mut i, mut j) = (0usize, 0usize);
+        loop {
+            while a.hash_at(i) == EMPTY_HASH && i + 1 < a.total_slots {
+                i += 1;
+            }
+            while b.hash_at(j) == EMPTY_HASH && j + 1 < b.total_slots {
+                j += 1;
+            }
+            let ha = a.hash_at(i);
+            let hb = b.hash_at(j);
+            let ea = (ha != EMPTY_HASH).then(|| unsafe { &*(*a.entries.add(i)).as_ptr() });
+            let eb = (hb != EMPTY_HASH).then(|| unsafe { &*(*b.entries.add(j)).as_ptr() });
+            match (ea, eb) {
+                (None, None) => return,
+                (Some(x), None) => {
+                    f(ha, MergeItem::Left(x));
+                    i += 1;
+                }
+                (None, Some(y)) => {
+                    f(hb, MergeItem::Right(y));
+                    j += 1;
+                }
+                (Some(x), Some(y)) => {
+                    use core::cmp::Ordering::*;
+                    match ha.cmp(&hb).then_with(|| x.key.cmp(&y.key)) {
+                        Less => {
+                            f(ha, MergeItem::Left(x));
+                            i += 1;
+                        }
+                        Greater => {
+                            f(hb, MergeItem::Right(y));
+                            j += 1;
+                        }
+                        Equal => {
+                            f(ha, MergeItem::Both(x, y));
+                            i += 1;
+                            j += 1;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     /// Reserves capacity for at least `additional` more elements.
     ///
     /// # Panics
@@ -982,6 +1175,50 @@ impl<K: Key, V: Value, H: BuildHasher, const GROWTH: usize> PoMap<K, V, H, GROWT
         self.meta = new_meta;
         self.grow_threshold = new_ideal_range * LOAD_NUM / LOAD_DEN;
         true
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Set-algebra support types
+// ---------------------------------------------------------------------------
+
+/// Which set operation a merge performs.
+#[derive(Copy, Clone)]
+enum MergeMode {
+    Union,
+    Intersection,
+    Difference,
+    SymmetricDifference,
+}
+
+/// One merged element: present on the left, the right, or both sides.
+enum MergeItem<'m, K: Key, V: Value> {
+    Left(&'m SlotEntry<K, V>),
+    Right(&'m SlotEntry<K, V>),
+    Both(&'m SlotEntry<K, V>, &'m SlotEntry<K, V>),
+}
+
+impl MergeMode {
+    /// Selects which entry (if any) this mode emits for a merged element.
+    /// Union is right-biased on `Both` (matching `extend`); Intersection
+    /// takes the left value.
+    #[inline]
+    fn pick<'m, K: Key, V: Value>(
+        self,
+        item: &MergeItem<'m, K, V>,
+    ) -> Option<&'m SlotEntry<K, V>> {
+        match (self, item) {
+            (MergeMode::Union, MergeItem::Left(x)) => Some(x),
+            (MergeMode::Union, MergeItem::Right(y)) => Some(y),
+            (MergeMode::Union, MergeItem::Both(_, y)) => Some(y),
+            (MergeMode::Intersection, MergeItem::Both(x, _)) => Some(x),
+            (MergeMode::Intersection, _) => None,
+            (MergeMode::Difference, MergeItem::Left(x)) => Some(x),
+            (MergeMode::Difference, _) => None,
+            (MergeMode::SymmetricDifference, MergeItem::Left(x)) => Some(x),
+            (MergeMode::SymmetricDifference, MergeItem::Right(y)) => Some(y),
+            (MergeMode::SymmetricDifference, MergeItem::Both(..)) => None,
+        }
     }
 }
 
@@ -1734,6 +1971,54 @@ impl<K: Key, V: Value + Hash, H: BuildHasher, const GROWTH: usize> Hash
             k.hash(state);
             v.hash(state);
         }
+    }
+}
+
+impl<K: Key, V: Value, H: BuildHasher + Clone, const GROWTH: usize>
+    core::ops::BitOr<&PoMap<K, V, H, GROWTH>> for &PoMap<K, V, H, GROWTH>
+{
+    type Output = PoMap<K, V, H, GROWTH>;
+
+    /// [`union`](PoMap::union): `&a | &b` (right-biased on duplicate keys).
+    #[inline]
+    fn bitor(self, rhs: &PoMap<K, V, H, GROWTH>) -> Self::Output {
+        self.union(rhs)
+    }
+}
+
+impl<K: Key, V: Value, H: BuildHasher + Clone, const GROWTH: usize>
+    core::ops::BitAnd<&PoMap<K, V, H, GROWTH>> for &PoMap<K, V, H, GROWTH>
+{
+    type Output = PoMap<K, V, H, GROWTH>;
+
+    /// [`intersection`](PoMap::intersection): `&a & &b` (values from the left).
+    #[inline]
+    fn bitand(self, rhs: &PoMap<K, V, H, GROWTH>) -> Self::Output {
+        self.intersection(rhs)
+    }
+}
+
+impl<K: Key, V: Value, H: BuildHasher + Clone, const GROWTH: usize>
+    core::ops::Sub<&PoMap<K, V, H, GROWTH>> for &PoMap<K, V, H, GROWTH>
+{
+    type Output = PoMap<K, V, H, GROWTH>;
+
+    /// [`difference`](PoMap::difference): `&a - &b`.
+    #[inline]
+    fn sub(self, rhs: &PoMap<K, V, H, GROWTH>) -> Self::Output {
+        self.difference(rhs)
+    }
+}
+
+impl<K: Key, V: Value, H: BuildHasher + Clone, const GROWTH: usize>
+    core::ops::BitXor<&PoMap<K, V, H, GROWTH>> for &PoMap<K, V, H, GROWTH>
+{
+    type Output = PoMap<K, V, H, GROWTH>;
+
+    /// [`symmetric_difference`](PoMap::symmetric_difference): `&a ^ &b`.
+    #[inline]
+    fn bitxor(self, rhs: &PoMap<K, V, H, GROWTH>) -> Self::Output {
+        self.symmetric_difference(rhs)
     }
 }
 
@@ -2599,6 +2884,120 @@ mod tests {
         let mut rev = da.clone();
         rev.reverse();
         assert_eq!(dc, rev);
+    }
+
+    #[test]
+    fn set_algebra_streaming_merges() {
+        let mk = |pairs: &[(u64, u64)]| -> PoMap<u64, u64> {
+            pairs.iter().copied().collect()
+        };
+        let a = mk(&[(1, 10), (2, 10), (3, 10), (5, 10)]);
+        let b = mk(&[(2, 20), (3, 20), (4, 20), (6, 20)]);
+
+        let u = a.union(&b);
+        assert_eq!(u.len(), 6);
+        assert_eq!(u[&1], 10);
+        assert_eq!(u[&2], 20); // right-biased
+        assert_eq!(u[&3], 20);
+        assert_eq!(u[&4], 20);
+
+        let i = a.intersection(&b);
+        assert_eq!(i.len(), 2);
+        assert_eq!(i[&2], 10); // values from the left
+        assert_eq!(i[&3], 10);
+        assert_eq!(i.get(&1), None);
+
+        let d = a.difference(&b);
+        assert_eq!(d.len(), 2);
+        assert!(d.contains_key(&1) && d.contains_key(&5));
+
+        let x = a.symmetric_difference(&b);
+        assert_eq!(x.len(), 4);
+        assert!(x.contains_key(&1) && x.contains_key(&4));
+        assert!(!x.contains_key(&2) && !x.contains_key(&3));
+
+        // Operators mirror the methods.
+        assert_eq!(&a | &b, u);
+        assert_eq!(&a & &b, i);
+        assert_eq!(&a - &b, d);
+        assert_eq!(&a ^ &b, x);
+
+        // Identities on edge cases.
+        let e: PoMap<u64, u64> = PoMap::new();
+        assert_eq!(a.union(&e), a);
+        assert_eq!(e.union(&a), a);
+        assert_eq!(a.intersection(&e).len(), 0);
+        assert_eq!(a.difference(&e), a);
+
+        // append: right-biased move-union, other emptied.
+        let mut a2 = mk(&[(1, 10), (2, 10)]);
+        let mut b2 = mk(&[(2, 20), (3, 20)]);
+        a2.append(&mut b2);
+        assert!(b2.is_empty());
+        assert_eq!(a2.len(), 3);
+        assert_eq!(a2[&2], 20);
+    }
+
+    /// Merge outputs are compact-canonical: union(a, b) is byte-identical to
+    /// building the same contents by insertion and calling compact().
+    #[test]
+    fn union_is_compact_canonical() {
+        let mut a: PoMap<u64, u64> = PoMap::new();
+        let mut b: PoMap<u64, u64> = PoMap::new();
+        for k in 0..300u64 {
+            if k % 2 == 0 {
+                a.insert(k, k);
+            }
+            if k % 3 == 0 {
+                b.insert(k, k + 1000);
+            }
+        }
+        let u = a.union(&b);
+
+        let mut expect: PoMap<u64, u64> = PoMap::new();
+        for k in 0..300u64 {
+            if k % 2 == 0 {
+                expect.insert(k, k);
+            }
+            if k % 3 == 0 {
+                expect.insert(k, k + 1000); // later wins = right bias
+            }
+        }
+        expect.compact();
+
+        assert_eq!(u, expect);
+        assert_eq!(u.slots.total_slots, expect.slots.total_slots);
+        let bu = unsafe {
+            core::slice::from_raw_parts(u.slots.ptr.as_ptr(), u.slots.layout.size())
+        };
+        let be = unsafe {
+            core::slice::from_raw_parts(expect.slots.ptr.as_ptr(), expect.slots.layout.size())
+        };
+        assert_eq!(bu, be, "merge outputs must be compact-canonical");
+    }
+
+    /// Set algebra under total hash collision: the (hash, key) tie order makes
+    /// the merge walk see strictly increasing sequences on both sides.
+    #[test]
+    fn set_algebra_under_collisions() {
+        let mk = |keys: &[u64]| -> PoMap<u64, u64, ColliderBuildHasher> {
+            let mut m = PoMap::with_hasher(ColliderBuildHasher);
+            for &k in keys {
+                m.insert(k, k);
+            }
+            m
+        };
+        let a = mk(&[5, 1, 9, 3]);
+        let b = mk(&[3, 7, 1]);
+        let u = a.union(&b);
+        assert_eq!(u.len(), 5);
+        let keys: alloc::vec::Vec<u64> = u.keys().copied().collect();
+        assert_eq!(keys, alloc::vec![1, 3, 5, 7, 9]); // canonical tie order
+        let i = a.intersection(&b);
+        assert_eq!(i.len(), 2);
+        assert!(i.contains_key(&1) && i.contains_key(&3));
+        let x = a.symmetric_difference(&b);
+        assert_eq!(x.len(), 3);
     }
 
     /// Ord over maps is a lawful total order on content-distinct maps.

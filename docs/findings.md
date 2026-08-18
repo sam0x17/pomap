@@ -716,6 +716,29 @@ unconsumed entries — follow-up). **Headline: deterministic hash-order iteratio
 that beats the unordered incumbent at scale** — strictly dominating BTreeMap
 (4.8 ns/e) on both order-availability-per-cost and point-op speed.
 
+### 5.9 Streaming set algebra (feature + first measurements, 2026-08-18)
+
+The sorted-table invariant makes map set-operations **O(n+m) sorted merges**:
+`union` / `intersection` / `difference` / `symmetric_difference` (and `| & - ^`
+operators, plus `append`) walk both tables in lockstep — no probing, no
+shifting — and their outputs are **born compact-canonical** (tested:
+`union(a,b)` is byte-identical to insert-building the contents and calling
+`compact()`; ties canonicalize under total hash collision). One subtlety: the
+merge trusts stored hashes, so like map-`Ord`/`Hash` it requires the
+per-type-deterministic hasher discipline.
+
+**Measured vs hashbrown's conventional union (clone + extend), M5, single
+runs:** with u64 keys PoMap *loses* — 2.6×/2.3× at 100k, 1.5×/2.5× at 1M
+(disjoint/half-overlap) — because clone+extend is a near-memcpy plus ~2 ns
+inserts, while the merge walk pays the same unpredictable per-slot skip branch
+the naive iterator did (§5.8), twice (count + place passes). **With 128-byte
+String keys PoMap wins (0.911×) even with the naive walk** — hashbrown's
+extend re-hashes every key, PoMap's merge never hashes. Identified headroom:
+a masked-occupancy walk (the §5.8 fix, unapplied here) should close much of
+the u64 gap. Honest framing: the feature's guarantees are semantic
+(O(n+m) independent of hasher cost, canonical outputs, deterministic); its
+speed advantage begins where hashing is expensive — consistent with §5.7.
+
 ## 6. The design space: a measured Pareto frontier, plus negative results
 
 ### 6.1 Family benchmark (all seven engines, one harness)

@@ -32,6 +32,11 @@
 //! - **Deterministic endpoints**: [`PoMap::first_key_value`] /
 //!   [`PoMap::pop_first`] give a reproducible "arbitrary element" and drain
 //!   order.
+//! - **Streaming set algebra**: [`PoMap::union`], [`PoMap::intersection`],
+//!   [`PoMap::difference`], [`PoMap::symmetric_difference`] (and the
+//!   `| & - ^` operators, plus [`PoMap::append`]) run in O(n + m) as sorted
+//!   merges of the two tables — no re-hashing, no probing, no shifting — and
+//!   their outputs are born compact-canonical.
 //!
 //! # Example
 //!

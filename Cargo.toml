@@ -82,3 +82,7 @@ harness = false
 [[bench]]
 name = "family_bench"
 harness = false
+
+[[bench]]
+name = "union_bench"
+harness = false

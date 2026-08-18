@@ -1,0 +1,131 @@
+    Finished `bench` profile [optimized] target(s) in 0.03s
+     Running benches/union_bench.rs (target/release/deps/union_bench-38ea384d16b2a75c)
+Gnuplot not found, using plotters backend
+Benchmarking union_100000_disjoint/pomap
+Benchmarking union_100000_disjoint/pomap: Warming up for 3.0000 s
+Benchmarking union_100000_disjoint/pomap: Collecting 100 samples in estimated 5.0356 s (1600 iterations)
+Benchmarking union_100000_disjoint/pomap: Analyzing
+union_100000_disjoint/pomap
+                        time:   [3.1699 ms 3.1819 ms 3.1951 ms]
+Found 10 outliers among 100 measurements (10.00%)
+  3 (3.00%) low mild
+  3 (3.00%) high mild
+  4 (4.00%) high severe
+Benchmarking union_100000_disjoint/hashbrown
+Benchmarking union_100000_disjoint/hashbrown: Warming up for 3.0000 s
+
+Warning: Unable to complete 100 samples in 5.0s. You may wish to increase target time to 6.2s, enable flat sampling, or reduce sample count to 60.
+Benchmarking union_100000_disjoint/hashbrown: Collecting 100 samples in estimated 6.1991 s (5050 iterations)
+Benchmarking union_100000_disjoint/hashbrown: Analyzing
+union_100000_disjoint/hashbrown
+                        time:   [1.2305 ms 1.2329 ms 1.2356 ms]
+Found 9 outliers among 100 measurements (9.00%)
+  3 (3.00%) low mild
+  4 (4.00%) high mild
+  2 (2.00%) high severe
+Comparison for group 'union_100000_disjoint':
+  Higher is better; best performer is 1.00 (typical).
+      1st union_100000_disjoint/hashbrown: 1.000 (1.2329 ms), rank: [158.1% faster than 2nd]
+      2nd union_100000_disjoint/pomap:     0.387 (3.1819 ms), rank: [158.1% slower than 1st]
+
+Benchmarking union_100000_half/pomap
+Benchmarking union_100000_half/pomap: Warming up for 3.0000 s
+Benchmarking union_100000_half/pomap: Collecting 100 samples in estimated 5.0610 s (1700 iterations)
+Benchmarking union_100000_half/pomap: Analyzing
+union_100000_half/pomap time:   [2.9922 ms 3.0047 ms 3.0178 ms]
+Found 9 outliers among 100 measurements (9.00%)
+  1 (1.00%) low mild
+  6 (6.00%) high mild
+  2 (2.00%) high severe
+Benchmarking union_100000_half/hashbrown
+Benchmarking union_100000_half/hashbrown: Warming up for 3.0000 s
+
+Warning: Unable to complete 100 samples in 5.0s. You may wish to increase target time to 6.6s, enable flat sampling, or reduce sample count to 60.
+Benchmarking union_100000_half/hashbrown: Collecting 100 samples in estimated 6.6346 s (5050 iterations)
+Benchmarking union_100000_half/hashbrown: Analyzing
+union_100000_half/hashbrown
+                        time:   [1.3159 ms 1.3210 ms 1.3264 ms]
+Found 9 outliers among 100 measurements (9.00%)
+  2 (2.00%) low mild
+  7 (7.00%) high mild
+Comparison for group 'union_100000_half':
+  Higher is better; best performer is 1.00 (typical).
+      1st union_100000_half/hashbrown: 1.000 (1.3210 ms), rank: [127.5% faster than 2nd]
+      2nd union_100000_half/pomap:     0.440 (3.0047 ms), rank: [127.5% slower than 1st]
+
+Benchmarking union_1000000_disjoint/pomap
+Benchmarking union_1000000_disjoint/pomap: Warming up for 3.0000 s
+Benchmarking union_1000000_disjoint/pomap: Collecting 100 samples in estimated 5.9340 s (200 iterations)
+Benchmarking union_1000000_disjoint/pomap: Analyzing
+union_1000000_disjoint/pomap
+                        time:   [29.518 ms 29.569 ms 29.628 ms]
+Found 5 outliers among 100 measurements (5.00%)
+  2 (2.00%) high mild
+  3 (3.00%) high severe
+Benchmarking union_1000000_disjoint/hashbrown
+Benchmarking union_1000000_disjoint/hashbrown: Warming up for 3.0000 s
+Benchmarking union_1000000_disjoint/hashbrown: Collecting 100 samples in estimated 5.8884 s (300 iterations)
+Benchmarking union_1000000_disjoint/hashbrown: Analyzing
+union_1000000_disjoint/hashbrown
+                        time:   [19.583 ms 19.613 ms 19.643 ms]
+Found 15 outliers among 100 measurements (15.00%)
+  1 (1.00%) low severe
+  9 (9.00%) low mild
+  5 (5.00%) high mild
+Comparison for group 'union_1000000_disjoint':
+  Higher is better; best performer is 1.00 (typical).
+      1st union_1000000_disjoint/hashbrown: 1.000 (19.613 ms), rank: [50.8% faster than 2nd]
+      2nd union_1000000_disjoint/pomap:     0.663 (29.569 ms), rank: [50.8% slower than 1st]
+
+Benchmarking union_1000000_half/pomap
+Benchmarking union_1000000_half/pomap: Warming up for 3.0000 s
+Benchmarking union_1000000_half/pomap: Collecting 100 samples in estimated 5.8007 s (200 iterations)
+Benchmarking union_1000000_half/pomap: Analyzing
+union_1000000_half/pomap
+                        time:   [29.070 ms 29.118 ms 29.168 ms]
+Found 9 outliers among 100 measurements (9.00%)
+  4 (4.00%) low mild
+  4 (4.00%) high mild
+  1 (1.00%) high severe
+Benchmarking union_1000000_half/hashbrown
+Benchmarking union_1000000_half/hashbrown: Warming up for 3.0000 s
+Benchmarking union_1000000_half/hashbrown: Collecting 100 samples in estimated 5.9035 s (500 iterations)
+Benchmarking union_1000000_half/hashbrown: Analyzing
+union_1000000_half/hashbrown
+                        time:   [11.652 ms 11.673 ms 11.695 ms]
+Found 17 outliers among 100 measurements (17.00%)
+  4 (4.00%) low severe
+  8 (8.00%) low mild
+  2 (2.00%) high mild
+  3 (3.00%) high severe
+Comparison for group 'union_1000000_half':
+  Higher is better; best performer is 1.00 (typical).
+      1st union_1000000_half/hashbrown: 1.000 (11.673 ms), rank: [149.5% faster than 2nd]
+      2nd union_1000000_half/pomap:     0.401 (29.118 ms), rank: [149.5% slower than 1st]
+
+   Compiling pomap v0.1.0 (/Users/sam/workspace/pomap)
+    Finished `bench` profile [optimized] target(s) in 11.22s
+     Running benches/union_bench.rs (target/release/deps/union_bench-38ea384d16b2a75c)
+Gnuplot not found, using plotters backend
+Benchmarking union_string_100000/pomap
+Benchmarking union_string_100000/pomap: Warming up for 3.0000 s
+Benchmarking union_string_100000/pomap: Collecting 100 samples in estimated 5.0951 s (400 iterations)
+Benchmarking union_string_100000/pomap: Analyzing
+union_string_100000/pomap
+                        time:   [12.769 ms 12.807 ms 12.846 ms]
+Found 4 outliers among 100 measurements (4.00%)
+  4 (4.00%) high mild
+Benchmarking union_string_100000/hashbrown
+Benchmarking union_string_100000/hashbrown: Warming up for 3.0000 s
+Benchmarking union_string_100000/hashbrown: Collecting 100 samples in estimated 5.4877 s (400 iterations)
+Benchmarking union_string_100000/hashbrown: Analyzing
+union_string_100000/hashbrown
+                        time:   [14.022 ms 14.057 ms 14.095 ms]
+Found 6 outliers among 100 measurements (6.00%)
+  5 (5.00%) high mild
+  1 (1.00%) high severe
+Comparison for group 'union_string_100000':
+  Higher is better; best performer is 1.00 (typical).
+      1st union_string_100000/pomap:     1.000 (12.807 ms), rank: [9.8% faster than 2nd]
+      2nd union_string_100000/hashbrown: 0.911 (14.057 ms), rank: [9.8% slower than 1st]
+
