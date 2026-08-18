@@ -833,6 +833,14 @@ result.)
   (background load present; Mac remove anchor soft). The in-run ordering is
   robust; magnitudes need an AMD re-run (`family_bench.rs` is portable — run via
   the same collection scripts).
+- **Canonical-ties change (540db31): perf-validated with one flag.** get_hits
+  keeps its improvement (median 0.963 vs pre-opt snapshot); insert_allocate
+  within noise. `insert_preallocated` read +10% in the validation — but the tie
+  compare executes only behind `stored == hash` (false for every non-colliding
+  key: the hot-loop instruction stream for unique-key inserts is unchanged),
+  and this group swung 0.85-1.16 on UNTOUCHED insert code throughout the same
+  night (see the layout-artifact and anchor-anomaly bullets). Kept as a
+  correctness fix; the pristine per-machine step-1 A/B adjudicates the group.
 - **Open anomaly: `insert_preallocated` anchor instability on M5 (2026-08-18).**
   The canonical suite now reads 3.4-3.6x for insert_preallocated on this machine
   (two independent runs) vs June's committed 1.77x — while the SAME workload in
