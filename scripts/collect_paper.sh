@@ -91,7 +91,7 @@ echo "==> [9/9] methodology probes (audit_bench)"
 $pin cargo bench --bench audit_bench > "audit-${slug}.txt" 2>&1 || true
 echo
 
-echo "== DONE — copy these back: =="
+echo "== DONE — copy these back (file under results/ when committing): =="
 ls -1 "loop-${slug}"-r*.txt "bench-${slug}"-g*.txt "cold-${slug}.csv" \
       "family-${slug}.txt" "string-${slug}.txt" "iter-${slug}"-r*.txt \
       "union-${slug}.txt" "audit-${slug}.txt" 2>/dev/null

@@ -798,7 +798,7 @@ surviving engine was vendored into a single crate and benchmarked under the
 *current* harness — same seeds, sizes, drop-fix timing, and in-run
 hashbrown/std anchors — gated by a correctness cross-check of each engine against
 hashbrown (`family_bench.rs`; first run 2026-08-17, M5 Max,
-`bench-family-Apple_M5_Max_2026-08-17.txt`). Engines: **pomap** (current AoS,
+`results/bench-family-Apple_M5_Max_2026-08-17.txt`). Engines: **pomap** (current AoS,
 G4), **pomap3** (pre-consolidation AoS, 75% load, no zero-grow contract),
 **oldsimd** (tag-only SoA: 1-byte tags + (K,V), *no stored hash*, order on prefix
 bits only, SIMD scan), **main_soa** (SoA + bounded windows + cascade
@@ -824,7 +824,7 @@ main_soa 49–126 (worst), tags 28–89.
 **Reading of the frontier.** *(Reproduced 2026-08-18 with the in-repo harness
 after the get-reorder commit: family ordering identical, current engine's
 get_hits sharpened to 0.64; remove/shrink magnitudes wobble within the
-soft-anchor caveats — `bench-family-Apple_M5_Max_2026-08-18b.txt`.)* The current
+soft-anchor caveats — `results/bench-family-Apple_M5_Max_2026-08-18b.txt`.)* The current
 engine wins or ties 6 of 9 groups
 in-family — all reads/updates, provisioned inserts by 1.7–2.3×, misses — and
 nothing dominates it; it is the read-optimal point and the canonical engine. But
