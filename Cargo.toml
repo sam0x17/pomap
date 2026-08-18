@@ -10,6 +10,9 @@ readme = "README.md"
 keywords = ["hashmap", "deterministic", "ordered", "no-std", "canonical"]
 categories = ["data-structures", "no-std"]
 
+[package.metadata.docs.rs]
+features = ["serde"]
+
 [workspace.lints.clippy]
 missing_const_for_fn = "deny"
 missing_inline_in_public_items = "deny"

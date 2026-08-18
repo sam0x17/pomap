@@ -1,0 +1,50 @@
+name: CI
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Tests (default features)
+        run: cargo test --release
+      - name: Tests (serde)
+        run: cargo test --release --features serde
+      - name: no_std build
+        run: cargo build --no-default-features
+      - name: no_std + serde build
+        run: cargo build --no-default-features --features serde
+
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - name: Clippy (all targets, zero warnings)
+        run: cargo clippy --release --all-targets -- -D warnings
+      - name: Docs
+        run: cargo doc --no-deps
+        env:
+          RUSTDOCFLAGS: -D warnings
+
+  miri:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: miri
+      - name: Miri (fast subset — fuzz and adversarial-scale tests excluded)
+        run: >
+          cargo miri test --lib --
+          --skip matches_hashmap --skip adversarial
+          --skip compact_produces --skip string_keys
