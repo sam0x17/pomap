@@ -627,7 +627,35 @@ the small, TLB-friendly control array.)
 (Tooling note: an `ops=` parse bug blanked the first CSVs; data above came from the
 captured perf stderr. Fixed — re-runs now populate `perf-<cpu>_<Nc>.csv` directly.)
 
-### 5.7 Iteration throughput (first measurement, 2026-08-18, M5, `iter_bench`)
+### 5.7 String payloads: the write story inverts (first recording, 2026-08-18, M5)
+
+The `bench-string` feature (128-byte `String` keys *and* values; fixed this date
+— it had never compiled) yields, in-run vs hashbrown, single run:
+
+| group | ratio | | group | ratio |
+|---|---|---|---|---|
+| insert_allocate | **0.708** | | get_hits | **0.889** |
+| shrink_to | **0.353** | | get_hotset | 0.991 |
+| remove_hits | **0.736** *(soft anchor)* | | update_existing | 0.941 |
+| insert_preallocated | 1.157 | | get_misses / remove_misses | 1.074 / 1.101 |
+
+**PoMap wins builds, shrinks, and removes outright with String keys — at
+GROWTH=4, warm, on the machine where the u64 suite shows write deficits.** The
+mechanism is a claim the paper had not yet articulated: SwissTable stores only a
+7-bit tag, so **every resize re-hashes every key** — expensive for non-trivial
+keys — while PoMap's inline full hash makes its streaming resize **hash-free**
+(the C2 pass never touches key bytes). The 8-byte inline hash, booked until now
+as pure memory overhead, is a computational asset whenever hashing is
+non-trivial. Secondary effects: the insert shift tax nearly vanishes (1.77× →
+1.16×; per-insert cost is dominated by string hashing/allocation, equal for all
+impls) and the read win erodes as §5.6 predicts for larger entries (56-byte
+entries; 0.68× → 0.89×). Caveats: single run, M-series (remove anchor soft),
+one payload shape (128 B); the cross-machine String matrix is owed. This also
+sharpens the positioning: **the map's strongest workload class is
+expensive-to-hash keys — precisely the common case (strings, paths, URLs,
+composite keys) — where it wins builds AND reads simultaneously.**
+
+### 5.8 Iteration throughput (first measurement, 2026-08-18, M5, `iter_bench`)
 
 Whole-map iteration (sum keys+values; medians of 3; ratio vs hashbrown):
 
