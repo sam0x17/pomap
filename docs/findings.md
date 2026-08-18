@@ -16,7 +16,8 @@ prefix. This yields two properties a conventional open-addressing table
 
 1. **Deterministic iteration order** (by hash, independent of insertion order).
 2. **Single-cache-line probes**: the 8-byte hash is stored *inline* with its
-   key and value (`#[repr(C)] struct Entry { hash: u64, key: K, value: V }`),
+   key and value (`#[repr(C)] struct SlotEntry { hash: u64, key: K, value: V }` — named
+   `SlotEntry` in code because the public Entry API owns the `Entry` name),
    so a lookup is one memory access — scan from the ideal slot, filter on exact
    `u64` comparisons, stop at the first stored hash greater than the target
    (which doubles as the empty-slot sentinel, `u64::MAX`).
@@ -130,9 +131,18 @@ low-locality access**:
   hashbrown's SIMD throughput wins** — a crossover (§5.6), not a blanket read win,
   and misses are the exception even cold.
 - *Cold writes.* PoMap's inserts/repacks/backshifts are sequential streaming;
-  SwissTable growth rehashes (scatter — random writes). When random access is
-  expensive relative to sequential (high latency / small per-core cache / TLB
-  pressure — the server regime), sequential wins — hence the server-CPU inversion.
+  SwissTable growth rehashes (scatter — random writes). Where per-core bandwidth
+  is scarce (AMD EPYC), the scatter's wasted partial lines cost real time and
+  the sequential stream wins; where bandwidth is abundant (Apple), the waste is
+  free and the two tie (§5.3). And when key hashing is expensive, the
+  hash-free resize wins outright at any bandwidth (§5.7).
+
+Beyond point operations, the same invariant now carries three further measured
+results: **whole-map iteration beats hashbrown at scale** (0.61× at 1M, §5.8),
+**String-keyed builds/shrinks/removes invert outright at GROWTH=4** (0.71×/
+0.35×/0.74×, §5.7 — the inline hash makes resize hash-free), and **streaming
+set algebra** reaches hashbrown-parity on cheap keys and wins on expensive
+ones (§5.9).
 
 We argue cold/low-locality access is *more* representative of real workloads
 (large keyspaces, point lookups, low temporal locality) than the cache-resident
@@ -142,7 +152,7 @@ measured fact; §5.6 specifies the cold benchmark that would establish it direct
 
 ## 2. Design
 
-- **Layout.** One allocation of `MaybeUninit<Entry<K,V>>`, length
+- **Layout.** One allocation of `MaybeUninit<SlotEntry<K,V>>`, length
   `ideal_range + padding`. `ideal_range` is a power of two; an entry's ideal slot
   is `hash >> (64 - log2(ideal_range))`. Entries are globally sorted by hash.
 - **Vacancy sentinel.** `EMPTY_HASH = u64::MAX`. The whole allocation is marked
@@ -172,15 +182,20 @@ measured fact; §5.6 specifies the cold benchmark that would establish it direct
   leaving ideal slots open so post-grow inserts land directly.
 - **Provisioning.** `with_capacity(n)` sizes `ideal_range` so that `n` inserts
   trigger zero grows — matching hashbrown's contract.
+- **Trailing-vacant invariant.** The table's final slot is permanently vacant
+  (enforced at the insert landing sites and by the repack's cursor bound), so
+  every probe loop terminates without bounds checks (§3.1).
 
 `GROWTH` is a measured speed/memory dial: **GROWTH=4** drives insert-with-growth
 to parity-or-better at higher memory cost; **GROWTH=2** trades ~1.5× insert
-throughput for ~30% less slack memory. Nothing but insert-with-growth depends on
-it (all other workloads provision via `with_capacity` and never grow mid-measure).
+throughput for ~30% less slack memory; **GROWTH=8 inverts build-from-empty
+(0.877× hashbrown) at ≈G4's average measured footprint on the standard sizes**
+(§5.5). Nothing but insert-with-growth depends on it (all other workloads
+provision via `with_capacity` and never grow mid-measure).
 
 ## 3. Implementation notes worth reporting
 
-- **`repr(C)` on `Entry` is load-bearing.** A plain tuple `(u64, K, V)` has
+- **`repr(C)` on the slot struct (`SlotEntry`) is load-bearing.** A plain tuple `(u64, K, V)` has
   *unspecified* field order under `repr(Rust)`; for `(u64, String, String)` the
   compiler placed the hash off offset 0, breaking the raw leading-`u64` reads
   that the whole probe/vacancy scheme depends on. This was latent for the entire
@@ -245,7 +260,9 @@ data file predates the probe).
   function is held constant across implementations.
 - Baselines: `hashbrown` 0.14 and `std::collections::HashMap`. (Note: std bundles
   its *own* hashbrown version; the two are **not** identical — see 4.4.)
-- Payloads: `u64 → u64` (a `String` variant exists behind a feature flag).
+- Payloads: `u64 → u64` for the cross-machine tables; the 128-byte `String`
+  variant (`--features bench-string`) is measured in §5.7 (M5, single run —
+  cross-machine String matrix owed).
 - Harness: `criterion` (a fork adding comparison-groups that print each
   implementation's ratio to the in-group winner), pinned to git rev
   `441d4c65` of `github.com/sam0x17/criterion.rs` (branch `master`).
@@ -257,6 +274,12 @@ into a pre-sized map, no growth), `get_hits`, `get_misses`, `update_existing`,
 `get_hotset` (Zipf-ish hot subset of size √N), `remove_hits`, `remove_misses`,
 `shrink_to`. Get-class workloads scale to 1M entries; insert/remove/shrink-class
 to 100k; 50 evenly-spaced sizes per group.
+
+Supplementary targets added 2026-08-18: `iter_bench` (whole-map iteration vs
+hashbrown/std/BTreeMap, §5.8), `union_bench` (set algebra + collect, §5.9),
+`audit_bench` (methodology probes, §4.4), `loop_bench` (optimizer A/B vs a
+frozen pre-optimization snapshot — also the cross-architecture regression
+guard), and `family_bench` (all seven historical engines, §6.1).
 
 ### 4.4 Methodology lessons (these are paper "threats to validity" material)
 
@@ -307,8 +330,8 @@ to 100k; 50 evenly-spaced sizes per group.
   machinery is upstream criterion). All impls share one fixed-key `ahash`
   builder: layouts are deterministic across runs (good for reproducibility), but
   results sample a *single* hash seeding — repeating headline tables under k
-  random hash seeds is owed for the paper. No iteration-order benchmark exists
-  yet; deterministic iteration is a headline feature and should be measured.
+  random hash seeds is owed for the paper. (Iteration is now measured —
+  `iter_bench`, §5.8.)
 
 ### 4.5 Statistical reporting
 
@@ -881,20 +904,25 @@ result.)
 - **Anchor/version sensitivity.** Results are against hashbrown 0.14 specifically;
   std's bundled hashbrown differs. A published comparison should pin and report
   the exact baseline version(s).
-- **Payload coverage.** Correctness is fuzzed for `u64` and `String`; performance
-  is characterized only for `u64`. Large values, non-trivial `Drop`, and
-  high-collision adversarial hashes are untested for performance.
+- **Payload coverage.** Correctness is fuzzed for `u64` and `String`, and
+  adversarially hardened (total-collision, tail-clustering — §3.1).
+  Performance: `u64` across machines; value sizes 8–64 B in the cold matrix
+  (§5.6); 128-byte `String` on M5 (§5.7, single run — cross-machine owed).
+  Still uncharacterized for performance: non-trivial `Drop` payloads and
+  degenerate-hasher throughput (correctness-only today).
 - **Statistical rigor.** Point estimates are reported here; §4.5 specifies the
   CI-carrying, run-count-documented reporting the paper needs (the extractor in §8
   now captures criterion's full `[lo pt hi]` interval).
-- **Related work / novelty.** Drafted in §10; the open task is completing the
-  prior-art search so C1 (the prefix-ordered structure) can be asserted as *new*
-  rather than *underexplored*. The ordering-criterion distinction (hash vs key
-  comparison vs probe distance) is the crux.
-- **Cold-access advantage is argued + partly observed, not yet isolated.** The
-  read win is largest where access is cold (§5.2, mechanism in §1); the current
-  harness re-probes keys, warming them, so it *under*-measures it. A dedicated
-  cold-lookup benchmark is needed — see §5.6.
+- **Related work / novelty: search RESOLVED (2026-08-18, §10).** C1 is
+  positioned against ordered linear probing (not claimed as new); the resize
+  invariant against split-ordering/relativistic tables; canonicality against
+  the history-independence line; compact hashing (Cleary) as the opposite end
+  of the order-invariant dial. Low-priority remainders: an MSD-radix bucketing
+  sweep and an Amble–Knuth citation-graph walk.
+- **Cold-access story captured; one biased cell remains.** The dedicated cold
+  matrix exists and ran on all four platforms (§4.6, §5.6). Still owed: an
+  unbiased cold-*miss* measurement (the single-map matrix warms hashbrown's
+  control array; the fair form is a multi-map round-robin or N ≳ 50M).
 - **Family benchmark is single-platform.** §6.1's cross-design table is one M5 run
   (background load present; Mac remove anchor soft). The in-run ordering is
   robust; magnitudes need an AMD re-run (`family_bench.rs` is portable — run via
@@ -935,15 +963,19 @@ result.)
 
 ## 8. Reproducibility
 
-Branch `simd-buckets`. Single implementation in `src/pomap.rs`; benchmark
-`benches/pomap_bench.rs`. The `criterion` dev-dependency is a public git fork
-(no sibling checkout needed). Run:
+Branch `main`. Single implementation in `src/pomap.rs`; the canonical suite is
+`benches/pomap_bench.rs` (supplementary targets in §4.3). The `criterion`
+dev-dependency is a public git fork (no sibling checkout needed). Run:
 
 ```
-cargo test                                  # 42 tests, correctness gate
+cargo test --release                        # 57 tests + doctests, correctness gate
+cargo test --release --features serde       # + canonical-wire tests
 cargo bench --bench pomap_bench             # GROWTH=4 (default)
 cargo bench --bench pomap_bench --features growth2   # GROWTH=2
 ```
+
+CI (`.github/workflows/ci.yml`) runs the test matrix, `no_std` builds,
+`clippy -D warnings`, docs, and the Miri subset on every push.
 
 The run also prints two report tables to stdout: the memory footprint
 (`bench_memory_footprint`, real allocator bytes/entry) and the STREAM-triad
@@ -960,13 +992,15 @@ On servers: pin to a non-zero core (`taskset -c 2`), set the governor to
 full output (never pipe through `tail` — it truncates early groups). Capture the
 `bench_bandwidth` table on each platform — it is the bandwidth x-axis for §5.3.
 
-**One-shot per machine** — collects the complete spec-named dataset:
+**One-shot per machine** — the full paper dataset (preferred):
 ```
-scripts/collect_all.sh   # → bench-<spec>-g4.txt, bench-<spec>-g2.txt,
-                         #   cold-<spec>.csv, perf-<spec>.csv   (~20-30 min)
+scripts/collect_paper.sh   # ~60-90 min; step 1 is the optimization A/B
+                           # (cross-arch regression guard), then main suite,
+                           # cold matrix, perf, family, String, iteration,
+                           # union, audit — all spec-named; manifest printed.
 ```
-It chains the three below; copy back the files it lists at the end. Or run them
-individually:
+The shorter classic subset is `scripts/collect_all.sh` (main suite + cold +
+perf, ~20-30 min). Individual pieces:
 ```
 scripts/run_bench.sh   # main suite, both growth factors → bench-<spec>-g{4,2}.txt
 scripts/run_cold.sh    # cold-access matrix             → cold-<spec>.csv  (growth-independent)
