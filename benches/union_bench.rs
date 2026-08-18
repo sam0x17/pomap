@@ -106,5 +106,29 @@ fn bench_union_string(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, bench_union, bench_union_string);
+/// Bulk construction: collect() -- PoMap's sort+place bulk build vs
+/// hashbrown's per-key insert collect.
+fn bench_from_iter(c: &mut Criterion) {
+    for n in [100_000usize, 1_000_000] {
+        let keys = random_items(0xA11CE, n);
+        let pairs: Vec<(u64, u64)> = keys.iter().map(|&k| (k, k)).collect();
+
+        let mut group = c.comparison_benchmark_group(format!("from_iter_{n}"));
+        group.bench_function("pomap", |b| {
+            b.iter(|| {
+                let m: Pm = pairs.iter().copied().collect();
+                black_box(m)
+            });
+        });
+        group.bench_function("hashbrown", |b| {
+            b.iter(|| {
+                let m: Hb = pairs.iter().copied().collect();
+                black_box(m)
+            });
+        });
+        group.finish();
+    }
+}
+
+criterion_group!(benches, bench_union, bench_union_string, bench_from_iter);
 criterion_main!(benches);

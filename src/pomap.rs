@@ -2107,6 +2107,11 @@ impl<'a, K: Key + 'a, V: Value + 'a, H: BuildHasher, const GROWTH: usize> Extend
 impl<K: Key, V: Value, H: BuildHasher + Default, const GROWTH: usize> FromIterator<(K, V)>
     for PoMap<K, V, H, GROWTH>
 {
+    /// Builds by insertion. (A sort-then-place bulk build was implemented and
+    /// measured 4-7x SLOWER for cheap keys — the comparison sort of fat
+    /// tuples costs more than hashing + low-load insertion; see
+    /// docs/findings.md §6.2. Call [`PoMap::compact`] afterward if a
+    /// canonical representation is needed.)
     #[inline]
     fn from_iter<T: IntoIterator<Item = (K, V)>>(iter: T) -> Self {
         let iter = iter.into_iter();
@@ -3041,6 +3046,53 @@ mod tests {
         assert!(i.contains_key(&1) && i.contains_key(&3));
         let x = a.symmetric_difference(&b);
         assert_eq!(x.len(), 3);
+    }
+
+    /// Bulk from_iter: HashMap duplicate semantics (last wins), canonical
+    /// output bytes, and correctness under total hash collision.
+    #[test]
+    fn bulk_from_iter() {
+        // Later duplicates win, matching insertion semantics.
+        let m: PoMap<u64, u64> = [(1, 10), (2, 20), (1, 11), (3, 30), (2, 22)]
+            .into_iter()
+            .collect();
+        assert_eq!(m.len(), 3);
+        assert_eq!(m[&1], 11);
+        assert_eq!(m[&2], 22);
+
+        // Equal to insert-building; canonical after compact() on both.
+        let mut bulk: PoMap<u64, u64> = (0..500u64).map(|k| (k, k * 3)).collect();
+        let mut inserted: PoMap<u64, u64> = PoMap::new();
+        for k in 0..500u64 {
+            inserted.insert(k, k * 3);
+        }
+        assert_eq!(bulk, inserted);
+        bulk.compact();
+        inserted.compact();
+        let ba = unsafe {
+            core::slice::from_raw_parts(bulk.slots.ptr.as_ptr(), bulk.slots.layout.size())
+        };
+        let bb = unsafe {
+            core::slice::from_raw_parts(
+                inserted.slots.ptr.as_ptr(),
+                inserted.slots.layout.size(),
+            )
+        };
+        assert_eq!(ba, bb);
+
+        // Under total collision: dedup + tie order still correct.
+        let c: PoMap<u64, u64, ColliderBuildHasher> =
+            [(9, 1), (1, 1), (9, 2), (5, 1)].into_iter().collect();
+        assert_eq!(c.len(), 3);
+        assert_eq!(c[&9], 2); // last duplicate wins
+        let keys: alloc::vec::Vec<u64> = c.keys().copied().collect();
+        assert_eq!(keys, alloc::vec![1, 5, 9]);
+
+        // Empty and by-ref forms.
+        let e: PoMap<u64, u64> = core::iter::empty::<(u64, u64)>().collect();
+        assert!(e.is_empty());
+        let r: PoMap<u64, u64> = m.iter().collect();
+        assert_eq!(r, m);
     }
 
     /// Ord over maps is a lawful total order on content-distinct maps.

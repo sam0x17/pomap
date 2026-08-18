@@ -819,6 +819,14 @@ strengthens the "why this design" argument.
   remove gain); backshift is better for this layout.
 - **Scan-comparison merge** (3 compares → 1 `>=`): regressed inserts ~1% on
   Zen 5c — used as the controlled probe establishing inserts are not scan-bound.
+- **Sort-then-place bulk `from_iter`** (hash all keys, stable-sort (hash, key)
+  tuples, dedup-last, canonical placement — no probing or shifting): measured
+  **4-7× SLOWER than the insert loop** for u64 keys (23 ns/key vs hashbrown's
+  3.2 and PoMap's own ~6): the comparison sort moves fat 24-byte tuples
+  through n·log n merge passes, dwarfing what it saves. Reverted (2026-08-18).
+  The only plausible rescue is a radix sort on the hash column (uniform keys,
+  streaming passes) — noted, unbuilt. Bulk canonical construction remains
+  available as insert-build + `compact()`.
 - **`shift==1` inlined copy** (vs runtime `memmove`): sub-noise, not reproducible.
 
 The SIMD-tags-on-AoS *insert* rework — long held as "the one remaining lever" —

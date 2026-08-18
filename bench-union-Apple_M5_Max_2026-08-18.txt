@@ -550,3 +550,52 @@ Comparison for group 'union_string_100000':
       1st union_string_100000/pomap:     1.000 (11.444 ms), change: [+0.001, +7.2732%], rank: [11.1% faster than 2nd]
       2nd union_string_100000/hashbrown: 0.900 (12.710 ms), change: [-0.100, +19.260%], rank: [11.1% slower than 1st]
 
+   Compiling pomap v0.1.0 (/Users/sam/workspace/pomap)
+    Finished `bench` profile [optimized] target(s) in 11.26s
+     Running benches/union_bench.rs (target/release/deps/union_bench-38ea384d16b2a75c)
+Gnuplot not found, using plotters backend
+Benchmarking from_iter_100000/pomap
+Benchmarking from_iter_100000/pomap: Warming up for 3.0000 s
+Benchmarking from_iter_100000/pomap: Collecting 100 samples in estimated 5.2131 s (2300 iterations)
+Benchmarking from_iter_100000/pomap: Analyzing
+from_iter_100000/pomap  time:   [2.3007 ms 2.3135 ms 2.3281 ms]
+Found 8 outliers among 100 measurements (8.00%)
+  4 (4.00%) high mild
+  4 (4.00%) high severe
+Benchmarking from_iter_100000/hashbrown
+Benchmarking from_iter_100000/hashbrown: Warming up for 3.0000 s
+Benchmarking from_iter_100000/hashbrown: Collecting 100 samples in estimated 6.2922 s (20k iterations)
+Benchmarking from_iter_100000/hashbrown: Analyzing
+from_iter_100000/hashbrown
+                        time:   [315.48 µs 318.87 µs 322.81 µs]
+Found 12 outliers among 100 measurements (12.00%)
+  1 (1.00%) high mild
+  11 (11.00%) high severe
+Comparison for group 'from_iter_100000':
+  Higher is better; best performer is 1.00 (typical).
+      1st from_iter_100000/hashbrown: 1.000 (0.3189 ms), rank: [7.26x faster than 2nd]
+      2nd from_iter_100000/pomap:     0.138 (2.3135 ms), rank: [7.26x slower than 1st]
+
+Benchmarking from_iter_1000000/pomap
+Benchmarking from_iter_1000000/pomap: Warming up for 3.0000 s
+Benchmarking from_iter_1000000/pomap: Collecting 100 samples in estimated 6.0405 s (200 iterations)
+Benchmarking from_iter_1000000/pomap: Analyzing
+from_iter_1000000/pomap time:   [29.770 ms 29.826 ms 29.891 ms]
+Found 7 outliers among 100 measurements (7.00%)
+  1 (1.00%) low mild
+  3 (3.00%) high mild
+  3 (3.00%) high severe
+Benchmarking from_iter_1000000/hashbrown
+Benchmarking from_iter_1000000/hashbrown: Warming up for 3.0000 s
+Benchmarking from_iter_1000000/hashbrown: Collecting 100 samples in estimated 5.0358 s (700 iterations)
+Benchmarking from_iter_1000000/hashbrown: Analyzing
+from_iter_1000000/hashbrown
+                        time:   [7.1333 ms 7.1948 ms 7.2715 ms]
+Found 9 outliers among 100 measurements (9.00%)
+  3 (3.00%) high mild
+  6 (6.00%) high severe
+Comparison for group 'from_iter_1000000':
+  Higher is better; best performer is 1.00 (typical).
+      1st from_iter_1000000/hashbrown: 1.000 (7.1948 ms), rank: [4.15x faster than 2nd]
+      2nd from_iter_1000000/pomap:     0.241 (29.826 ms), rank: [4.15x slower than 1st]
+
