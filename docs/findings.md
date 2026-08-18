@@ -448,6 +448,18 @@ The table reflects `with_hasher` (build-from-empty, the *pessimistic* footprint)
 design's real cost — the inline 8-byte hash plus the low load factor that buys the
 read/write wins.
 
+**The dial extends: GROWTH=8 inverts build-from-empty (measured 2026-08-18, M5,
+`loop_bench` in-run, median of 3).** insert_allocate vs hashbrown: **G2 1.56×,
+G4 1.01× (parity), G8 0.877× — pomap faster than hashbrown at building from
+empty.** Every halving of repack volume keeps paying (total moved entries is
+n·G/(G−1): 2n at G2, 1.33n at G4, 1.14n at G8). With G8 the map beats hashbrown
+on *every* workload class on this machine except the §5.4 residuals
+(insert_preallocated, warm removes). The price is memory slack scaling with G
+(post-grow tables are up to G× oversized; the measured G8 footprint is TODO —
+the analytic model disagrees with the measured G2/G4 table, so only measured
+numbers will be published). G8 is a legitimate published configuration for
+build-heavy, memory-rich deployments; G4 stays the default.
+
 **Growth factor: a two-point dial, GROWTH=4 as the performance-canonical
 configuration.** GROWTH affects *only* `insert_allocate` (build-from-empty) and
 this footprint — every other operation provisions via `with_capacity` and is
