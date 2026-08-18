@@ -712,7 +712,11 @@ Memory (bytes/entry, build-from-empty, tracking allocator; hashbrown 22–36):
 pomap G4 40–104, G2 40–63, pomap3 40–63, **oldsimd 28–45 (≈ hashbrown)**,
 main_soa 49–126 (worst), tags 28–89.
 
-**Reading of the frontier.** The current engine wins or ties 6 of 9 groups
+**Reading of the frontier.** *(Reproduced 2026-08-18 with the in-repo harness
+after the get-reorder commit: family ordering identical, current engine's
+get_hits sharpened to 0.64; remove/shrink magnitudes wobble within the
+soft-anchor caveats — `bench-family-Apple_M5_Max_2026-08-18b.txt`.)* The current
+engine wins or ties 6 of 9 groups
 in-family — all reads/updates, provisioned inserts by 1.7–2.3×, misses — and
 nothing dominates it; it is the read-optimal point and the canonical engine. But
 three other Pareto points exist: **tags_soa is build-optimal** (the only
