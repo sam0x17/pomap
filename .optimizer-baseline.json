@@ -1,0 +1,61 @@
+{
+  "version": 2,
+  "created_at": "2026-08-18T04:30:00Z",
+  "benchmark_command": "cargo bench --bench loop_bench (in-run A/B: cand=src/pomap.rs vs base=benches/support/base_snapshot.rs vs hashbrown)",
+  "original_baseline_commit": "816c6c1",
+  "metric_note": "Decisions use cand/base IN-RUN ratios (this machine's absolute timings drift; see findings 4.4). Iteration 0 ran cand==base: the identical-code ratio spread IS the noise floor.",
+  "noise_floor_iter0_cand_over_base": {
+    "insert_allocate": 1.040,
+    "insert_preallocated": 0.971,
+    "get_hits": 1.026,
+    "get_misses": 0.991,
+    "update_existing": 1.014,
+    "get_hotset": 1.026,
+    "remove_hits": 1.015,
+    "remove_misses": 1.048,
+    "shrink_to": 0.996
+  },
+  "decision_rule": "median-of-3 runs per candidate on target groups; KEEP only if median cand/base <= 0.95 on a target group AND no group's median > 1.02; full-suite run + cargo test before any keep",
+  "original_baseline": {
+    "note": "iter0 'base' absolute medians (context only, not the decision metric)",
+    "insert_allocate": { "value": 25.815, "unit": "ms" },
+    "insert_preallocated": { "value": 15.493, "unit": "ms" },
+    "get_hits": { "value": 12.328, "unit": "us" },
+    "get_misses": { "value": 10.872, "unit": "us" },
+    "update_existing": { "value": 12.362, "unit": "us" },
+    "get_hotset": { "value": 10.026, "unit": "us" },
+    "remove_hits": { "value": 122.49, "unit": "us" },
+    "remove_misses": { "value": 8.506, "unit": "us" },
+    "shrink_to": { "value": 23.295, "unit": "ms" }
+  },
+  "current_baseline": "same as original (no changes kept yet)",
+  "history": [
+    {
+      "iteration": 0,
+      "optimization": "none (noise-floor calibration, cand==base)",
+      "kept": null,
+      "result": "identical-code cand/base spread 0.971-1.048 -> single-run validation impossible for <5% effects; median-of-3 protocol adopted"
+    },
+    {
+      "iteration": 1,
+      "optimization": "hit-biased compare order in get() (equality before stored>hash terminator)",
+      "commit": "0a9085a",
+      "kept": true,
+      "result": "get_hits 0.95-0.98 across 7 runs (all favorable, ~-3%); hotset 0.98-1.00; misses/update flat; remove_hits median 1.004 (single 1.083 reading was noise); tests pass. Kept on 7/7 consistency; note: below the pre-registered 5% magnitude bar, which iter0 noise data overstated."
+    },
+    {
+      "iteration": 2,
+      "optimization": "same reorder in get_mut + get_key_value + remove_entry (bundle), then bisected to remove_entry-only",
+      "kept": false,
+      "result": "bundle: remove_misses -8% (median 0.918) BUT insert_preallocated +10% (median 1.099, 3/3 adverse, insert code untouched -> instruction-layout effect). Bisect (remove_entry only): remove_misses win VANISHED (median 1.001), small adverse drift remained (ins_prealloc 1.024, remove_hits 1.021). Both effects were code-layout lottery, not semantics. Reverted entirely. FINDING: at the 2-10% scale on M5, instruction-layout effects rival real optimizations; only get()'s reorder survived cross-configuration validation."
+    }
+  ],
+  "failed_attempts_precedent": [
+    { "optimization": "scan-compare merge (3 compares -> 1 >=)", "reason": "regressed inserts ~1% on Zen5c (2026-06); had EMPTY-early-exit confound" },
+    { "optimization": "single-pass rebuild (write-once, no memset)", "reason": "35-44% slower on M-series (2026-06)" },
+    { "optimization": "shift==1 inlined copy vs memmove", "reason": "sub-noise, not reproducible (2026-06)" },
+    { "optimization": "SoA tags / SIMD scan port", "reason": "loses reads structurally (family bench 2026-08-17)" },
+    { "optimization": "tombstone deletion", "reason": "insert regression > remove gain at 62.5% load (historical + family A/B 2026-08-17)" },
+    { "optimization": "bounded windows + cascade on AoS", "reason": "regressed inserts and shrink (2026-06)" }
+  ]
+}

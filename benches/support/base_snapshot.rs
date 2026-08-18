@@ -106,12 +106,8 @@ pub enum TryReserveError {
 }
 
 /// Marker trait for keys stored in a [`PoMap`].
-///
-/// Note there is no `Ord` bound: the map is ordered by *hash*, never by key
-/// comparison — no ordering operation on `K` exists anywhere in the layout,
-/// probe, or resize paths (`==` is used only for the final match).
-pub trait Key: Hash + Eq + Clone {}
-impl<K: Hash + Eq + Clone> Key for K {}
+pub trait Key: Hash + Eq + Clone + Ord {}
+impl<K: Hash + Eq + Clone + Ord> Key for K {}
 
 /// Marker trait for values stored in a [`PoMap`].
 pub trait Value: Clone {}
@@ -336,16 +332,14 @@ impl<K: Key, V: Value, H: BuildHasher, const GROWTH: usize> PoMap<K, V, H, GROWT
         let mut pos = self.meta.ideal_slot(hash);
         loop {
             let stored = self.slots.hash_at(pos);
-            // Hit-biased order: test equality before the terminator — most
-            // lookups hit at or near the ideal slot, so the common path takes
-            // one branch instead of two.
+            if stored > hash {
+                return None; // also catches EMPTY_HASH (u64::MAX)
+            }
             if stored == hash {
                 let Entry { key: k, value: v, .. } = unsafe { &*(*entries.add(pos)).as_ptr() };
                 if k == key {
                     return Some(v);
                 }
-            } else if stored > hash {
-                return None; // also catches EMPTY_HASH (u64::MAX)
             }
             pos += 1;
         }
@@ -576,8 +570,6 @@ impl<K: Key, V: Value, H: BuildHasher, const GROWTH: usize> PoMap<K, V, H, GROWT
             index: 0,
             total_slots: self.slots.total_slots,
             remaining: self.len,
-            mask: 0,
-            mask_base: 0,
             _marker: PhantomData,
         }
     }
@@ -590,8 +582,6 @@ impl<K: Key, V: Value, H: BuildHasher, const GROWTH: usize> PoMap<K, V, H, GROWT
             index: 0,
             total_slots: self.slots.total_slots,
             remaining: self.len,
-            mask: 0,
-            mask_base: 0,
             _marker: PhantomData,
         }
     }
@@ -772,13 +762,9 @@ impl<K: Key, V: Value, H: BuildHasher, const GROWTH: usize> PoMap<K, V, H, GROWT
 #[must_use]
 pub struct Iter<'a, K: Key, V: Value> {
     entries: *const MaybeUninit<Entry<K, V>>,
-    /// Next slot the occupancy refill will scan.
     index: usize,
     total_slots: usize,
     remaining: usize,
-    /// Occupancy bits for slots `[mask_base, mask_base + 64)`, consumed LSB-first.
-    mask: u64,
-    mask_base: usize,
     _marker: PhantomData<&'a (K, V)>,
 }
 
@@ -794,8 +780,6 @@ impl<K: Key, V: Value> Clone for Iter<'_, K, V> {
             index: self.index,
             total_slots: self.total_slots,
             remaining: self.remaining,
-            mask: self.mask,
-            mask_base: self.mask_base,
             _marker: PhantomData,
         }
     }
@@ -806,42 +790,17 @@ impl<'a, K: Key, V: Value> Iterator for Iter<'a, K, V> {
 
     #[inline]
     fn next(&mut self) -> Option<Self::Item> {
-        // Occupancy at random slots makes a per-slot skip branch unpredictable
-        // (~50% miss at typical density), which dominates iteration cost.
-        // Instead, refill a 64-slot occupancy mask with a branchless pass
-        // (cmp → set → or; the loop trip is predictable), then pop set bits.
-        // `remaining == 0` also stops without scanning trailing empties.
-        if self.remaining == 0 {
-            return None;
-        }
-        while self.mask == 0 {
-            let n = (self.total_slots - self.index).min(64);
-            let mut m = 0u64;
-            if n == 64 {
-                for j in 0..64 {
-                    let occ =
-                        (unsafe { *(self.entries.add(self.index + j) as *const u64) }
-                            != EMPTY_HASH) as u64;
-                    m |= occ << j;
-                }
-            } else {
-                for j in 0..n {
-                    let occ =
-                        (unsafe { *(self.entries.add(self.index + j) as *const u64) }
-                            != EMPTY_HASH) as u64;
-                    m |= occ << j;
-                }
+        while self.index < self.total_slots {
+            let idx = self.index;
+            self.index += 1;
+            if unsafe { *(self.entries.add(idx) as *const u64) } == EMPTY_HASH {
+                continue;
             }
-            self.mask = m;
-            self.mask_base = self.index;
-            self.index += n;
+            self.remaining -= 1;
+            let Entry { key: k, value: v, .. } = unsafe { &*(*self.entries.add(idx)).as_ptr() };
+            return Some((k, v));
         }
-        let bit = self.mask.trailing_zeros() as usize;
-        self.mask &= self.mask - 1;
-        self.remaining -= 1;
-        let idx = self.mask_base + bit;
-        let Entry { key: k, value: v, .. } = unsafe { &*(*self.entries.add(idx)).as_ptr() };
-        Some((k, v))
+        None
     }
 
     #[inline]
@@ -863,13 +822,9 @@ impl<K: Key, V: Value> FusedIterator for Iter<'_, K, V> {}
 #[must_use]
 pub struct IterMut<'a, K: Key, V: Value> {
     entries: *mut MaybeUninit<Entry<K, V>>,
-    /// Next slot the occupancy refill will scan.
     index: usize,
     total_slots: usize,
     remaining: usize,
-    /// Occupancy bits for slots `[mask_base, mask_base + 64)`, consumed LSB-first.
-    mask: u64,
-    mask_base: usize,
     _marker: PhantomData<&'a mut (K, V)>,
 }
 
@@ -882,38 +837,17 @@ impl<'a, K: Key, V: Value> Iterator for IterMut<'a, K, V> {
 
     #[inline]
     fn next(&mut self) -> Option<Self::Item> {
-        // Same branchless 64-slot occupancy-mask scheme as `Iter::next`.
-        if self.remaining == 0 {
-            return None;
-        }
-        while self.mask == 0 {
-            let n = (self.total_slots - self.index).min(64);
-            let mut m = 0u64;
-            if n == 64 {
-                for j in 0..64 {
-                    let occ =
-                        (unsafe { *(self.entries.add(self.index + j) as *const u64) }
-                            != EMPTY_HASH) as u64;
-                    m |= occ << j;
-                }
-            } else {
-                for j in 0..n {
-                    let occ =
-                        (unsafe { *(self.entries.add(self.index + j) as *const u64) }
-                            != EMPTY_HASH) as u64;
-                    m |= occ << j;
-                }
+        while self.index < self.total_slots {
+            let idx = self.index;
+            self.index += 1;
+            if unsafe { *(self.entries.add(idx) as *const u64) } == EMPTY_HASH {
+                continue;
             }
-            self.mask = m;
-            self.mask_base = self.index;
-            self.index += n;
+            self.remaining -= 1;
+            let entry = unsafe { &mut *(*self.entries.add(idx)).as_mut_ptr() };
+            return Some((&entry.key, &mut entry.value));
         }
-        let bit = self.mask.trailing_zeros() as usize;
-        self.mask &= self.mask - 1;
-        self.remaining -= 1;
-        let idx = self.mask_base + bit;
-        let entry = unsafe { &mut *(*self.entries.add(idx)).as_mut_ptr() };
-        Some((&entry.key, &mut entry.value))
+        None
     }
 
     #[inline]

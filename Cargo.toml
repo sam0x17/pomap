@@ -15,18 +15,23 @@ default = ["std"]
 std = ["ahash/std", "ahash/runtime-rng"]
 resize-logging = []
 bench-string = []
+# Bench pomap4 with GROWTH=2 instead of the default 4:
+#   cargo bench --bench pomap_bench --features growth2
+growth2 = []
 dots = []
+tui = ["ratatui", "crossterm"]
 
 [dependencies]
 ahash = { version = "0.8", default-features = false }
+ratatui = { version = "0.29", optional = true }
+crossterm = { version = "0.28", optional = true }
 
 [dev-dependencies]
-criterion = { git = "https://github.com/sam0x17/criterion.rs" }
+criterion = { git = "https://github.com/sam0x17/criterion.rs.git", branch = "master" }
+wide = { version = "0.7", default-features = false }
 hashbrown = "0.14"
 rand = { version = "0.10.0-rc.5", features = ["std"] }
 proptest = "1"
-ratatui = "0.29"
-crossterm = "0.28"
 
 [profile.release]
 codegen-units = 1
@@ -42,17 +47,34 @@ name = "pomap_bench"
 harness = false
 
 [[bench]]
-name = "gets_temp_graph"
+name = "cold"
 harness = false
 
 [[bench]]
-name = "insert_graph"
+name = "cold_perf"
 harness = false
 
 [[bench]]
-name = "insert_hot_graph"
+name = "profile_insert"
 harness = false
 
 [[bench]]
-name = "scan_depth"
+name = "bench_graph"
+harness = false
+required-features = ["tui"]
+
+[[bench]]
+name = "audit_bench"
+harness = false
+
+[[bench]]
+name = "loop_bench"
+harness = false
+
+[[bench]]
+name = "iter_bench"
+harness = false
+
+[[bench]]
+name = "family_bench"
 harness = false

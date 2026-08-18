@@ -76,7 +76,12 @@ type BenchValue = BenchType;
 /// Hasher configuration shared by PoMap and std::collections benchmarks.
 type BenchHasher = AHasher;
 type BenchHasherBuilder = BuildHasherDefault<BenchHasher>;
-type BenchPoMap = PoMap<BenchKey, BenchValue, BenchHasherBuilder>;
+/// PoMap growth factor: default 4; `--features growth2` benches GROWTH=2
+/// (e.g. `cargo bench --bench pomap_bench --features growth2`).
+#[cfg(feature = "growth2")]
+type BenchPoMap = PoMap<BenchKey, BenchValue, BenchHasherBuilder, 2>;
+#[cfg(not(feature = "growth2"))]
+type BenchPoMap = PoMap<BenchKey, BenchValue, BenchHasherBuilder, 4>;
 type BenchHashMap = HashMap<BenchKey, BenchValue, BenchHasherBuilder>;
 type BenchHashbrownMap = HashbrownMap<BenchKey, BenchValue, BenchHasherBuilder>;
 
@@ -272,8 +277,7 @@ fn bench_insert_allocate(c: &mut Criterion) {
     group.bench_function("pomap", |b| {
         b.iter(|| {
             for &size in &target_sizes {
-                let mut map: BenchPoMap =
-                    BenchPoMap::with_hasher(BenchHasherBuilder::default());
+                let mut map: BenchPoMap = BenchPoMap::with_hasher(BenchHasherBuilder::default());
                 for (key, val) in keys.iter().zip(values.iter()).take(size) {
                     black_box(map.insert(key.clone(), val.clone()));
                 }
@@ -321,41 +325,15 @@ fn bench_insert_preallocated(c: &mut Criterion) {
         .into_iter()
         .zip(values.into_iter())
         .collect::<Vec<(BenchKey, BenchValue)>>();
-    // Pre-compute the capacity pomap needs so that inserting `size` entries causes zero
-    // grows. Then give all three implementations the same capacity so they compete on
-    // equal memory footprints. For pomap, grows are driven by window overflow (not load
-    // factor), so we iteratively insert-and-grow until the capacity stabilizes.
-    let preallocated_capacities: Vec<usize> = target_sizes
-        .iter()
-        .map(|&size| {
-            let mut requested = size;
-            loop {
-                let mut map: BenchPoMap =
-                    BenchPoMap::with_capacity_and_hasher(requested, BenchHasherBuilder::default());
-                let cap_before = map.capacity();
-                for (key, val) in combined.iter().take(size) {
-                    map.insert(key.clone(), val.clone());
-                }
-                let cap_after = map.capacity();
-                if cap_after == cap_before {
-                    return cap_after - map.max_scan();
-                }
-                requested = cap_after - map.max_scan();
-            }
-        })
-        .collect();
+    // Each implementation pre-allocates for `size` entries using its own strategy.
+    // This is the fairest comparison: each decides its own allocation for the workload.
     let mut group = c.comparison_benchmark_group("insert_preallocated");
 
-    // std/hashbrown interpret with_capacity(N) as "hold N elements before growing",
-    // internally allocating ~N*8/7 slots. To match pomap's slot count we request N*7/8,
-    // but never less than `size` (so they don't grow when pomap wouldn't).
     group.bench_function("pomap", |b| {
         b.iter(|| {
-            for (i, &size) in target_sizes.iter().enumerate() {
-                let mut map: BenchPoMap = BenchPoMap::with_capacity_and_hasher(
-                    preallocated_capacities[i],
-                    BenchHasherBuilder::default(),
-                );
+            for &size in &target_sizes {
+                let mut map: BenchPoMap =
+                    BenchPoMap::with_capacity_and_hasher(size, BenchHasherBuilder::default());
                 for (key, val) in combined.iter().take(size) {
                     black_box(map.insert(key.clone(), val.clone()));
                 }
@@ -366,9 +344,8 @@ fn bench_insert_preallocated(c: &mut Criterion) {
 
     group.bench_function("std_hashmap", |b| {
         b.iter(|| {
-            for (i, &size) in target_sizes.iter().enumerate() {
-                let mut map: BenchHashMap =
-                    std_hashmap_with_capacity((preallocated_capacities[i] * 7 / 8).max(size));
+            for &size in &target_sizes {
+                let mut map: BenchHashMap = std_hashmap_with_capacity(size);
                 for (key, val) in combined.iter().take(size) {
                     black_box(map.insert(key.clone(), val.clone()));
                 }
@@ -379,9 +356,8 @@ fn bench_insert_preallocated(c: &mut Criterion) {
 
     group.bench_function("hashbrown", |b| {
         b.iter(|| {
-            for (i, &size) in target_sizes.iter().enumerate() {
-                let mut map: BenchHashbrownMap =
-                    hashbrown_with_capacity((preallocated_capacities[i] * 7 / 8).max(size));
+            for &size in &target_sizes {
+                let mut map: BenchHashbrownMap = hashbrown_with_capacity(size);
                 for (key, val) in combined.iter().take(size) {
                     black_box(map.insert(key.clone(), val.clone()));
                 }
@@ -444,6 +420,8 @@ fn bench_get_hits(c: &mut Criterion) {
             }
         });
     });
+
+
 
     group.finish();
 }
@@ -517,6 +495,9 @@ fn bench_get_misses(c: &mut Criterion) {
         });
     });
 
+    drop(hashbrown_maps);
+
+
     group.finish();
 }
 
@@ -534,7 +515,7 @@ fn bench_update(c: &mut Criterion) {
                 let size = *size;
                 for idx in 0..GETS_PER_ROUND {
                     let key = &keys[idx % size];
-                    let val = update_values[idx % size];
+                    let val = update_values[idx % size].clone();
                     if let Some(v) = map.get_mut(key) {
                         black_box(*v = val);
                     }
@@ -552,7 +533,7 @@ fn bench_update(c: &mut Criterion) {
                 let size = *size;
                 for idx in 0..GETS_PER_ROUND {
                     let key = &keys[idx % size];
-                    let val = update_values[idx % size];
+                    let val = update_values[idx % size].clone();
                     if let Some(v) = map.get_mut(key) {
                         black_box(*v = val);
                     }
@@ -570,7 +551,7 @@ fn bench_update(c: &mut Criterion) {
                 let size = *size;
                 for idx in 0..GETS_PER_ROUND {
                     let key = &keys[idx % size];
-                    let val = update_values[idx % size];
+                    let val = update_values[idx % size].clone();
                     if let Some(v) = map.get_mut(key) {
                         black_box(*v = val);
                     }
@@ -578,6 +559,9 @@ fn bench_update(c: &mut Criterion) {
             }
         });
     });
+
+    drop(hashbrown_maps);
+
 
     group.finish();
 }
@@ -642,6 +626,9 @@ fn bench_hot_gets(c: &mut Criterion) {
         });
     });
 
+    drop(hashbrown_maps);
+
+
     group.finish();
 }
 
@@ -672,6 +659,7 @@ fn bench_remove_hits(c: &mut Criterion) {
                         black_box(map.remove(key));
                     }
                 }
+                maps // return the batch so its drop is not timed
             },
             BatchSize::LargeInput,
         );
@@ -695,6 +683,7 @@ fn bench_remove_hits(c: &mut Criterion) {
                         black_box(map.remove(key));
                     }
                 }
+                maps // return the batch so its drop is not timed
             },
             BatchSize::LargeInput,
         );
@@ -718,11 +707,13 @@ fn bench_remove_hits(c: &mut Criterion) {
                         black_box(map.remove(key));
                     }
                 }
+                maps // return the batch so its drop is not timed
             },
             BatchSize::LargeInput,
         );
     });
 
+    drop(hashbrown_maps);
     group.finish();
 }
 
@@ -796,6 +787,9 @@ fn bench_remove_misses(c: &mut Criterion) {
         });
     });
 
+    drop(hashbrown_maps);
+
+
     group.finish();
 }
 
@@ -822,6 +816,7 @@ fn bench_shrink_to(c: &mut Criterion) {
                 for (size, map) in maps.iter_mut() {
                     black_box(map.shrink_to(*size));
                 }
+                maps // return the batch so its drop is not timed
             },
             BatchSize::LargeInput,
         );
@@ -841,6 +836,7 @@ fn bench_shrink_to(c: &mut Criterion) {
                 for (size, map) in maps.iter_mut() {
                     black_box(map.shrink_to(*size));
                 }
+                maps // return the batch so its drop is not timed
             },
             BatchSize::LargeInput,
         );
@@ -861,11 +857,13 @@ fn bench_shrink_to(c: &mut Criterion) {
                 for (size, map) in maps.iter_mut() {
                     black_box(map.shrink_to(*size));
                 }
+                maps // return the batch so its drop is not timed
             },
             BatchSize::LargeInput,
         );
     });
 
+    drop(hashbrown_maps);
     group.finish();
 }
 
@@ -876,33 +874,147 @@ fn measure_map_bytes<F: FnOnce() -> R, R>(build: F) -> (usize, R) {
     (bytes, map)
 }
 
-fn bench_memory_footprint(c: &mut Criterion) {
-    // Slot sizes for the current BenchKey/BenchValue types.
-    // PoMap:     8 (hash u64) + size_of::<K>() + size_of::<V>()
-    // hashbrown: 1 (control)  + size_of::<K>() + size_of::<V>()
-    // std HashMap is backed by hashbrown so its slot size is the same.
-    const HB_SLOT: usize = 1 + std::mem::size_of::<BenchKey>() + std::mem::size_of::<BenchValue>();
+/// STREAM-triad memory-bandwidth "mountain": sustained throughput at working-set
+/// sizes spanning L1 → DRAM. Gives each platform run a self-reported bandwidth
+/// curve to correlate against PoMap's bandwidth-bound write/bulk results. The
+/// working set is `3 * n * 8` bytes (arrays a/b/c of f64); throughput counts the
+/// two reads + one write per element (24 B). Single-threaded, pinned by the
+/// caller's `taskset`.
+fn bench_bandwidth(_c: &mut Criterion) {
+    use std::time::Instant;
 
+    // (elements per array, human label for the 3-array working set)
+    let configs: [(usize, &str); 6] = [
+        (1 << 10, "24 KiB (L1)"),
+        (1 << 13, "192 KiB (L2)"),
+        (1 << 16, "1.5 MiB (L2/L3)"),
+        (1 << 19, "12 MiB (L3)"),
+        (1 << 22, "96 MiB (L3/DRAM)"),
+        (1 << 24, "384 MiB (DRAM)"),
+    ];
+    let max_n = 1usize << 24;
+    let mut a = vec![0.0f64; max_n];
+    // Index-dependent data so the triad can't be constant-folded.
+    let b: Vec<f64> = (0..max_n).map(|i| i as f64).collect();
+    let cc: Vec<f64> = (0..max_n).map(|i| (i % 7) as f64).collect();
+    let scalar = 3.0f64;
+
+    println!("\n{:<20} {:>12} {:>14}", "working set", "per array", "triad GB/s");
+    println!("{}", "-".repeat(50));
+    for (n, label) in configs {
+        let a = &mut a[..n];
+        let b = &b[..n];
+        let cc = &cc[..n];
+        // ~256M element-updates of total work per size (min 5 iters for stability).
+        let iters = (256_000_000usize / n).max(5);
+        // Warm the working set into cache (for the levels where it fits).
+        for i in 0..n {
+            a[i] = b[i] + scalar * cc[i];
+        }
+        let t0 = Instant::now();
+        for _ in 0..iters {
+            for i in 0..n {
+                a[i] = b[i] + scalar * cc[i];
+            }
+            // Force each outer iteration to be observed so successive triads
+            // aren't collapsed, without pessimizing the inner vectorized loop.
+            black_box(a.as_ptr());
+        }
+        let secs = t0.elapsed().as_secs_f64();
+        let gbps = (n as f64 * 24.0 * iters as f64) / secs / 1e9;
+        println!(
+            "{:<20} {:>9} KiB {:>13.1}",
+            label,
+            n * 8 / 1024,
+            gbps
+        );
+    }
+    black_box(&a);
+}
+
+/// Pointer-chase latency "mountain": load-to-use latency of a dependent random
+/// load chain at working-set sizes spanning L1 → DRAM. Each element is the index
+/// of the next, forming a single random cycle (Sattolo), so loads are serialized
+/// and unpredictable — ILP and prefetch cannot hide them, isolating latency
+/// (vs `bench_bandwidth`, which measures throughput). The cache "cliffs" reveal
+/// each platform's cache sizes; the DRAM plateau is its random-access latency.
+/// Together they separate the write/bulk inversion's candidate drivers — cache
+/// residency vs raw latency (vs TLB/page-walk, visible as a high DRAM plateau).
+/// Single-threaded, pinned by the caller's `taskset`.
+fn bench_latency(_c: &mut Criterion) {
+    use std::time::Instant;
+
+    let configs: [(usize, &str); 6] = [
+        (1 << 11, "16 KiB (L1)"),
+        (1 << 14, "128 KiB (L2)"),
+        (1 << 17, "1 MiB (L2/L3)"),
+        (1 << 20, "8 MiB (L3)"),
+        (1 << 23, "64 MiB (L3/DRAM)"),
+        (1 << 24, "128 MiB (DRAM)"),
+    ];
+    let max_n = 1usize << 24;
+    let mut next = vec![0usize; max_n];
+    let mut rng = StdRng::seed_from_u64(0x1A7E11C7);
+
+    println!("\n{:<20} {:>12} {:>14}", "working set", "size", "latency ns");
+    println!("{}", "-".repeat(48));
+    for (n, label) in configs {
+        let next = &mut next[..n];
+        // Single random cycle over [0, n) via Sattolo's algorithm: position k of a
+        // cyclic order points at position k+1, so chasing visits all n with no
+        // short sub-cycles. Build `order` then link it into `next`.
+        let mut order: Vec<usize> = (0..n).collect();
+        for i in (1..n).rev() {
+            order.swap(i, rng.random_range(0..i)); // j in [0,i): single n-cycle
+        }
+        for k in 0..n {
+            next[order[k]] = order[(k + 1) % n];
+        }
+        // ~64M dependent loads (min 1 full cycle); each can't start until the prior
+        // load retires, so wall-time / count ≈ load-to-use latency.
+        let chases = (64_000_000usize / n).max(1) * n;
+        let mut p = order[0];
+        let t0 = Instant::now();
+        for _ in 0..chases {
+            p = next[p];
+        }
+        let secs = t0.elapsed().as_secs_f64();
+        black_box(p);
+        println!(
+            "{:<20} {:>9} KiB {:>13.2}",
+            label,
+            n * 8 / 1024,
+            secs / chases as f64 * 1e9
+        );
+    }
+    black_box(&next);
+}
+
+fn bench_memory_footprint(c: &mut Criterion) {
+    // Reports the REAL retained heap footprint of each map (net bytes held after
+    // a build-from-empty), measured by the tracking global allocator — not a
+    // logical capacity() estimate. bytes/entry and the pm/hb ratio are the
+    // paper-ready memory metrics. Build maps via `with_hasher` (default growth)
+    // so the growth-step geometry is exercised exactly as in real use.
     let sizes = [500usize, 5_000, 50_000, 500_000, 5_000_000];
     let max_size = *sizes.iter().max().unwrap();
     let keys: Vec<BenchKey> = random_items(0xB17E5, max_size);
     let values: Vec<BenchValue> = random_items(0xF007, max_size);
 
     println!(
-        "\n{:<12} {:>14} {:>14} {:>12} {:>12} {:>12}",
-        "entries", "pomap slots", "hb slots", "pm/hb", "pm load%", "hb load%"
+        "\n{:<10} {:>14} {:>14} {:>11} {:>11} {:>9}",
+        "entries", "pomap bytes", "hb bytes", "pm B/ent", "hb B/ent", "pm/hb"
     );
-    println!("{}", "-".repeat(80));
+    println!("{}", "-".repeat(74));
 
     for &size in &sizes {
-        let (_, pm) = measure_map_bytes(|| {
+        let (pm_bytes, pm) = measure_map_bytes(|| {
             let mut m = BenchPoMap::with_hasher(BenchHasherBuilder::default());
             for i in 0..size {
                 m.insert(keys[i].clone(), values[i].clone());
             }
             m
         });
-        let pm_slots = pm.capacity();
         drop(black_box(pm));
 
         let (hb_bytes, hb) = measure_map_bytes(|| {
@@ -912,17 +1024,16 @@ fn bench_memory_footprint(c: &mut Criterion) {
             }
             m
         });
-        let hb_slots = hb_bytes / HB_SLOT;
         drop(black_box(hb));
 
         println!(
-            "{:<12} {:>14} {:>14} {:>11.2}x {:>11.1}% {:>11.1}%",
+            "{:<10} {:>14} {:>14} {:>11.1} {:>11.1} {:>8.2}x",
             size,
-            pm_slots,
-            hb_slots,
-            pm_slots as f64 / hb_slots.max(1) as f64,
-            size as f64 / pm_slots as f64 * 100.0,
-            size as f64 / hb_slots.max(1) as f64 * 100.0,
+            pm_bytes,
+            hb_bytes,
+            pm_bytes as f64 / size as f64,
+            hb_bytes as f64 / size as f64,
+            pm_bytes as f64 / hb_bytes.max(1) as f64,
         );
     }
 
@@ -943,7 +1054,9 @@ criterion_group!(
     bench_remove_hits,
     bench_remove_misses,
     bench_shrink_to,
-    bench_memory_footprint
+    bench_memory_footprint,
+    bench_bandwidth,
+    bench_latency
 );
 
 criterion_main!(benches);

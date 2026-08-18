@@ -1,0 +1,172 @@
+    Finished `bench` profile [optimized] target(s) in 0.04s
+     Running benches/loop_bench.rs (target/release/deps/loop_bench-17bc7a8704c33410)
+Gnuplot not found, using plotters backend
+Benchmarking insert_allocate/cand
+Benchmarking insert_allocate/cand: Warming up for 3.0000 s
+Benchmarking insert_allocate/cand: Collecting 100 samples in estimated 5.3981 s (200 iterations)
+Benchmarking insert_allocate/cand: Analyzing
+insert_allocate/cand    time:   [27.060 ms 27.240 ms 27.421 ms]
+                        change: [+5.1611% +6.5483% +7.8177%] (p = 0.00 < 0.05)
+                        Performance has regressed.
+Found 1 outliers among 100 measurements (1.00%)
+  1 (1.00%) high mild
+Benchmarking insert_allocate/cand_g2
+Benchmarking insert_allocate/cand_g2: Warming up for 3.0000 s
+Benchmarking insert_allocate/cand_g2: Collecting 100 samples in estimated 8.4775 s (200 iterations)
+Benchmarking insert_allocate/cand_g2: Analyzing
+insert_allocate/cand_g2 time:   [42.025 ms 42.230 ms 42.445 ms]
+Found 8 outliers among 100 measurements (8.00%)
+  2 (2.00%) low mild
+  4 (4.00%) high mild
+  2 (2.00%) high severe
+Benchmarking insert_allocate/cand_g8
+Benchmarking insert_allocate/cand_g8: Warming up for 3.0000 s
+Benchmarking insert_allocate/cand_g8: Collecting 100 samples in estimated 7.0396 s (300 iterations)
+Benchmarking insert_allocate/cand_g8: Analyzing
+insert_allocate/cand_g8 time:   [23.952 ms 24.196 ms 24.437 ms]
+Benchmarking insert_allocate/base
+Benchmarking insert_allocate/base: Warming up for 3.0000 s
+Benchmarking insert_allocate/base: Collecting 100 samples in estimated 5.3791 s (200 iterations)
+Benchmarking insert_allocate/base: Analyzing
+insert_allocate/base    time:   [27.673 ms 28.242 ms 28.879 ms]
+                        change: [+5.5442% +7.7094% +10.328%] (p = 0.00 < 0.05)
+                        Performance has regressed.
+Found 4 outliers among 100 measurements (4.00%)
+  1 (1.00%) high mild
+  3 (3.00%) high severe
+Benchmarking insert_allocate/hashbrown
+Benchmarking insert_allocate/hashbrown: Warming up for 3.0000 s
+Benchmarking insert_allocate/hashbrown: Collecting 100 samples in estimated 5.7741 s (200 iterations)
+Benchmarking insert_allocate/hashbrown: Analyzing
+insert_allocate/hashbrown
+                        time:   [26.909 ms 27.052 ms 27.211 ms]
+                        change: [+1.7697% +2.3707% +2.9833%] (p = 0.00 < 0.05)
+                        Performance has regressed.
+Found 11 outliers among 100 measurements (11.00%)
+  1 (1.00%) low mild
+  5 (5.00%) high mild
+  5 (5.00%) high severe
+Comparison for group 'insert_allocate':
+  Higher is better; best performer is 1.00 (typical).
+      1st insert_allocate/cand_g8:   1.000 (24.196 ms), rank: [11.8% faster than 2nd]
+      2nd insert_allocate/hashbrown: 0.894 (27.052 ms), change: [-0.073, +2.3707%], rank: [11.8% slower than 1st, 0.7% faster than 3rd]
+      3rd insert_allocate/cand:      0.888 (27.240 ms), change: [-0.112, +6.5483%], rank: [0.7% slower than 2nd, 3.7% faster than 4th]
+      4th insert_allocate/base:      0.857 (28.242 ms), change: [-0.118, +7.7094%], rank: [3.7% slower than 3rd, 49.5% faster than 5th]
+      5th insert_allocate/cand_g2:   0.573 (42.230 ms), rank: [49.5% slower than 4th]
+
+    Finished `bench` profile [optimized] target(s) in 0.04s
+     Running benches/loop_bench.rs (target/release/deps/loop_bench-17bc7a8704c33410)
+Gnuplot not found, using plotters backend
+Benchmarking insert_allocate/cand
+Benchmarking insert_allocate/cand: Warming up for 3.0000 s
+Benchmarking insert_allocate/cand: Collecting 100 samples in estimated 5.5113 s (200 iterations)
+Benchmarking insert_allocate/cand: Analyzing
+insert_allocate/cand    time:   [28.028 ms 28.569 ms 29.191 ms]
+                        change: [+2.5962% +4.8774% +7.1296%] (p = 0.00 < 0.05)
+                        Performance has regressed.
+Found 4 outliers among 100 measurements (4.00%)
+  4 (4.00%) high severe
+Benchmarking insert_allocate/cand_g2
+Benchmarking insert_allocate/cand_g2: Warming up for 3.0000 s
+Benchmarking insert_allocate/cand_g2: Collecting 100 samples in estimated 8.5260 s (200 iterations)
+Benchmarking insert_allocate/cand_g2: Analyzing
+insert_allocate/cand_g2 time:   [42.067 ms 42.533 ms 43.067 ms]
+                        change: [−0.4657% +0.7177% +1.9652%] (p = 0.29 > 0.05)
+                        No change in performance detected.
+Found 13 outliers among 100 measurements (13.00%)
+  1 (1.00%) low mild
+  5 (5.00%) high mild
+  7 (7.00%) high severe
+Benchmarking insert_allocate/cand_g8
+Benchmarking insert_allocate/cand_g8: Warming up for 3.0000 s
+Benchmarking insert_allocate/cand_g8: Collecting 100 samples in estimated 7.4586 s (300 iterations)
+Benchmarking insert_allocate/cand_g8: Analyzing
+insert_allocate/cand_g8 time:   [23.531 ms 23.814 ms 24.101 ms]
+                        change: [−3.1331% −1.5808% −0.0193%] (p = 0.05 < 0.05)
+                        Change within noise threshold.
+Benchmarking insert_allocate/base
+Benchmarking insert_allocate/base: Warming up for 3.0000 s
+Benchmarking insert_allocate/base: Collecting 100 samples in estimated 5.4574 s (200 iterations)
+Benchmarking insert_allocate/base: Analyzing
+insert_allocate/base    time:   [28.300 ms 28.815 ms 29.399 ms]
+                        change: [−0.8067% +2.0304% +4.9400%] (p = 0.17 > 0.05)
+                        No change in performance detected.
+Found 5 outliers among 100 measurements (5.00%)
+  2 (2.00%) high mild
+  3 (3.00%) high severe
+Benchmarking insert_allocate/hashbrown
+Benchmarking insert_allocate/hashbrown: Warming up for 3.0000 s
+Benchmarking insert_allocate/hashbrown: Collecting 100 samples in estimated 5.9251 s (200 iterations)
+Benchmarking insert_allocate/hashbrown: Analyzing
+insert_allocate/hashbrown
+                        time:   [29.443 ms 29.614 ms 29.789 ms]
+                        change: [+8.5508% +9.4719% +10.287%] (p = 0.00 < 0.05)
+                        Performance has regressed.
+Found 1 outliers among 100 measurements (1.00%)
+  1 (1.00%) high mild
+Comparison for group 'insert_allocate':
+  Higher is better; best performer is 1.00 (typical).
+      1st insert_allocate/cand_g8:   1.000 (23.814 ms), change: [0.000, −1.5808%], rank: [20.0% faster than 2nd]
+      2nd insert_allocate/cand:      0.834 (28.569 ms), change: [-0.055, +4.8774%], rank: [20.0% slower than 1st, 0.9% faster than 3rd]
+      3rd insert_allocate/base:      0.826 (28.815 ms), change: [-0.030, +2.0304%], rank: [0.9% slower than 2nd, 2.8% faster than 4th]
+      4th insert_allocate/hashbrown: 0.804 (29.614 ms), change: [-0.090, +9.4719%], rank: [2.8% slower than 3rd, 43.6% faster than 5th]
+      5th insert_allocate/cand_g2:   0.560 (42.533 ms), change: [-0.013, +0.7177%], rank: [43.6% slower than 4th]
+
+    Finished `bench` profile [optimized] target(s) in 0.05s
+     Running benches/loop_bench.rs (target/release/deps/loop_bench-17bc7a8704c33410)
+Gnuplot not found, using plotters backend
+Benchmarking insert_allocate/cand
+Benchmarking insert_allocate/cand: Warming up for 3.0000 s
+Benchmarking insert_allocate/cand: Collecting 100 samples in estimated 6.1851 s (200 iterations)
+Benchmarking insert_allocate/cand: Analyzing
+insert_allocate/cand    time:   [30.254 ms 30.454 ms 30.661 ms]
+                        change: [+4.1618% +6.6006% +8.7904%] (p = 0.00 < 0.05)
+                        Performance has regressed.
+Found 2 outliers among 100 measurements (2.00%)
+  2 (2.00%) high mild
+Benchmarking insert_allocate/cand_g2
+Benchmarking insert_allocate/cand_g2: Warming up for 3.0000 s
+Benchmarking insert_allocate/cand_g2: Collecting 100 samples in estimated 8.9572 s (200 iterations)
+Benchmarking insert_allocate/cand_g2: Analyzing
+insert_allocate/cand_g2 time:   [42.865 ms 43.381 ms 43.979 ms]
+                        change: [+0.3032% +1.9937% +3.7277%] (p = 0.03 < 0.05)
+                        Change within noise threshold.
+Found 12 outliers among 100 measurements (12.00%)
+  8 (8.00%) high mild
+  4 (4.00%) high severe
+Benchmarking insert_allocate/cand_g8
+Benchmarking insert_allocate/cand_g8: Warming up for 3.0000 s
+Benchmarking insert_allocate/cand_g8: Collecting 100 samples in estimated 5.1426 s (200 iterations)
+Benchmarking insert_allocate/cand_g8: Analyzing
+insert_allocate/cand_g8 time:   [23.756 ms 24.054 ms 24.390 ms]
+                        change: [−0.7198% +1.0089% +2.8894%] (p = 0.28 > 0.05)
+                        No change in performance detected.
+Found 2 outliers among 100 measurements (2.00%)
+  2 (2.00%) high severe
+Benchmarking insert_allocate/base
+Benchmarking insert_allocate/base: Warming up for 3.0000 s
+Benchmarking insert_allocate/base: Collecting 100 samples in estimated 5.6614 s (200 iterations)
+Benchmarking insert_allocate/base: Analyzing
+insert_allocate/base    time:   [29.364 ms 29.636 ms 29.910 ms]
+                        change: [+0.6416% +2.8487% +5.0236%] (p = 0.01 < 0.05)
+                        Change within noise threshold.
+Found 1 outliers among 100 measurements (1.00%)
+  1 (1.00%) high mild
+Benchmarking insert_allocate/hashbrown
+Benchmarking insert_allocate/hashbrown: Warming up for 3.0000 s
+Benchmarking insert_allocate/hashbrown: Collecting 100 samples in estimated 5.5308 s (200 iterations)
+Benchmarking insert_allocate/hashbrown: Analyzing
+insert_allocate/hashbrown
+                        time:   [27.260 ms 27.417 ms 27.584 ms]
+                        change: [−8.2521% −7.4204% −6.6101%] (p = 0.00 < 0.05)
+                        Performance has improved.
+Found 4 outliers among 100 measurements (4.00%)
+  4 (4.00%) high mild
+Comparison for group 'insert_allocate':
+  Higher is better; best performer is 1.00 (typical).
+      1st insert_allocate/cand_g8:   1.000 (24.054 ms), change: [0.000, +1.0089%], rank: [14.0% faster than 2nd]
+      2nd insert_allocate/hashbrown: 0.877 (27.417 ms), change: [+0.073, −7.4204%], rank: [14.0% slower than 1st, 8.1% faster than 3rd]
+      3rd insert_allocate/base:      0.812 (29.636 ms), change: [-0.015, +2.8487%], rank: [8.1% slower than 2nd, 2.8% faster than 4th]
+      4th insert_allocate/cand:      0.790 (30.454 ms), change: [-0.044, +6.6006%], rank: [2.8% slower than 3rd, 42.4% faster than 5th]
+      5th insert_allocate/cand_g2:   0.554 (43.381 ms), change: [-0.005, +1.9937%], rank: [42.4% slower than 4th]
+

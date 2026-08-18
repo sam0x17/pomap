@@ -1,0 +1,114 @@
+#!/usr/bin/env bash
+# Bind the cold-read wall-clock ratios to hardware counters via `perf stat`
+# (Linux only). Runs the minimal `cold_perf` driver under perf for pomap /
+# hashbrown / std × {get_hit, get_miss}, normalizes counters to per-op, and writes
+# perf-<cpu>_<Nc>.csv plus a human-readable table.
+#
+# Tunables (env): VW=value_words(1|2|4|8)  WS=ws_mb  PASSES=passes  EVENTS=...
+# Usage: scripts/perf_cold.sh
+set -euo pipefail
+# NOTE: GROWTH-independent — maps are built via with_capacity (no growth), so the
+# counters are identical at GROWTH=2 and GROWTH=4. No --features growth2 needed.
+cd "$(dirname "$0")/.."
+
+# IMPORTANT: run this as your NORMAL user (NOT sudo). Building needs cargo (in
+# your ~/.cargo/bin); only counter access needs privilege, and the script
+# elevates *just* `perf` itself via sudo when required.
+command -v cargo >/dev/null 2>&1 || {
+  echo "cargo not found in PATH."
+  if [ "$(id -u)" = 0 ]; then
+    echo "  You ran this as root — cargo lives in your normal user's ~/.cargo/bin."
+    echo "  Re-run as your NORMAL user (no sudo); the script sudo's only perf:"
+    echo "      scripts/perf_cold.sh"
+  fi
+  exit 1
+}
+command -v perf >/dev/null 2>&1 || {
+  echo "perf not found. Install linux-tools (e.g. apt install linux-tools-\$(uname -r))."
+  exit 1
+}
+
+# Capability probe: prefer unprivileged perf; fall back to `sudo perf` (which
+# bypasses perf_event_paranoid). Fail LOUDLY if neither can read counters.
+PERF=""
+if perf stat -e instructions -- true >/dev/null 2>/tmp/pp.$$; then
+  PERF="perf"
+else
+  echo "unprivileged perf is blocked; trying via sudo (may prompt for password)…"
+  if sudo perf stat -e instructions -- true >/dev/null 2>/tmp/pp.$$; then
+    PERF="sudo perf"
+    sudo -v   # cache credentials so the measurement loop doesn't re-prompt
+  fi
+fi
+if [ -z "$PERF" ]; then
+  echo "ERROR: perf cannot read counters, even via sudo:"
+  sed 's/^/    /' /tmp/pp.$$
+  echo "  perf_event_paranoid = $(cat /proc/sys/kernel/perf_event_paranoid 2>/dev/null || echo '?')"
+  echo "  If the events read '<not supported>', this VM has no PMU passthrough —"
+  echo "  hardware counters are unavailable here; use the bare-metal box instead."
+  rm -f /tmp/pp.$$
+  exit 1
+fi
+rm -f /tmp/pp.$$
+
+VW_LIST="${VW:-1 2 4 8}" # value words to sweep: 1=8B 2=16B 4=32B 8=64B (set VW=1 for just 8B)
+WS="${WS:-256}"         # working-set MB (must be >> LLC to stay cold across passes)
+PASSES="${PASSES:-30}"  # cold passes (build overhead ~ 1/PASSES)
+# Generic events map to AMD PMU. For misaligned/split loads on AMD add e.g.
+# ls_misal_loads.ma64 (check `perf list | grep -i misal`); left out by default so
+# an unsupported name can't suppress the rest.
+EVENTS="${EVENTS:-instructions,cycles,cache-misses,L1-dcache-load-misses,LLC-loads,LLC-load-misses,dTLB-load-misses}"
+
+cpu_raw="$(grep -m1 'model name' /proc/cpuinfo 2>/dev/null | cut -d: -f2- || echo cpu)"
+cpu="$(printf '%s' "$cpu_raw" | sed -E 's/\((R|TM)\)//g; s/[0-9]+-Core//; s/ Processor//; s/ CPU//; s/@.*//' | tr -s ' ' | sed 's/^ *//; s/ *$//')"
+cores="$(nproc 2>/dev/null || echo '?')"
+slug="$(printf '%s_%sc' "$cpu" "$cores" | tr ' /' '__' | tr -cd '[:alnum:]._-')"
+out="perf-${slug}.csv"
+
+cargo bench --bench cold_perf --no-run >/tmp/pb.$$ 2>&1 || { cat /tmp/pb.$$; exit 1; }
+bin="$(sed -n 's/.*(\(target[^)]*cold_perf[^)]*\)).*/\1/p' /tmp/pb.$$ | tail -1)"
+[ -x "$bin" ] || bin="$(find target -type f -name 'cold_perf-*' ! -name '*.d' -perm -u+x 2>/dev/null | head -1)"
+[ -x "$bin" ] || { echo "could not locate cold_perf binary"; exit 1; }
+
+echo "# cpu: ${cpu_raw}"  | tee "$out"
+{ echo "# cores: ${cores}"; echo "# config: value_words={${VW_LIST}} ws_mb=${WS} passes=${PASSES}";
+  echo "# events: ${EVENTS}"; echo "# date_utc: $(date -u +%Y-%m-%dT%H:%M:%SZ)"; } | tee -a "$out"
+echo "impl,op,value_words,ws_mb,ops,instr_per_op,cyc_per_op,ipc,l1miss_per_op,llcmiss_per_op,dtlbmiss_per_op,cachemiss_per_op" >> "$out"
+
+printf "\n%-4s %-10s %-9s %11s %10s %10s %10s %6s\n" valB impl op LLCmiss/op L1miss/op dTLB/op instr/op IPC
+pin=""; command -v taskset >/dev/null 2>&1 && pin="taskset -c 2"
+for VW in $VW_LIST; do
+  vb=$((VW * 8))
+  for imp in pomap hashbrown std; do
+    for op in get_hit get_miss; do
+      # taskset (shell) -> $PERF -> binary, so perf never has to exec taskset itself.
+      # perf -x, writes CSV to stderr (no -o) → user-owned redirect even under sudo.
+      $pin $PERF stat -x, -e "$EVENTS" "$bin" "$imp" "$op" "$VW" "$WS" "$PASSES" \
+        >/tmp/run.$$.out 2>/tmp/perf.$$.csv || true
+      ops="$(grep -oE 'ops=[0-9]+' /tmp/run.$$.out | head -1 | cut -d= -f2)"
+      if [ -z "${ops:-}" ]; then
+        printf "%-4s %-10s %-9s   (no output — see error logged to CSV)\n" "$vb" "$imp" "$op"
+        {
+          echo "# ERROR vb=${vb} ${imp}/${op}: binary produced no 'ops=' line. perf stderr + run stdout:"
+          sed 's/^/#   perf: /' /tmp/perf.$$.csv
+          sed 's/^/#   run:  /' /tmp/run.$$.out
+        } >> "$out"
+        continue
+      fi
+      awk -F, -v ops="$ops" -v vb="$vb" -v imp="$imp" -v op="$op" -v vw="$VW" -v ws="$WS" -v out="$out" '
+        $1 ~ /^[0-9]+(\.[0-9]+)?$/ { v[$3]=$1 }
+        END {
+          ins=v["instructions"]; cyc=v["cycles"];
+          ipc = (cyc>0)? ins/cyc : 0;
+          l1=v["L1-dcache-load-misses"]/ops; llc=v["LLC-load-misses"]/ops;
+          dt=v["dTLB-load-misses"]/ops; cm=v["cache-misses"]/ops;
+          printf "%-4s %-10s %-9s %11.3f %10.3f %10.3f %10.1f %6.2f\n", vb, imp, op, llc, l1, dt, ins/ops, ipc;
+          printf "%s,%s,%s,%s,%s,%.1f,%.1f,%.3f,%.4f,%.4f,%.4f,%.4f\n",
+                 imp,op,vw,ws,ops, ins/ops, cyc/ops, ipc, l1, llc, dt, cm >> out;
+        }' /tmp/perf.$$.csv
+    done
+  done
+done
+rm -f /tmp/perf.$$.csv /tmp/run.$$.out /tmp/pb.$$
+echo
+echo "wrote ${out}"
