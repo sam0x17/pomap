@@ -99,8 +99,13 @@ Numbers are only comparable **within a run** (normalize to the in-run
 
 ## Status
 
-Research-grade: the engine is stable, fuzzed against `std::HashMap` (50k-op
-randomized runs, both growth factors, `u64` and `String` payloads), and the
-design space around it has been mapped and measured. The API mirrors
-`std::collections::HashMap` (entry-less: `get`/`get_mut`/`insert`/`remove`/
-iterators/`retain`/`drain`/`shrink_to`/`reserve`/`try_reserve`).
+Production-grade surface, research-grade provenance: fuzzed against
+`std::HashMap` (50k-op randomized runs, both growth factors, `u64` and
+`String` payloads), adversarial-hasher hardened (total-collision and
+tail-clustering tests guard the no-bounds-check probe invariant), and
+clippy/doc clean. Full `HashMap` API parity — `entry()`, `Borrow<Q>` lookups
+(query a `String` map by `&str`), `get_disjoint_mut`, double-ended canonical
+iteration, `From<[(K, V); N]>`, `retain`/`drain`/`reserve`/`try_reserve` —
+plus the determinism extras: `compact()`, `first/last_key_value`,
+`pop_first/pop_last`, streaming set algebra, map-level `Eq`/`Ord`/`Hash`,
+and canonical `serde` (feature-gated).
