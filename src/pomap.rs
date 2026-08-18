@@ -734,6 +734,9 @@ impl<K: Key, V: Value, H: BuildHasher, const GROWTH: usize> PoMap<K, V, H, GROWT
             remaining: self.len,
             mask: 0,
             mask_base: 0,
+            back_mask: 0,
+            back_mask_base: 0,
+            back_scan: self.slots.total_slots,
             _marker: PhantomData,
         }
     }
@@ -1431,13 +1434,18 @@ impl<'a, K: Key, V: Value, H: BuildHasher, const GROWTH: usize>
 #[must_use]
 pub struct Iter<'a, K: Key, V: Value> {
     entries: *const MaybeUninit<SlotEntry<K, V>>,
-    /// Next slot the occupancy refill will scan.
+    /// Next slot the forward occupancy refill will scan.
     index: usize,
     total_slots: usize,
     remaining: usize,
     /// Occupancy bits for slots `[mask_base, mask_base + 64)`, consumed LSB-first.
     mask: u64,
     mask_base: usize,
+    /// Back-end state: occupancy bits consumed MSB-first, and the lowest slot
+    /// the backward refill has claimed (forward refills stop below it).
+    back_mask: u64,
+    back_mask_base: usize,
+    back_scan: usize,
     _marker: PhantomData<&'a (K, V)>,
 }
 
@@ -1455,6 +1463,9 @@ impl<K: Key, V: Value> Clone for Iter<'_, K, V> {
             remaining: self.remaining,
             mask: self.mask,
             mask_base: self.mask_base,
+            back_mask: self.back_mask,
+            back_mask_base: self.back_mask_base,
+            back_scan: self.back_scan,
             _marker: PhantomData,
         }
     }
@@ -1473,8 +1484,25 @@ impl<'a, K: Key, V: Value> Iterator for Iter<'a, K, V> {
         if self.remaining == 0 {
             return None;
         }
-        while self.mask == 0 {
-            let n = (self.total_slots - self.index).min(64);
+        loop {
+            if self.mask != 0 {
+                break;
+            }
+            // Claim the next chunk, never crossing into the back end's region.
+            let n = (self.back_scan - self.index).min(64);
+            if n == 0 {
+                // All unclaimed slots belong to the back end; the remaining
+                // entries live in its mask. (remaining > 0 guarantees the
+                // back mask is non-empty here.)
+                // Front takes the LOWEST set bit of the back mask.
+                let low = self.back_mask.trailing_zeros() as usize;
+                self.back_mask &= self.back_mask - 1; // clear lowest set bit
+                self.remaining -= 1;
+                let idx = self.back_mask_base + low;
+                let SlotEntry { key: k, value: v, .. } =
+                    unsafe { &*(*self.entries.add(idx)).as_ptr() };
+                return Some((k, v));
+            }
             let mut m = 0u64;
             if n == 64 {
                 for j in 0..64 {
@@ -1506,6 +1534,52 @@ impl<'a, K: Key, V: Value> Iterator for Iter<'a, K, V> {
     #[inline]
     fn size_hint(&self) -> (usize, Option<usize>) {
         (self.remaining, Some(self.remaining))
+    }
+}
+
+impl<K: Key, V: Value> DoubleEndedIterator for Iter<'_, K, V> {
+    #[inline]
+    fn next_back(&mut self) -> Option<Self::Item> {
+        if self.remaining == 0 {
+            return None;
+        }
+        loop {
+            if self.back_mask != 0 {
+                break;
+            }
+            // Claim the next chunk from the top, never crossing into the
+            // front end's region ([0, index) is claimed by the front).
+            let hi = self.back_scan;
+            let lo = hi.saturating_sub(64).max(self.index);
+            let n = hi - lo;
+            if n == 0 {
+                // All unclaimed slots belong to the front; the remaining
+                // entries live in its mask — take its HIGHEST set bit.
+                let bit = 63 - self.mask.leading_zeros() as usize;
+                self.mask &= !(1u64 << bit);
+                self.remaining -= 1;
+                let idx = self.mask_base + bit;
+                let SlotEntry { key: k, value: v, .. } =
+                    unsafe { &*(*self.entries.add(idx)).as_ptr() };
+                return Some((k, v));
+            }
+            let mut m = 0u64;
+            for j in 0..n {
+                let occ = (unsafe { *(self.entries.add(lo + j) as *const u64) }
+                    != EMPTY_HASH) as u64;
+                m |= occ << j;
+            }
+            self.back_mask = m;
+            self.back_mask_base = lo;
+            self.back_scan = lo;
+        }
+        // Back takes the HIGHEST set bit of the back mask.
+        let bit = 63 - self.back_mask.leading_zeros() as usize;
+        self.back_mask &= !(1u64 << bit);
+        self.remaining -= 1;
+        let idx = self.back_mask_base + bit;
+        let SlotEntry { key: k, value: v, .. } = unsafe { &*(*self.entries.add(idx)).as_ptr() };
+        Some((k, v))
     }
 }
 
@@ -1619,6 +1693,13 @@ impl<'a, K: Key, V: Value> Iterator for Keys<'a, K, V> {
     }
 }
 
+impl<K: Key, V: Value> DoubleEndedIterator for Keys<'_, K, V> {
+    #[inline]
+    fn next_back(&mut self) -> Option<Self::Item> {
+        self.iter.next_back().map(|(k, _)| k)
+    }
+}
+
 impl<K: Key, V: Value> ExactSizeIterator for Keys<'_, K, V> {
     #[inline]
     fn len(&self) -> usize {
@@ -1654,6 +1735,13 @@ impl<'a, K: Key, V: Value> Iterator for Values<'a, K, V> {
     #[inline]
     fn size_hint(&self) -> (usize, Option<usize>) {
         self.iter.size_hint()
+    }
+}
+
+impl<K: Key, V: Value> DoubleEndedIterator for Values<'_, K, V> {
+    #[inline]
+    fn next_back(&mut self) -> Option<Self::Item> {
+        self.iter.next_back().map(|(_, v)| v)
     }
 }
 
@@ -3289,6 +3377,61 @@ mod tests {
         let big: PoMap<u64, u64> = (0..50_000u64).map(|k| (k, k)).collect();
         dst.clone_from(&big);
         assert_eq!(dst, big);
+    }
+
+    /// DoubleEndedIterator: rev() equals reversed forward order, and
+    /// meet-in-the-middle alternation matches the Vec model exactly —
+    /// including under total hash collision and across chunk boundaries.
+    #[test]
+    fn iter_double_ended() {
+        for n in [0usize, 1, 7, 63, 64, 65, 200, 1000] {
+            let m: PoMap<u64, u64> = (0..n as u64).map(|k| (k, k)).collect();
+            let fwd: alloc::vec::Vec<(u64, u64)> =
+                m.iter().map(|(k, v)| (*k, *v)).collect();
+            let rev: alloc::vec::Vec<(u64, u64)> =
+                m.iter().rev().map(|(k, v)| (*k, *v)).collect();
+            let mut expect = fwd.clone();
+            expect.reverse();
+            assert_eq!(rev, expect, "n={n}");
+
+            // Alternating front/back consumption vs the Vec model.
+            let mut model = fwd.clone();
+            let mut it = m.iter();
+            let mut got = alloc::vec::Vec::new();
+            let mut from_front = true;
+            loop {
+                let step = if from_front {
+                    it.next().map(|(k, v)| (*k, *v))
+                } else {
+                    it.next_back().map(|(k, v)| (*k, *v))
+                };
+                let want = if model.is_empty() {
+                    None
+                } else if from_front {
+                    Some(model.remove(0))
+                } else {
+                    model.pop()
+                };
+                assert_eq!(step, want, "n={n} alternation");
+                if step.is_none() {
+                    break;
+                }
+                got.push(step.unwrap());
+                from_front = !from_front;
+            }
+            assert_eq!(got.len(), n);
+        }
+
+        // Under total hash collision (single dense run).
+        let mut c: PoMap<u64, u64, ColliderBuildHasher> =
+            PoMap::with_hasher(ColliderBuildHasher);
+        for k in 0..100u64 {
+            c.insert(k, k);
+        }
+        let rev: alloc::vec::Vec<u64> = c.iter().rev().map(|(k, _)| *k).collect();
+        let mut expect: alloc::vec::Vec<u64> = (0..100).collect();
+        expect.reverse();
+        assert_eq!(rev, expect);
     }
 
     /// Ord over maps is a lawful total order on content-distinct maps.
