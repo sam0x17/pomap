@@ -521,6 +521,66 @@ impl<K: Key, V: Value, H: BuildHasher, const GROWTH: usize> PoMap<K, V, H, GROWT
         None
     }
 
+    /// Locates the slot holding `key`, if present.
+    #[inline]
+    fn find_pos<Q>(&self, key: &Q) -> Option<usize>
+    where
+        K: Borrow<Q>,
+        Q: Hash + Eq + ?Sized,
+    {
+        let hash = encode_hash(self.hash_builder.hash_one(key));
+        let entries = self.slots.entries;
+        let mut pos = self.meta.ideal_slot(hash);
+        loop {
+            let stored = self.slots.hash_at(pos);
+            if stored == hash {
+                let SlotEntry { key: k, .. } = unsafe { &*(*entries.add(pos)).as_ptr() };
+                if k.borrow() == key {
+                    return Some(pos);
+                }
+            } else if stored > hash {
+                return None;
+            }
+            pos += 1;
+        }
+    }
+
+    /// Returns mutable references to the values of up to `N` distinct keys at
+    /// once (`None` for absent keys).
+    ///
+    /// # Panics
+    ///
+    /// Panics if any two of the given keys resolve to the same entry
+    /// (matching `HashMap::get_disjoint_mut` semantics).
+    pub fn get_disjoint_mut<Q, const N: usize>(&mut self, keys: [&Q; N]) -> [Option<&mut V>; N]
+    where
+        K: Borrow<Q>,
+        Q: Hash + Eq + ?Sized,
+    {
+        let mut positions: [Option<usize>; N] = [None; N];
+        for (i, k) in keys.iter().enumerate() {
+            positions[i] = self.find_pos(*k);
+        }
+        for i in 0..N {
+            if positions[i].is_some() {
+                for j in (i + 1)..N {
+                    if positions[i] == positions[j] {
+                        panic!("get_disjoint_mut: overlapping keys");
+                    }
+                }
+            }
+        }
+        let entries = self.slots.entries;
+        positions.map(|p| {
+            p.map(|pos| {
+                // SAFETY: positions are pairwise distinct occupied slots, so
+                // the returned &mut V never alias; lifetimes are tied to the
+                // &mut self borrow.
+                unsafe { &mut (*(*entries.add(pos)).as_mut_ptr()).value }
+            })
+        })
+    }
+
     /// Gets the entry for `key` for in-place manipulation.
     ///
     /// ```
@@ -3432,6 +3492,25 @@ mod tests {
         let mut expect: alloc::vec::Vec<u64> = (0..100).collect();
         expect.reverse();
         assert_eq!(rev, expect);
+    }
+
+    #[test]
+    fn get_disjoint_mut_basic() {
+        let mut m: PoMap<u64, u64> = (0..10u64).map(|k| (k, k)).collect();
+        let [a, b, c] = m.get_disjoint_mut([&1, &5, &99]);
+        assert_eq!(a.as_deref().copied(), Some(1));
+        assert_eq!(c, None);
+        *a.unwrap() = 100;
+        *b.unwrap() = 500;
+        assert_eq!(m[&1], 100);
+        assert_eq!(m[&5], 500);
+    }
+
+    #[test]
+    #[should_panic(expected = "overlapping keys")]
+    fn get_disjoint_mut_overlap_panics() {
+        let mut m: PoMap<u64, u64> = (0..10u64).map(|k| (k, k)).collect();
+        let _ = m.get_disjoint_mut([&3, &3]);
     }
 
     /// Ord over maps is a lawful total order on content-distinct maps.
