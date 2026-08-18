@@ -43,6 +43,15 @@ monotone in the hash, so **global hash order is invariant under power-of-two
 growth**. One invariant, three payoffs: (a) deterministic iteration, (b)
 early-terminating probes, (c) a comparison-free single-pass streaming resize.
 
+**The determinism contract** (the user-facing form of (a), both halves
+tripwire-tested): **(1) key ordering is deterministic regardless of insertion
+order — always; (2) after `compact()`, content-equal maps have identical
+bytes.** Tier 1 costs nothing (hash order; full-hash-collision ties
+key-canonicalized); tier 2 is a checkpoint operation (§10, prior-art #5's
+two-tier model). Consequences: lawful map-level `Eq`/`Ord`/`Hash`, memcmp
+equality and canonical commitments after compaction, bytewise-converging
+replicas.
+
 **Contributions.** We claim three:
 
 - **(C1) The prefix-ordered hash map (systems synthesis).** A flat open-addressing

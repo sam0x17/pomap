@@ -4,6 +4,10 @@ A **prefix-ordered hash map** for Rust: a flat open-addressing table kept
 globally sorted by hash, with each entry's home slot derived from its hash
 *prefix* (top bits). `no_std` + `alloc` compatible.
 
+**The determinism contract:** (1) iteration order is deterministic regardless
+of insertion order, always; (2) after `compact()`, content-equal maps have
+identical bytes. No unordered hash map offers either.
+
 One invariant — *global hash order survives growth* (the prefix map is monotone
 in the hash) — pays repeatedly:
 
