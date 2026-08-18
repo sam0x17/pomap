@@ -24,37 +24,72 @@ prefix. This yields two properties a conventional open-addressing table
 The cost is an **order-maintenance tax on writes** (runs shift to stay sorted)
 and a larger per-slot footprint (the inline hash).
 
+**Origin and motivation.** The structure was originally developed as the layout
+engine for an RCU-style concurrent hash table (the `seqmap` project, mid-2025,
+sibling repo): copy-then-publish resizing is only practical when rebuilding the
+table is cheap, and that requirement forces a layout whose sort order survives
+growth. The first attempt used *split-ordered* (bit-reversed-hash) addressing per
+Shalev & Shavit (§10) — per-bucket stability under growth, but scattered adjacency
+(no locality, no meaningful iteration order) and per-cell boxing overhead.
+Inverting the invariant to hash-*prefix* (MSB) addressing produced global order,
+cache locality, and a streaming resize — and then kept paying: deterministic
+iteration, early-terminating probes, and the measured write behavior of §5.3 all
+fall out of the same choice. The concurrent map is future work; this paper
+presents and measures the sequential structure.
+
+**The unifying invariant.** Place each entry by its hash *prefix* (top `m` bits →
+ideal slot) and keep the array globally sorted by full hash. The prefix map is
+monotone in the hash, so **global hash order is invariant under power-of-two
+growth**. One invariant, three payoffs: (a) deterministic iteration, (b)
+early-terminating probes, (c) a comparison-free single-pass streaming resize.
+
 **Contributions.** We claim three:
 
-- **(C1) The prefix-ordered hash map.** A flat open-addressing table kept
-  *globally sorted by hash value*, with each entry's home position given by its
-  hash *prefix* (top bits → ideal slot) so that array order *is* hash order,
-  displacing to the nearest vacancy to maintain the sort. **The ordering criterion
-  is the hash, not the key** — a key comparison is *never* on the layout path
-  (verified: the implementation uses only `u64` hash comparisons for navigation
-  and `==` for the final match; it contains no `Ord`/`cmp`/`<` on keys, and the
-  `Key: Ord` bound is in fact vestigial — functionally only `Hash + Eq + Clone`
-  is needed). This is the categorical distinction from prior structured open
-  addressing (§10): classical *ordered hashing* orders by **key comparison**, and
-  Robin Hood orders by **probe distance**; PoMap orders by **hash**. It yields
-  (a) deterministic global iteration in hash order, (b) early-terminating probes
-  (stop at the first stored hash past the target — the sort order doubles as the
-  negative-lookup cutoff and the empty sentinel), via a single in-line `u64`
-  compare rather than a key `cmp`, and (c) an AoS inline-hash layout that makes a
-  probe one cache line. We are not aware of this hash-prefix-ordered flat
-  open-addressing design in prior work (search not yet complete — §10).
-- **(C2) Sequential-vs-scatter write behavior (empirical).** PoMap's writes are
-  sequential/streaming; SwissTable's are scatter (rehash). On *cold/large* working
-  sets PoMap's writes **tie on high-per-core-bandwidth Apple parts and win on
-  low-per-core-bandwidth AMD EPYC** (bare-metal *and* virtualized) — its sequential
-  pattern uses scarce bandwidth efficiently where scatter wastes it.
-  **Virtualization extends the win to medium sizes** (nested page walks punish
-  scatter). It is NOT a clean "server inversion," NOT bandwidth-*favorability*
-  (Apple has the most bandwidth and least write advantage), and NOT a pure
-  virtualization artifact (§5.3). On warm/medium sizes PoMap loses writes everywhere.
-- **(C3) A mapped design space.** A set of measured negative results (§6) that
-  justify the specific design choices (AoS over SoA tags, backshift over
-  tombstones, memset-then-write over single-pass rebuild).
+- **(C1) The prefix-ordered hash map (systems synthesis).** A flat open-addressing
+  table kept *globally sorted by hash value*, with each entry's home position given
+  by its hash *prefix* so that array order *is* hash order, displacing to the
+  nearest vacancy to maintain the sort. Keeping a linear-probing table in hash
+  order is established — it is *ordered linear probing*, from Amble & Knuth (1974)
+  through graveyard hashing (FOCS 2021) and the ordered/unordered tight analyses
+  (FOCS 2024) (§10) — so the base structure is **not claimed as new**. The claimed
+  synthesis is what the flat realization yields and the literature never surfaces:
+  (a) **hash-prefix home slots make home-bucket order equal *global* hash order**,
+  turning the whole array into overlapping, order-fused regions (every slot heads
+  its own region; boundaries are *data-defined* by the sort, not geometric — no
+  fixed buckets exist) and giving **deterministic whole-map iteration** as an API
+  property; (b) **the ordering criterion is the hash, not the key** — a key
+  comparison is never on the layout path (verified: only `u64` compares navigate;
+  `==` does the final match; the `Key: Ord` bound is vestigial — functionally only
+  `Hash + Eq + Clone` is needed), distinguishing it from classical ordered hashing
+  (key comparison) and Robin Hood (probe distance); (c) an **AoS inline-full-hash
+  layout** that makes a probe one cache line, with `u64::MAX` doubling as empty
+  sentinel and scan terminator.
+- **(C2) Comparison-free streaming resize, and its measured consequences.**
+  Because sort order survives growth, resize is **one sequential read pass with a
+  monotone write cursor** — no re-hashing, no re-sorting, no scatter — plus
+  **cursor-spacing gap injection** during the pass (re-seed inter-run gaps on grow
+  so post-grow inserts land at open ideal slots; a PMA-flavored redistribution with
+  no hash-table precedent we know of). The order-survives-growth invariant itself
+  has chained-table precedents built for concurrent resizing (split-ordered lists;
+  relativistic/RCU hash tables — §10); the flat open-addressing realization as a
+  memcpy-class streaming rehash appears to be new. Its measured consequence is the
+  sequential-vs-scatter write behavior: on *cold/large* working sets PoMap's writes
+  **tie on high-per-core-bandwidth Apple parts and win on low-per-core-bandwidth
+  AMD EPYC** (bare-metal *and* virtualized), with **virtualization extending the
+  win to medium sizes** (nested page walks punish scatter). It is NOT a clean
+  "server inversion," NOT bandwidth-*favorability* (Apple has the most bandwidth
+  and least write advantage), and NOT a pure virtualization artifact (§5.3). On
+  warm/medium sizes PoMap loses writes everywhere.
+- **(C3) A measured design space (Pareto frontier + negative results).** Seven
+  engines from the same family benchmarked under one harness (§6): the AoS engine
+  is read-optimal; a SIMD-tag SoA variant is *build-optimal* (beats hashbrown
+  building from empty); a tag-only variant is *memory-optimal* (≈ hashbrown
+  bytes/slot); a bounded-window variant offers worst-case-bounded probes via
+  order-preserving cascade displacement (plausibly novel — no ordered Hopscotch
+  in the literature we searched, §10); and a tombstone A/B cleanly measures the
+  remove-vs-insert trade the graveyard-hashing line studies. Plus the negative
+  results that justify the canonical design choices (AoS over SoA tags, backshift
+  over tombstones at this load factor, memset-then-write over single-pass rebuild).
 
 **Central empirical claim.** PoMap is a *deterministic* hash map whose point-read
 and update performance **matches or beats** SwissTable-class tables (hashbrown)
@@ -101,6 +136,14 @@ measured fact; §5.6 specifies the cold benchmark that would establish it direct
   single `memmove`.
 - **Remove.** Backshift: pull the trailing displaced run (entries whose ideal
   slot is left of their position) left by one; no tombstones.
+- **Resize (the C2 mechanism).** Because the prefix map is monotone in the hash,
+  the old array's order is already the new array's order: resize is a **single
+  sequential read pass with a monotone write cursor**
+  (`cursor = max(cursor, new_ideal_slot); cursor += 1`) — comparison-free, no
+  re-hashing (the hash is inline), no scatter. The target is initialized with one
+  streaming `memset(0xFF)` and only occupied slots are written in the pass
+  (memset-then-write measurably beats write-each-slot-once — §6). Every design in
+  the family, from the first prototype onward, shares this resize.
 - **Growth.** Grow at **62.5% load** (a low load factor keeps runs — hence shift
   and backshift chains — short; it is *usually free* in memory because
   `ideal_range` is a power of two). The growth multiplier is a compile-time
@@ -374,15 +417,21 @@ The table reflects `with_hasher` (build-from-empty, the *pessimistic* footprint)
 design's real cost — the inline 8-byte hash plus the low load factor that buys the
 read/write wins.
 
-**Growth-factor recommendation: GROWTH=2 as the memory-sane default.** GROWTH
-affects *only* `insert_allocate` (build-from-empty) and this footprint — every
-other operation provisions via `with_capacity` and is growth-independent. The
-dial: G4 → insert_allocate ~1.1× hb but ~2.75× memory; G2 → insert_allocate 1.50×
-but ~2.0× memory. Since the *only* cost of G2 is build-from-empty insert speed —
-which a caller sidesteps entirely with `with_capacity` (growth-independent, already
-~1.8× either way) — **G2 buys back the single biggest knock against the design
-(~2.75×→2.0× memory) for a cost most callers can avoid.** Use G4 only when
-build-heavy and memory-rich.
+**Growth factor: a two-point dial, GROWTH=4 as the performance-canonical
+configuration.** GROWTH affects *only* `insert_allocate` (build-from-empty) and
+this footprint — every other operation provisions via `with_capacity` and is
+growth-independent. The dial: **G4 → insert_allocate ~1.1× hb (parity-class) at
+~2.75× average memory; G2 → 1.5–1.9× hb at ~2.0× memory.** G4 is what makes the
+build-from-empty column competitive — with it, the map is at-or-near hashbrown on
+every workload class except the two §5.4 residuals — and it has been dramatically
+faster than G2 across every design generation (halving repack volume: total moved
+entries over n inserts is n·G/(G−1): 2n at G2 vs 1.33n at G4). It is the default
+and the configuration the headline tables report. **G2 is the memory-lean
+alternative**: its only cost is build-from-empty speed, which a caller sidesteps
+entirely with `with_capacity` (growth-independent, ~1.8× either way), and it cuts
+the design's biggest cost from ~2.75× to ~2.0× hashbrown's bytes. The paper should
+present both points and let the deployment pick; the const-generic makes the choice
+compile-time free.
 
 *(Fixed: the report previously printed `capacity()` (the logical threshold)
 rather than measured bytes; the numbers above are the corrected, allocator-measured
@@ -449,11 +498,17 @@ visibly noisy).
 universal; the **write outcome splits by vendor along the single-thread-bandwidth
 axis** (§5.3), and the bare-metal AMD is what settles the mechanism:
 
-- **get_hit:** all four win cold. Crossover moves *earlier* on the AMD parts: for
-  values ≥16 B the EPYCs win get_hit at essentially every size including
-  warm/cache-resident, whereas on Apple hashbrown wins warm and PoMap takes over
-  past the LLC. At 8 B all show the warm→cold crossover (hashbrown's SIMD edge
-  survives for the tiniest entry).
+- **get_hit:** all four win cold **at small values (8–16 B)**. The crossover moves
+  earliest on the **Zen 5c VM** (values ≥16 B win at essentially every size,
+  including warm), whereas on Apple hashbrown wins warm and PoMap takes over past
+  the LLC. **The bare-metal EPYC 9354P sits between** *(corrected 2026-08-17
+  against the raw CSV)*: it wins cold at 8–16 B (0.79–0.95×) but its warm 16 B
+  cells *lose* (1.20–1.26×), and the value-size erosion carries its cold get_hit
+  past parity at larger values (32 B/48 MiB 1.10×, 64 B/128 MiB 1.11×). So the
+  headline must be qualified: **small-value cold reads win universally;
+  large-value cold reads erode to parity-or-slight-loss on bare-metal Zen 4.**
+  At 8 B all four show the warm→cold crossover (hashbrown's SIMD edge survives
+  for the tiniest entry).
 - **Cold/large writes split by vendor (128 MiB WS, pm/hb):**
 
   | op | M5 | M3 | EPYC 9354P (bare) | EPYC 9845 (VM) |
@@ -529,7 +584,62 @@ the small, TLB-friendly control array.)
 (Tooling note: an `ops=` parse bug blanked the first CSVs; data above came from the
 captured perf stderr. Fixed — re-runs now populate `perf-<cpu>_<Nc>.csv` directly.)
 
-## 6. Negative results (worth a paper subsection)
+## 6. The design space: a measured Pareto frontier, plus negative results
+
+### 6.1 Family benchmark (all seven engines, one harness)
+
+Benchmark methodology changed substantially across design generations (§4.4), so
+per-branch suite results are not comparable. To rank the family soundly, every
+surviving engine was vendored into a single crate and benchmarked under the
+*current* harness — same seeds, sizes, drop-fix timing, and in-run
+hashbrown/std anchors — gated by a correctness cross-check of each engine against
+hashbrown (`family_bench.rs`; first run 2026-08-17, M5 Max,
+`bench-family-Apple_M5_Max_2026-08-17.txt`). Engines: **pomap** (current AoS,
+G4), **pomap3** (pre-consolidation AoS, 75% load, no zero-grow contract),
+**oldsimd** (tag-only SoA: 1-byte tags + (K,V), *no stored hash*, order on prefix
+bits only, SIMD scan), **main_soa** (SoA + bounded windows + cascade
+displacement), **tags_soa** (main_soa + displacement-nibble/fingerprint tag byte,
+u8x16 scan), **tags2_soa** (tags_soa + tombstones). Ratios ×hashbrown, in-run:
+
+| group | pomap | pomap3 | oldsimd | main_soa | tags_soa | tags2_soa |
+|---|---|---|---|---|---|---|
+| get_hits | **0.68** | 0.71 | 0.83 | 0.88 | 0.98 | 0.81 |
+| get_misses | **0.84** | 0.87 | 1.08 | 1.11 | 0.91 | 0.87 |
+| update_existing | 0.65 | 0.63 | 1.08 | 0.70 | 0.79 | 0.90 |
+| get_hotset | **0.77** | 0.79 | 0.90 | 0.88 | 0.98 | 0.89 |
+| insert_allocate | 1.28 (G2: 1.94) | 1.89 | 1.76 | 1.39 | **0.89** | 1.58 |
+| insert_preallocated | **1.77** | 4.02 | 3.10 | 3.47 | 3.13 | 3.07 |
+| remove_hits | 1.79 | 2.51 | 7.44 | 1.44 | 1.59 | **1.13** |
+| remove_misses | 0.94 | 0.94 | 1.22 | 0.88 | 0.95 | **0.77** |
+| shrink_to | 1.21 | 1.23 | **1.13** | 1.25 | 1.36 | 1.23 |
+
+Memory (bytes/entry, build-from-empty, tracking allocator; hashbrown 22–36):
+pomap G4 40–104, G2 40–63, pomap3 40–63, **oldsimd 28–45 (≈ hashbrown)**,
+main_soa 49–126 (worst), tags 28–89.
+
+**Reading of the frontier.** The current engine wins or ties 6 of 9 groups
+in-family — all reads/updates, provisioned inserts by 1.7–2.3×, misses — and
+nothing dominates it; it is the read-optimal point and the canonical engine. But
+three other Pareto points exist: **tags_soa is build-optimal** (the only
+hash-ordered design that beats hashbrown building from empty, 0.89×, at the cost
+of the entire read advantage); **oldsimd is memory-optimal** (hashbrown-class
+bytes/slot while keeping prefix order — at the cost of reads and a catastrophic
+7.4× remove); **main_soa is the bounded-guarantee point** (worst-case
+O(max_scan) probes via order-preserving cascade — decent all-round, worst
+memory, wins nothing). Caveats: single platform (M5), background load present,
+Mac remove anchor soft (std measured 0.64× hashbrown in-run) — the in-run family
+*ordering* is the robust product; AMD re-runs owed (§7).
+
+**The tombstone A/B (ties to graveyard hashing, §10).** tags2_soa differs from
+tags_soa by adding tombstone deletion: removes improve 1.59 → **1.13** (and
+remove_misses 0.95 → 0.77) while build-from-empty regresses 0.89 → 1.58. This is
+the remove-vs-insert trade the graveyard-hashing line studies, measured cleanly
+in this family. The canonical engine instead buys short runs with a low load
+factor (62.5%) and backshift — at that load, tombstones were a net loss when
+tried (below); at tags_soa's higher effective load, they pay on removes. Both
+observations are consistent with the theory: tombstone benefit grows with load.
+
+### 6.2 Negative results
 
 These are design alternatives we implemented and measured to lose; reporting them
 strengthens the "why this design" argument.
@@ -592,6 +702,19 @@ result.)
   read win is largest where access is cold (§5.2, mechanism in §1); the current
   harness re-probes keys, warming them, so it *under*-measures it. A dedicated
   cold-lookup benchmark is needed — see §5.6.
+- **Family benchmark is single-platform.** §6.1's cross-design table is one M5 run
+  (background load present; Mac remove anchor soft). The in-run ordering is
+  robust; magnitudes need an AMD re-run (`family_bench.rs` is portable — run via
+  the same collection scripts).
+- **Main-suite thermal state needs an explicit answer (audit in progress,
+  2026-08-18).** The get-class benchmarks seed their per-size RNG identically on
+  every criterion iteration, so each iteration touches the same ~100 keys per map
+  (~a few hundred KB across the sweep) — after warm-up those lines may be
+  cache-resident, making the main-suite read numbers *warm-regime*. That would
+  not invalidate them (both maps warm equally) but would change their *label*:
+  the §5.1 read wins would be "warm sweep" numbers, to be reconciled with the
+  per-size cold matrix (§5.6) where warm/cache-resident reads favor hashbrown at
+  small sizes. An A/B (fixed seeds vs iteration-varying seeds) settles it.
 
 ## 8. Reproducibility
 
@@ -658,6 +781,13 @@ growth-independent (provisioned builds).
 4. The design is at/near its optimum on the architectures tested — the optimizer
    found no validated gain on the latest — so the contribution is the structure
    (C1) and the measured read/write behavior, not further micro-optimization.
+5. **The resize is a first-class result, not an implementation detail**: the
+   growth-invariance of hash-prefix order makes rehash a comparison-free
+   streaming pass (§2, C2) — the flat-open-addressing realization of an invariant
+   previously used only in concurrent chained tables (split-ordered lists,
+   relativistic hash tables, §10) — and the family benchmark (§6.1) shows every
+   engine in the lineage shares it while the *layouts* trade reads, builds,
+   memory, and probe bounds against each other along a measured Pareto frontier.
 
 ## 10. Related work and positioning
 
@@ -700,30 +830,80 @@ users, since `Ord` on the key does not imply iteration order), is hash-based and
 "deterministic iteration + class-leading point reads" where BTreeMap's key-order
 and log-factor, or IndexMap's extra indirection, are not wanted.
 
-**Closest prior art: ordered hashing (the reference to anchor against).** Amble &
-Knuth, "Ordered hash tables" (*The Computer Journal* 17(2), 1974 *(verify
-page/issue)*) is the key precedent: they keep entries within a probe sequence in
-order of a key/signature so that an *unsuccessful* search terminates early — which
-is exactly PoMap's `stored > hash` cutoff. **This must be cited and is the obvious
-"isn't this just…" challenge.** PoMap's delta over classical ordered hashing:
+**Closest prior art #1: ordered hashing and ordered linear probing (the base
+structure — must anchor against).** Amble & Knuth, "Ordered hash tables" (*The
+Computer Journal* 17(2), 1974 *(verify page/issue)*) keep entries within a probe
+sequence in order of a key/signature so an *unsuccessful* search terminates early
+— exactly PoMap's `stored > hash` cutoff. Critically, the modern theory
+literature treats the hash-ordered linear-probing table as a **standard known
+structure** under the name *ordered linear probing*: graveyard hashing (Bender,
+Kuszmaul & Kuszmaul, "Linear Probing Revisited: Tombstones Mark the Death of
+Primary Clustering," FOCS 2021, arXiv:2107.01250) performs its operations
+"exactly as in standard ordered linear probing" and adds strategic tombstones;
+Braverman & Kuszmaul give tight analyses of ordered vs unordered linear probing
+(FOCS 2024, arXiv:2501.11582); Zombie hashing (SIGMOD/PACMMOD 2025) is a
+practical follow-on with experiments. **Therefore C1 does not claim the base
+structure.** PoMap's deltas over this line: (1) *prefix* home-slot addressing
+makes home-bucket order equal **global** hash order → **deterministic whole-map
+iteration**, a property the OLP literature never surfaces or exploits; (2) the
+modern **flat AoS inline-full-hash layout** and its measured cache behavior
+(that literature predates or ignores SwissTable-class baselines; no head-to-head
+of an engineered OLP table vs production SIMD tables exists that we know of);
+(3) the **streaming-resize consequence** (C2). The tombstone tension is engaged
+directly by our family A/B (§6.1): tombstone benefit grows with load factor,
+and the canonical engine's low-load + backshift choice is measured, not assumed.
+Also check: Cleary, "Compact Hash Tables Using Bidirectional Linear Probing"
+(*IEEE Trans. Computers*, 1984 *(verify)*) — also maintains hash order.
 
-1. **Global** order, not per-probe-sequence order: the position is the hash
-   *prefix* (an MSD-radix bucket), so the *entire array* is one hash-sorted
-   sequence. That is what gives **deterministic global iteration order** — a
-   property ordered hashing does not provide and that is a primary reason to use
-   PoMap.
-2. A modern **flat AoS inline-hash layout** and the analysis of its cache/bandwidth
-   behavior on contemporary hardware (the 1974 work predates the memory wall and
-   SIMD tables entirely).
-3. The empirical **read win across all hardware + the cold/large-write crossover
-   that favors low-per-core-bandwidth machines** (C2).
+**Closest prior art #2: growth-invariant hash ordering (the C2 resize
+mechanism).** Two lines use "order by a hash-derived key so growth preserves
+structure," both for *concurrent chained* tables: **split-ordered lists** (Shalev
+& Shavit, "Split-ordered lists: lock-free extensible hash tables," *J. ACM* 2006
+*(verify)*) keep all items in one list sorted by **bit-reversed** hash so
+doubling the bucket array moves nothing (buckets are lazy pointers into the
+list); **relativistic / RCU-resizable hash tables** (Triplett, McKenney & Walpole,
+USENIX ATC 2011 *(verify)*, and related patents) keep chains sorted by hash and
+choose high-order-bit ("prefix") hashing precisely so chain order survives
+doubling, enabling single-pass cross-linking resize concurrent with readers.
+PoMap is the **flat open-addressing realization of the same invariant** — MSB
+prefix instead of bit reversal, an array instead of chains — which converts the
+invariant's payoff from "items never move / readers survive resize" into a
+**comparison-free, memcpy-class streaming rehash** with the measured
+sequential-vs-scatter write behavior of §5.3, plus deterministic iteration and
+cache locality (which bit-reversal scatters away). Provenance note: this project
+*began* at the split-ordered end (a 2025 concurrent-map prototype using
+bit-reversed addressing and per-cell seqlocks) and inverted to prefix order after
+hitting exactly those limitations — locality and iteration order. The
+**cursor-spacing gap injection** during the resize pass is PMA-flavored (packed
+memory arrays redistribute gaps in sorted arrays — Itai, Konheim & Rodeh 1981;
+Bender et al. adaptive PMA *(verify)*), but PMAs are comparison-sorted,
+search-indexed structures; we know of no hash table that deliberately re-seeds
+displacement gaps at resize.
 
-So the novelty position is: **(C1) the prefix-ordered structure is claimed as a
-novel synthesis** — global hash-order via prefix addressing + AoS inline hash +
-deterministic iteration — extending the ordered-hashing lineage, **and (C2) the
-measured read/write behavior** is the empirical contribution. **[TODO]** complete the
-literature search before asserting C1 as *new* rather than *underexplored*:
-beyond Amble–Knuth, check its descendants, "self-organizing"/"last-come-first-
-served" hashing, Robin Hood variants that maintain order, MSD-radix / histogram
-bucketing of hashes, and any "hash-ordered" or "sorted flat" map in the systems
-literature. Treat C1 as *defensible-pending-search*, not yet *established*.
+**Closest prior art #3: overlapping neighborhoods and bounded probes (the §6
+window/cascade variant).** Hopscotch hashing (Herlihy, Shavit & Tzafrir, 2008
+*(verify)*) is the established overlapping-neighborhood scheme: every home
+bucket owns H consecutive slots, neighborhoods overlap, and displacement hops
+items into holes — **destroying order** (bitmap bookkeeping tracks membership).
+Bounded-probe-then-grow is also known practice (Skarupke's `flat_hash_map`
+bounds Robin Hood probes at log₂(n) and grows on violation — blog, 2017
+*(verify)*). The family's `main_soa` variant combines both with **order
+preservation**: cascade displacement shifts a *contiguous sorted run* right by
+one, each shifted entry remaining inside its own window, extent capped — giving
+worst-case-bounded probes in a hash-ordered table. We found no ordered Hopscotch
+variant in the literature *(searched 2026-08; keep looking)*. Note the current
+canonical engine is the **unbounded limit** of the same overlapping-region
+structure (region boundaries are data-defined by the sort itself); fixed disjoint
+buckets appear nowhere in the mature family.
+
+**Novelty position (summary).** The base structure is *ordered linear probing*
+(established); the claims are: **C1** the prefix-addressed flat synthesis —
+global order, deterministic iteration, one-cache-line AoS probes, hash-not-key
+ordering; **C2** the growth-invariant streaming resize in flat open addressing
+(chained precedents cited above) with its measured cross-platform write behavior;
+**C3** the measured family Pareto frontier including the order-preserving
+bounded-window mechanism and the tombstone A/B that connects the engineering to
+the FOCS'21/'24 theory line. Remaining search obligations: Cleary 1984,
+Amble–Knuth descendants, self-organizing/LCFS hashing, any prior
+"deterministic-iteration hash map" claim, MSD-radix/histogram hash bucketing,
+and ordered-Hopscotch variants.
