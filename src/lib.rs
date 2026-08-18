@@ -32,6 +32,8 @@
 //! - **Deterministic endpoints**: [`PoMap::first_key_value`] /
 //!   [`PoMap::pop_first`] give a reproducible "arbitrary element" and drain
 //!   order.
+//! - **Canonical wire format** (`serde` feature): serialization emits entries
+//!   in canonical order, so equal maps produce identical bytes.
 //! - **Streaming set algebra**: [`PoMap::union`], [`PoMap::intersection`],
 //!   [`PoMap::difference`], [`PoMap::symmetric_difference`] (and the
 //!   `| & - ^` operators, plus [`PoMap::append`]) run in O(n + m) as sorted

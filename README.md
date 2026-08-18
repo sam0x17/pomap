@@ -74,9 +74,11 @@ type Fast = pomap::PoMap<u64, u64, BuildHasherDefault<ahash::AHasher>, 8>; // fa
 type Lean = pomap::PoMap<u64, u64, BuildHasherDefault<ahash::AHasher>, 2>; // leanest memory
 ```
 
-Feature flags: `std` (default; disable for `no_std` + `alloc`), `tui` (the
-`bench_graph` explorer), `bench-string` (String-payload benchmarks),
-`growth2` (bench the GROWTH=2 configuration).
+Feature flags: `std` (default; disable for `no_std` + `alloc`), `serde`
+(Serialize/Deserialize — equal maps serialize to identical bytes, the
+determinism contract on the wire), `tui` (the `bench_graph` explorer),
+`bench-string` (String-payload benchmarks), `growth2` (bench the GROWTH=2
+configuration).
 
 ## Benchmarks
 

@@ -1997,6 +1997,35 @@ impl<K: Key, V: Value, H: BuildHasher + Clone, const GROWTH: usize> Clone
             hash_builder: self.hash_builder.clone(),
         }
     }
+
+    /// Reuses the existing allocation when the geometries match (total slot
+    /// count determines `ideal_range` bijectively), avoiding a
+    /// dealloc/alloc/memset cycle for repeated clone-into patterns.
+    fn clone_from(&mut self, source: &Self) {
+        if self.slots.total_slots != source.slots.total_slots {
+            *self = source.clone();
+            return;
+        }
+        // Drop our entries and re-vacate every slot, then mirror the source
+        // slot-for-slot (identical layout ⟹ the result is bit-equivalent to
+        // `source.clone()`).
+        self.clear();
+        for i in 0..source.slots.total_slots {
+            if source.slots.hash_at(i) != EMPTY_HASH {
+                unsafe {
+                    let e = &*(*source.slots.entries.add(i)).as_ptr();
+                    *self.slots.entries.add(i) = MaybeUninit::new(SlotEntry {
+                        hash: e.hash,
+                        key: e.key.clone(),
+                        value: e.value.clone(),
+                    });
+                }
+            }
+        }
+        self.len = source.len;
+        self.grow_threshold = source.grow_threshold;
+        self.hash_builder = source.hash_builder.clone();
+    }
 }
 
 impl<K: Key + fmt::Debug, V: Value + fmt::Debug, H: BuildHasher, const GROWTH: usize> fmt::Debug
@@ -2183,6 +2212,78 @@ impl<'a, K: Key + 'a, V: Value + 'a, H: BuildHasher + Default, const GROWTH: usi
         let mut map = PoMap::with_capacity_and_hasher(lower, H::default());
         map.extend(iter);
         map
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Serde (optional)
+// ---------------------------------------------------------------------------
+
+#[cfg(feature = "serde")]
+mod serde_impls {
+    use super::*;
+    use serde::de::{MapAccess, Visitor};
+    use serde::ser::SerializeMap;
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    /// Serializes entries in canonical (hash, key) iteration order — equal
+    /// maps produce **identical serialized output**, regardless of the
+    /// construction history (the determinism contract applied to the wire).
+    impl<K, V, H, const GROWTH: usize> Serialize for PoMap<K, V, H, GROWTH>
+    where
+        K: Key + Serialize,
+        V: Value + Serialize,
+        H: BuildHasher,
+    {
+        fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+            let mut map = serializer.serialize_map(Some(self.len()))?;
+            for (k, v) in self.iter() {
+                map.serialize_entry(k, v)?;
+            }
+            map.end()
+        }
+    }
+
+    impl<'de, K, V, H, const GROWTH: usize> Deserialize<'de> for PoMap<K, V, H, GROWTH>
+    where
+        K: Key + Deserialize<'de>,
+        V: Value + Deserialize<'de>,
+        H: BuildHasher + Default,
+    {
+        fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+            struct PoMapVisitor<K, V, H, const GROWTH: usize>(
+                PhantomData<(K, V, H)>,
+            );
+
+            impl<'de, K, V, H, const GROWTH: usize> Visitor<'de> for PoMapVisitor<K, V, H, GROWTH>
+            where
+                K: Key + Deserialize<'de>,
+                V: Value + Deserialize<'de>,
+                H: BuildHasher + Default,
+            {
+                type Value = PoMap<K, V, H, GROWTH>;
+
+                fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                    f.write_str("a map")
+                }
+
+                fn visit_map<A: MapAccess<'de>>(
+                    self,
+                    mut access: A,
+                ) -> Result<Self::Value, A::Error> {
+                    let mut map = PoMap::with_capacity_and_hasher(
+                        access.size_hint().unwrap_or(0),
+                        H::default(),
+                    );
+                    while let Some((k, v)) = access.next_entry()? {
+                        map.insert(k, v);
+                    }
+                    Ok(map)
+                }
+            }
+
+            deserializer.deserialize_map(PoMapVisitor(PhantomData))
+        }
     }
 }
 
@@ -3144,6 +3245,50 @@ mod tests {
         assert!(e.is_empty());
         let r: PoMap<u64, u64> = m.iter().collect();
         assert_eq!(r, m);
+    }
+
+    /// Serde round-trip + canonical wire form (equal maps, different
+    /// histories, identical JSON).
+    #[cfg(feature = "serde")]
+    #[test]
+    fn serde_roundtrip_and_canonical_wire() {
+        let mut a: PoMap<u64, u64> = PoMap::new();
+        let mut b: PoMap<u64, u64> = PoMap::with_capacity(1024);
+        for k in 0..100u64 {
+            a.insert(k, k * 2);
+        }
+        for k in (0..100u64).rev() {
+            b.insert(k, k * 2);
+        }
+        let ja = serde_json::to_string(&a).unwrap();
+        let jb = serde_json::to_string(&b).unwrap();
+        assert_eq!(ja, jb, "equal maps must serialize identically");
+        let back: PoMap<u64, u64> = serde_json::from_str(&ja).unwrap();
+        assert_eq!(back, a);
+    }
+
+    #[test]
+    fn clone_from_reuses_allocation() {
+        let src: PoMap<u64, u64> = (0..200u64).map(|k| (k, k)).collect();
+        // Same geometry: allocation must be reused and contents mirrored.
+        let mut dst: PoMap<u64, u64> = (1000..1200u64).map(|k| (k, k)).collect();
+        assert_eq!(dst.slots.total_slots, src.slots.total_slots);
+        let ptr_before = dst.slots.ptr.as_ptr();
+        dst.clone_from(&src);
+        assert_eq!(dst.slots.ptr.as_ptr(), ptr_before, "allocation must be reused");
+        assert_eq!(dst, src);
+        // Slot-for-slot mirror = bitwise-equal tables for u64 payloads.
+        let ba = unsafe {
+            core::slice::from_raw_parts(dst.slots.ptr.as_ptr(), dst.slots.layout.size())
+        };
+        let bb = unsafe {
+            core::slice::from_raw_parts(src.slots.ptr.as_ptr(), src.slots.layout.size())
+        };
+        assert_eq!(ba, bb);
+        // Different geometry: falls back to a fresh clone.
+        let big: PoMap<u64, u64> = (0..50_000u64).map(|k| (k, k)).collect();
+        dst.clone_from(&big);
+        assert_eq!(dst, big);
     }
 
     /// Ord over maps is a lawful total order on content-distinct maps.
