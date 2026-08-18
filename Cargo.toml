@@ -11,7 +11,7 @@ missing_const_for_fn = "deny"
 missing_inline_in_public_items = "deny"
 
 [features]
-default = ["std", "tui"]
+default = ["std"]
 std = ["ahash/std", "ahash/runtime-rng"]
 resize-logging = []
 bench-string = []
@@ -61,6 +61,7 @@ harness = false
 [[bench]]
 name = "bench_graph"
 harness = false
+required-features = ["tui"]
 
 [[bench]]
 name = "audit_bench"

@@ -106,8 +106,12 @@ pub enum TryReserveError {
 }
 
 /// Marker trait for keys stored in a [`PoMap`].
-pub trait Key: Hash + Eq + Clone + Ord {}
-impl<K: Hash + Eq + Clone + Ord> Key for K {}
+///
+/// Note there is no `Ord` bound: the map is ordered by *hash*, never by key
+/// comparison — no ordering operation on `K` exists anywhere in the layout,
+/// probe, or resize paths (`==` is used only for the final match).
+pub trait Key: Hash + Eq + Clone {}
+impl<K: Hash + Eq + Clone> Key for K {}
 
 /// Marker trait for values stored in a [`PoMap`].
 pub trait Value: Clone {}

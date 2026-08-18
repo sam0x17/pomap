@@ -436,6 +436,52 @@ fn bench_shrink_to(c: &mut Criterion) {
     group.finish();
 }
 
+/// Whole-map iteration at 1M — A/Bs the masked iterator (cand) against the
+/// pre-optimization per-slot iterator (base) in-run, per architecture.
+fn bench_iterate_1m(c: &mut Criterion) {
+    const N: usize = 1_000_000;
+    let keys = random_items(0xFEED, N);
+    let values = random_items(0x1CEBEEF, N);
+    let mut group = c.comparison_benchmark_group("iterate_1m");
+
+    macro_rules! variant {
+        ($ty:ty, $label:expr) => {{
+            let mut m: $ty = <$ty>::with_capacity_and_hasher(N, BenchHasherBuilder::default());
+            for i in 0..N {
+                m.insert(keys[i], values[i]);
+            }
+            group.bench_function($label, |b| {
+                b.iter(|| {
+                    let mut acc = 0u64;
+                    for (k, v) in m.iter() {
+                        acc = acc.wrapping_add(*k).wrapping_add(*v);
+                    }
+                    black_box(acc)
+                });
+            });
+            drop(m);
+        }};
+    }
+    variant!(Cand, "cand");
+    variant!(Base, "base");
+    {
+        let mut m: Hb = Hb::with_capacity_and_hasher(N, BenchHasherBuilder::default());
+        for i in 0..N {
+            m.insert(keys[i], values[i]);
+        }
+        group.bench_function("hashbrown", |b| {
+            b.iter(|| {
+                let mut acc = 0u64;
+                for (k, v) in m.iter() {
+                    acc = acc.wrapping_add(*k).wrapping_add(*v);
+                }
+                black_box(acc)
+            });
+        });
+    }
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench_insert_allocate,
@@ -446,6 +492,7 @@ criterion_group!(
     bench_hot_gets,
     bench_remove_hits,
     bench_remove_misses,
-    bench_shrink_to
+    bench_shrink_to,
+    bench_iterate_1m
 );
 criterion_main!(benches);
