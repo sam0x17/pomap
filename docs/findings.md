@@ -1,6 +1,7 @@
 # PoMap: Performance Findings
 
 > **Status: working draft toward an academic paper (v0.1, internal).**
+> Raw data: `results/` (June canonical set under `results/archive-2026-06/`).
 > This document records measured results, their provenance, and the conclusions
 > we are confident in versus those that still need confirmation. It is organized
 > roughly in paper order so it can grow into a submission. Sections marked
@@ -591,7 +592,7 @@ competitive-to-better on cold writes; it **loses warm/cache-resident** access
 defensible headline is the *crossover and its mechanism*, not universal cold
 dominance.
 
-**Value-size axis (M3 matrix, `cold-m3max.csv`, `benches/cold.rs`).** The crossover
+**Value-size axis (M3 matrix, `results/archive-2026-06/cold-Apple_M3_Max_16c_128GB.csv`, `benches/cold.rs`).** The crossover
 holds at every value size, but the cold read win is **largest at small values and
 erodes as values grow** — cold (128 MiB WS) `get_hit` pomap/hb = 0.63 (8 B), 0.75
 (16 B), 0.71 (32 B), 0.85 (64 B). Mechanism (this *refutes* the naive "bigger
