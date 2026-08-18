@@ -1,0 +1,80 @@
+   Compiling pomap v0.1.0 (/Users/sam/workspace/pomap)
+    Finished `bench` profile [optimized] target(s) in 13.70s
+     Running benches/pomap_bench.rs (target/release/deps/pomap_bench-82fd4ae2d29fb621)
+Gnuplot not found, using plotters backend
+Benchmarking insert_allocate/pomap
+Benchmarking insert_allocate/pomap: Warming up for 3.0000 s
+Benchmarking insert_allocate/pomap: Collecting 100 samples in estimated 7.7989 s (200 iterations)
+Benchmarking insert_allocate/pomap: Analyzing
+insert_allocate/pomap   time:   [38.732 ms 38.949 ms 39.173 ms]
+                        change: [+40.542% +41.731% +42.917%] (p = 0.00 < 0.05)
+                        Performance has regressed.
+Found 1 outliers among 100 measurements (1.00%)
+  1 (1.00%) high mild
+Benchmarking insert_allocate/std_hashmap
+Benchmarking insert_allocate/std_hashmap: Warming up for 3.0000 s
+Benchmarking insert_allocate/std_hashmap: Collecting 100 samples in estimated 7.3152 s (300 iterations)
+Benchmarking insert_allocate/std_hashmap: Analyzing
+insert_allocate/std_hashmap
+                        time:   [24.194 ms 24.273 ms 24.365 ms]
+                        change: [−5.6680% −5.1847% −4.7032%] (p = 0.00 < 0.05)
+                        Performance has improved.
+Found 4 outliers among 100 measurements (4.00%)
+  1 (1.00%) high mild
+  3 (3.00%) high severe
+Benchmarking insert_allocate/hashbrown
+Benchmarking insert_allocate/hashbrown: Warming up for 3.0000 s
+Benchmarking insert_allocate/hashbrown: Collecting 100 samples in estimated 5.1823 s (200 iterations)
+Benchmarking insert_allocate/hashbrown: Analyzing
+insert_allocate/hashbrown
+                        time:   [25.839 ms 25.932 ms 26.029 ms]
+                        change: [−6.1599% −5.6785% −5.1768%] (p = 0.00 < 0.05)
+                        Performance has improved.
+Found 4 outliers among 100 measurements (4.00%)
+  3 (3.00%) high mild
+  1 (1.00%) high severe
+Comparison for group 'insert_allocate':
+  Higher is better; best performer is 1.00 (typical).
+      1st insert_allocate/std_hashmap: 1.000 (24.273 ms), change: [0.000, −5.1847%], rank: [6.8% faster than 2nd]
+      2nd insert_allocate/hashbrown:   0.936 (25.932 ms), change: [+0.005, −5.6785%], rank: [6.8% slower than 1st, 50.2% faster than 3rd]
+      3rd insert_allocate/pomap:       0.623 (38.949 ms), change: [-0.308, +41.731%], rank: [50.2% slower than 2nd]
+
+
+entries       pomap bytes       hb bytes    pm B/ent    hb B/ent     pm/hb
+--------------------------------------------------------------------------
+500                 27216          17416        54.4        34.8     1.56x
+5000               199968         139272        40.0        27.9     1.44x
+50000             3150048        1114120        63.0        22.3     2.83x
+500000           25170864       17825800        50.3        35.7     1.41x
+5000000         201332352      142606344        40.3        28.5     1.41x
+Benchmarking memory_footprint_bytes/report
+Benchmarking memory_footprint_bytes/report: Warming up for 3.0000 s
+Benchmarking memory_footprint_bytes/report: Collecting 100 samples in estimated 5.0000 s (21B iterations)
+Benchmarking memory_footprint_bytes/report: Analyzing
+memory_footprint_bytes/report
+                        time:   [232.51 ps 233.20 ps 233.94 ps]
+                        change: [−0.3083% −0.0769% +0.1398%] (p = 0.53 > 0.05)
+                        No change in performance detected.
+Found 20 outliers among 100 measurements (20.00%)
+  9 (9.00%) low severe
+  6 (6.00%) high mild
+  5 (5.00%) high severe
+
+
+working set             per array     triad GB/s
+--------------------------------------------------
+24 KiB (L1)                  8 KiB         220.8
+192 KiB (L2)                64 KiB         272.8
+1.5 MiB (L2/L3)            512 KiB         136.4
+12 MiB (L3)               4096 KiB         121.4
+96 MiB (L3/DRAM)         32768 KiB         123.3
+384 MiB (DRAM)          131072 KiB         122.3
+
+working set                  size     latency ns
+------------------------------------------------
+16 KiB (L1)                 16 KiB          0.94
+128 KiB (L2)               128 KiB          0.95
+1 MiB (L2/L3)             1024 KiB          2.93
+8 MiB (L3)                8192 KiB         11.14
+64 MiB (L3/DRAM)         65536 KiB         78.99
+128 MiB (DRAM)          131072 KiB         96.77

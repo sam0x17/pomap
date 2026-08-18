@@ -805,6 +805,14 @@ result.)
   (background load present; Mac remove anchor soft). The in-run ordering is
   robust; magnitudes need an AMD re-run (`family_bench.rs` is portable — run via
   the same collection scripts).
+- **Open anomaly: `insert_preallocated` anchor instability on M5 (2026-08-18).**
+  The canonical suite now reads 3.4-3.6x for insert_preallocated on this machine
+  (two independent runs) vs June's committed 1.77x — while the SAME workload in
+  `loop_bench` reads 1.8-1.9x in-run all night. The pomap absolute is stable; the
+  discrepancy is in the anchor/harness interaction (suspects: background load,
+  allocator state, bench ordering). Until re-run on an idle box, quote the
+  loop_bench in-run value (~1.8x) and June's cross-machine table; treat fresh
+  pomap_bench insert_preallocated cells on M5 as suspect.
 - **Instruction-layout effects rival small optimizations (2026-08-18 optimizer
   loop).** A same-run A/B harness (`loop_bench`: candidate vs frozen-snapshot
   engine) with a measured identical-code noise floor (±5% single-run, ±0.5%
