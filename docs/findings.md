@@ -1008,7 +1008,16 @@ growth-independent (provisioned builds).
    workload class is expensive-to-hash keys, which is the common case.
 6. **The growth dial reaches inversion**: G8 builds from empty at 0.877×
    hashbrown with ≈G4's average measured memory at the standard sizes (§5.5).
-7. **The resize is a first-class result, not an implementation detail**: the
+7. **The determinism contract pays as API, repeatedly**: lawful map-level
+   `Eq`/`Ord`/`Hash`; canonical serialization (equal maps ⇒ identical wire
+   bytes); O(n+m) streaming set algebra with born-canonical outputs (§5.9);
+   deterministic endpoints and drain order; canonical bytes on demand via
+   `compact()`. Each is impossible or unlawful for an unordered table.
+8. **The unsafe core is Miri-verified and adversarially hardened** (§3.1):
+   zero findings over every raw-pointer path, with the trailing-vacant
+   invariant enforced rather than assumed — the audit's method lesson being
+   that caller-supplied hashers void probabilistic safety arguments.
+9. **The resize is a first-class result, not an implementation detail**: the
    growth-invariance of hash-prefix order makes rehash a comparison-free
    streaming pass (§2, C2) — the flat-open-addressing realization of an invariant
    previously used only in concurrent chained tables (split-ordered lists,
