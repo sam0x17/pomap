@@ -184,6 +184,14 @@ impl<K: Key, V: Value> Slots<K, V> {
         })
     }
 
+    /// Reads the raw hash word of slot `i`.
+    ///
+    /// SAFETY CONTRACT (the "trailing vacant" invariant): the final slot of
+    /// every table is permanently vacant — enforced by `insert_slow`'s two
+    /// landing guards and `repack_into`'s cursor bound — so every forward
+    /// probe scan terminates at or before it (`EMPTY_HASH` is `u64::MAX`, the
+    /// maximum, so both `stored > hash` and `== EMPTY` cutoffs fire there).
+    /// This is what lets the probe loops omit bounds checks entirely.
     #[inline(always)]
     fn hash_at(&self, i: usize) -> u64 {
         unsafe { *(self.entries.add(i) as *const u64) }
@@ -433,6 +441,12 @@ impl<K: Key, V: Value, H: BuildHasher, const GROWTH: usize> PoMap<K, V, H, GROWT
         loop {
             let stored = self.slots.hash_at(pos);
             if stored == EMPTY_HASH {
+                // Never occupy the final slot: probe loops rely on it staying
+                // vacant as their branch-free scan terminator.
+                if pos + 1 >= self.slots.total_slots {
+                    self.grow();
+                    return self.insert(key, value);
+                }
                 unsafe {
                     *entries.add(pos) = MaybeUninit::new(Entry { hash, key, value });
                 }
@@ -464,14 +478,18 @@ impl<K: Key, V: Value, H: BuildHasher, const GROWTH: usize> PoMap<K, V, H, GROWT
         }
 
         // (hash, key) belongs at `pos`: shift the run right into the nearest
-        // vacancy with a single memmove, then write at `pos`.
+        // vacancy with a single memmove, then write at `pos`. The final slot
+        // is reserved (never shifted into) so probes stay bounds-check-free.
         let mut empty_pos = pos + 1;
-        while self.slots.hash_at(empty_pos) != EMPTY_HASH {
-            empty_pos += 1;
-            if empty_pos >= self.slots.total_slots {
+        loop {
+            if empty_pos + 1 >= self.slots.total_slots {
                 self.grow();
                 return self.insert(key, value);
             }
+            if self.slots.hash_at(empty_pos) == EMPTY_HASH {
+                break;
+            }
+            empty_pos += 1;
         }
 
         let shift = empty_pos - pos;
@@ -733,11 +751,19 @@ impl<K: Key, V: Value, H: BuildHasher, const GROWTH: usize> PoMap<K, V, H, GROWT
         }
         let needed_ideal = try_ideal_range_for(needed)?;
         if needed_ideal > self.meta.ideal_range {
-            let new_total = needed_ideal
-                .checked_add(padding_for(needed_ideal))
-                .ok_or(TryReserveError::CapacityOverflow)?;
-            let new_slots = Slots::try_new(new_total)?;
-            self.repack_into(needed_ideal, new_slots, false);
+            let mut target = needed_ideal;
+            loop {
+                let new_total = target
+                    .checked_add(padding_for(target))
+                    .ok_or(TryReserveError::CapacityOverflow)?;
+                let new_slots = Slots::try_new(new_total)?;
+                if self.repack_into(target, new_slots, false) {
+                    break;
+                }
+                target = target
+                    .checked_mul(2)
+                    .ok_or(TryReserveError::CapacityOverflow)?;
+            }
         }
         Ok(())
     }
@@ -756,18 +782,46 @@ impl<K: Key, V: Value, H: BuildHasher, const GROWTH: usize> PoMap<K, V, H, GROWT
     /// to bump when the source is near-full (grow); on a sparse source it would
     /// race the cursor far past every window.
     fn rebuild(&mut self, new_ideal_range: usize, bump_gaps: bool) {
-        let new_total = new_ideal_range + padding_for(new_ideal_range);
-        // Fully memset-initialized target, then a second pass writing the ~60%
-        // occupied slots. Single-pass "write each slot exactly once" variants
-        // (region-fill per gap; inline 8-byte gap stores) were tried and measured
-        // 35-44% SLOWER: the upfront memset streams complete cache lines with no
-        // read-for-ownership, which beats any partial-line gap-filling pattern.
-        let new_slots = Slots::new(new_total);
-        self.repack_into(new_ideal_range, new_slots, bump_gaps);
+        // Retry with a doubled target if the repack would overflow the table
+        // (possible only under extreme hash clustering — e.g. an adversarial
+        // or degenerate hasher piling entries at the top of the range). The
+        // retry threshold is a pure function of the ordered contents and the
+        // target size, so `compact()`'s canonical-representation guarantee is
+        // preserved: equal contents always settle in the same table.
+        let mut target = new_ideal_range;
+        loop {
+            let new_total = target
+                .checked_add(padding_for(target))
+                .expect("PoMap capacity overflow");
+            // Fully memset-initialized target, then a second pass writing the
+            // ~60% occupied slots. Single-pass "write each slot exactly once"
+            // variants (region-fill per gap; inline 8-byte gap stores) were
+            // tried and measured 35-44% SLOWER: the upfront memset streams
+            // complete cache lines with no read-for-ownership, which beats any
+            // partial-line gap-filling pattern.
+            let new_slots = Slots::new(new_total);
+            if self.repack_into(target, new_slots, bump_gaps) {
+                return;
+            }
+            target = target.checked_mul(2).expect("PoMap capacity overflow");
+        }
     }
 
-    fn repack_into(&mut self, new_ideal_range: usize, new_slots: Slots<K, V>, bump_gaps: bool) {
+    /// Repacks live entries into `new_slots`. Returns `true` on success
+    /// (`new_slots` installed, old allocation freed) or `false` if the repack
+    /// would violate the trailing-vacant invariant (`new_slots` discarded, the
+    /// map untouched — the caller retries with a larger target).
+    ///
+    /// Failure cleanup is sound because entries are moved as *bitwise copies*
+    /// while the old slots' bytes stay intact: on success the OLD allocation
+    /// is freed raw (its `Drop` never runs), on failure the NEW one is —
+    /// either way exactly one table ever owns (and eventually drops) the
+    /// entries.
+    fn repack_into(&mut self, new_ideal_range: usize, new_slots: Slots<K, V>, bump_gaps: bool) -> bool {
         let new_meta = Meta::new(new_ideal_range);
+        // Keep the final slot vacant: probe loops rely on it as a
+        // branch-free scan terminator (see `hash_at`).
+        let last_usable = new_slots.total_slots - 1;
 
         let mut cursor = 0usize;
         for i in 0..self.slots.total_slots {
@@ -782,6 +836,14 @@ impl<K: Key, V: Value, H: BuildHasher, const GROWTH: usize> PoMap<K, V, H, GROWT
             // Drop never runs), so there is no need to clear the moved-from slot.
             let entry = unsafe { (*self.slots.entries.add(i)).assume_init_read() };
             cursor = cursor.max(new_meta.ideal_slot(h));
+            if cursor >= last_usable {
+                // Would occupy (or pass) the reserved final slot: discard the
+                // new allocation WITHOUT running entry drops — the bitwise
+                // copies written so far are still owned by the old table.
+                unsafe { dealloc(new_slots.ptr.as_ptr(), new_slots.layout) };
+                mem::forget(new_slots);
+                return false;
+            }
             unsafe {
                 *new_slots.entries.add(cursor) = MaybeUninit::new(entry);
             }
@@ -793,6 +855,7 @@ impl<K: Key, V: Value, H: BuildHasher, const GROWTH: usize> PoMap<K, V, H, GROWT
         mem::forget(old);
         self.meta = new_meta;
         self.grow_threshold = new_ideal_range * LOAD_NUM / LOAD_DEN;
+        true
     }
 }
 
@@ -2087,6 +2150,84 @@ mod tests {
         // Map still fully functional after compaction.
         for k in 0..500u64 {
             assert_eq!(a.get(&k), Some(&(k * 3)));
+        }
+    }
+
+    /// Adversarial hasher that clusters every key into the topmost few ideal
+    /// slots, piling maximal-hash runs against the end of the table. This
+    /// exercises the trailing-vacant invariant: the final slot must never be
+    /// occupied (insert landing guards), repacks must retry on overflow, and
+    /// probes for absent larger-hash keys must terminate in-bounds.
+    #[derive(Clone, Default)]
+    struct TailClusterBuildHasher;
+    struct TailClusterHasher(u64);
+    impl core::hash::Hasher for TailClusterHasher {
+        fn finish(&self) -> u64 {
+            // 16 distinct hash values, all within 16 of u64::MAX.
+            u64::MAX - 16 + (self.0 & 15)
+        }
+        fn write(&mut self, bytes: &[u8]) {
+            for &b in bytes {
+                self.0 = self.0.wrapping_mul(31).wrapping_add(b as u64);
+            }
+        }
+    }
+    impl BuildHasher for TailClusterBuildHasher {
+        type Hasher = TailClusterHasher;
+        fn build_hasher(&self) -> TailClusterHasher {
+            TailClusterHasher(0)
+        }
+    }
+
+    #[test]
+    fn adversarial_tail_clustering_is_safe() {
+        let mut m: PoMap<u64, u64, TailClusterBuildHasher> =
+            PoMap::with_hasher(TailClusterBuildHasher);
+        let mut reference = std::collections::HashMap::new();
+
+        // Insert far more entries than any padding region holds, all clustered
+        // at the top of the hash range; interleave removes and lookups.
+        for k in 0..120u64 {
+            m.insert(k, k * 7);
+            reference.insert(k, k * 7);
+            if k % 3 == 0 {
+                m.remove(&(k / 2));
+                reference.remove(&(k / 2));
+            }
+            // The final slot must remain vacant at all times.
+            assert_eq!(
+                m.slots.hash_at(m.slots.total_slots - 1),
+                EMPTY_HASH,
+                "trailing-vacant invariant violated at k={k}"
+            );
+            // Absent keys probing at/above the topmost run terminate safely.
+            assert_eq!(m.get(&(1_000_000 + k)), None);
+        }
+        for (k, v) in &reference {
+            assert_eq!(m.get(k), Some(v));
+        }
+        assert_eq!(m.len(), reference.len());
+
+        // compact() under clustering: the minimal target can't hold the tail
+        // run, so the repack retry loop must engage — and stay canonical.
+        let mut m2: PoMap<u64, u64, TailClusterBuildHasher> =
+            PoMap::with_hasher(TailClusterBuildHasher);
+        for (k, v) in &reference {
+            m2.insert(*k, *v);
+        }
+        m.compact();
+        m2.compact();
+        assert_eq!(m.slots.hash_at(m.slots.total_slots - 1), EMPTY_HASH);
+        assert_eq!(m.slots.total_slots, m2.slots.total_slots);
+        let ba = unsafe {
+            core::slice::from_raw_parts(m.slots.ptr.as_ptr(), m.slots.layout.size())
+        };
+        let bb = unsafe {
+            core::slice::from_raw_parts(m2.slots.ptr.as_ptr(), m2.slots.layout.size())
+        };
+        assert_eq!(ba, bb, "compact() must stay canonical under the retry path");
+        for (k, v) in &reference {
+            assert_eq!(m.get(k), Some(v));
         }
     }
 
