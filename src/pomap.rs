@@ -107,11 +107,16 @@ pub enum TryReserveError {
 
 /// Marker trait for keys stored in a [`PoMap`].
 ///
-/// Note there is no `Ord` bound: the map is ordered by *hash*, never by key
-/// comparison — no ordering operation on `K` exists anywhere in the layout,
-/// probe, or resize paths (`==` is used only for the final match).
-pub trait Key: Hash + Eq + Clone {}
-impl<K: Hash + Eq + Clone> Key for K {}
+/// The `Ord` bound exists for exactly one purpose: **canonicalizing 64-bit
+/// hash collisions**. Entries are ordered by hash; when two distinct keys
+/// collide on their full encoded hash (probability ≈ n²/2⁶⁵ — never on any
+/// non-adversarial workload), the tie is broken by key order so that the
+/// array layout, iteration order, `Eq`, `Ord`, and `Hash` of the *map itself*
+/// are pure functions of its contents. A key comparison therefore executes
+/// only on a full-hash collision during insert — never on any probe, lookup,
+/// remove, or resize path.
+pub trait Key: Hash + Eq + Clone + Ord {}
+impl<K: Hash + Eq + Clone + Ord> Key for K {}
 
 /// Marker trait for values stored in a [`PoMap`].
 pub trait Value: Clone {}
@@ -439,6 +444,13 @@ impl<K: Key, V: Value, H: BuildHasher, const GROWTH: usize> PoMap<K, V, H, GROWT
                 if entry.key == key {
                     let e = unsafe { &mut *(*entries.add(pos)).as_mut_ptr() };
                     return Some(mem::replace(&mut e.value, value));
+                }
+                // Full 64-bit hash collision between distinct keys (~n²/2⁶⁵):
+                // canonicalize the tie by key order so layout and iteration
+                // are functions of contents alone (required for the map-level
+                // Eq/Ord/Hash impls). This compare runs only on collisions.
+                if entry.key > key {
+                    break; // insert before the larger colliding key
                 }
             }
             if stored > hash {
@@ -1315,6 +1327,51 @@ impl<K: Key, V: Value + PartialEq, H: BuildHasher, const GROWTH: usize> PartialE
 
 impl<K: Key, V: Value + Eq, H: BuildHasher, const GROWTH: usize> Eq for PoMap<K, V, H, GROWTH> {}
 
+/// Lexicographic comparison over the canonical (hash, key) iteration order.
+///
+/// Lawful because iteration order is a pure function of the map's contents:
+/// entries are ordered by hash, with full-hash collisions canonicalized by key
+/// order at insert. **Requires a per-type-deterministic hasher** (two maps of
+/// the same type must agree on every key's hash — true for
+/// [`PoMapBuildHasher`] and `BuildHasherDefault`, not for randomly seeded
+/// states): with per-instance hasher seeds, maps of the same type would
+/// disagree on iteration order and these impls would not be a lawful total
+/// order.
+impl<K: Key, V: Value + PartialOrd, H: BuildHasher, const GROWTH: usize> PartialOrd
+    for PoMap<K, V, H, GROWTH>
+{
+    #[inline]
+    fn partial_cmp(&self, other: &Self) -> Option<core::cmp::Ordering> {
+        self.iter().partial_cmp(other.iter())
+    }
+}
+
+/// See the [`PartialOrd`] impl for the canonical-order and hasher requirements.
+impl<K: Key, V: Value + Ord, H: BuildHasher, const GROWTH: usize> Ord for PoMap<K, V, H, GROWTH> {
+    #[inline]
+    fn cmp(&self, other: &Self) -> core::cmp::Ordering {
+        self.iter().cmp(other.iter())
+    }
+}
+
+/// Hashes the map's contents in canonical iteration order (length-prefixed),
+/// so equal maps hash equally regardless of insertion history. Same
+/// per-type-deterministic-hasher requirement as the [`PartialOrd`] impl.
+/// This makes `PoMap` usable as a key in hash maps (including other `PoMap`s)
+/// and in hashed sets — something unordered hash maps cannot lawfully offer.
+impl<K: Key, V: Value + Hash, H: BuildHasher, const GROWTH: usize> Hash
+    for PoMap<K, V, H, GROWTH>
+{
+    #[inline]
+    fn hash<S: core::hash::Hasher>(&self, state: &mut S) {
+        state.write_usize(self.len);
+        for (k, v) in self.iter() {
+            k.hash(state);
+            v.hash(state);
+        }
+    }
+}
+
 impl<K: Key, V: Value, H: BuildHasher, const GROWTH: usize> Index<&K> for PoMap<K, V, H, GROWTH> {
     type Output = V;
 
@@ -1884,5 +1941,94 @@ mod tests {
         }
         map.clear();
         assert!(map.is_empty());
+    }
+
+    /// Hasher that collides everything: every key hashes to the same value,
+    /// forcing the full-hash-collision tie path on every insert.
+    #[derive(Clone, Default)]
+    struct ColliderBuildHasher;
+    struct ColliderHasher;
+    impl core::hash::Hasher for ColliderHasher {
+        fn finish(&self) -> u64 {
+            0xDEAD_BEEF
+        }
+        fn write(&mut self, _: &[u8]) {}
+    }
+    impl BuildHasher for ColliderBuildHasher {
+        type Hasher = ColliderHasher;
+        fn build_hasher(&self) -> ColliderHasher {
+            ColliderHasher
+        }
+    }
+
+    /// Under total hash collision, ties must be canonicalized by key order:
+    /// iteration order, Eq, Ord, and Hash are functions of contents alone,
+    /// independent of insertion history.
+    #[test]
+    fn collision_ties_are_canonical() {
+        let keys: [u64; 7] = [42, 3, 99, 7, 55, 1, 88];
+        let mut a: PoMap<u64, u64, ColliderBuildHasher> =
+            PoMap::with_hasher(ColliderBuildHasher);
+        for &k in &keys {
+            a.insert(k, k * 10);
+        }
+        let mut b: PoMap<u64, u64, ColliderBuildHasher> =
+            PoMap::with_hasher(ColliderBuildHasher);
+        for &k in keys.iter().rev() {
+            b.insert(k, k * 10);
+        }
+
+        // Iteration is key-sorted within the collision run, for both maps.
+        let seq_a: alloc::vec::Vec<u64> = a.iter().map(|(k, _)| *k).collect();
+        let seq_b: alloc::vec::Vec<u64> = b.iter().map(|(k, _)| *k).collect();
+        let mut sorted = keys.to_vec();
+        sorted.sort_unstable();
+        assert_eq!(seq_a, sorted);
+        assert_eq!(seq_b, sorted);
+
+        // Content-equal maps built in opposite orders are ==, Ordering::Equal,
+        // and hash identically.
+        assert_eq!(a, b);
+        assert_eq!(a.cmp(&b), core::cmp::Ordering::Equal);
+        let hash_of = |m: &PoMap<u64, u64, ColliderBuildHasher>| {
+            let mut h = ahash::AHasher::default();
+            m.hash(&mut h);
+            core::hash::Hasher::finish(&h)
+        };
+        assert_eq!(hash_of(&a), hash_of(&b));
+
+        // Removing from the middle of a collision run keeps canonical order.
+        a.remove(&55);
+        b.remove(&55);
+        assert_eq!(a, b);
+        let seq: alloc::vec::Vec<u64> = a.iter().map(|(k, _)| *k).collect();
+        let mut expect = sorted.clone();
+        expect.retain(|&k| k != 55);
+        assert_eq!(seq, expect);
+    }
+
+    /// Ord over maps is a lawful total order on content-distinct maps.
+    #[test]
+    fn map_ord_laws() {
+        use core::cmp::Ordering;
+        let mk = |pairs: &[(u64, u64)]| {
+            let mut m: PoMap<u64, u64> = PoMap::new();
+            for &(k, v) in pairs {
+                m.insert(k, v);
+            }
+            m
+        };
+        let x = mk(&[(1, 1), (2, 2)]);
+        let y = mk(&[(1, 1), (2, 3)]); // differs in one value
+        let z = mk(&[(1, 1)]);
+
+        assert_eq!(x.cmp(&x), Ordering::Equal);
+        assert_eq!(x.cmp(&y), y.cmp(&x).reverse());
+        assert_eq!(x.cmp(&z), z.cmp(&x).reverse());
+        // transitivity over the three distinct maps, whatever the direction:
+        let mut v = [&x, &y, &z];
+        v.sort_by(|a, b| a.cmp(b));
+        assert!(v[0].cmp(v[1]) != Ordering::Greater && v[1].cmp(v[2]) != Ordering::Greater);
+        assert!(v[0].cmp(v[2]) != Ordering::Greater);
     }
 }

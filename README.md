@@ -15,8 +15,11 @@ in the hash) — pays repeatedly:
   a monotone write cursor — no re-hashing (the hash is stored), no re-sorting,
   no scatter. With expensive-to-hash keys (strings, paths, composites) this
   inverts resize-heavy workloads outright.
-- **No key comparisons anywhere**: ordering is by hash, never by `Ord` — the
-  `Key` trait is just `Hash + Eq + Clone`.
+- **The map itself is `Eq`, `Ord`, `PartialOrd`, and `Hash`**: canonical
+  iteration order makes map-level comparison and hashing lawful — maps as keys
+  in maps, sets of maps, `sort()`able collections of maps. Key comparisons
+  execute only to canonicalize full 64-bit hash collisions (≈ n²/2⁶⁵ — never on
+  any probe, lookup, or resize path).
 
 ## Measured highlights (vs `hashbrown`, in-run, Apple M5 Max; see `docs/findings.md` for the full multi-platform story and every caveat)
 

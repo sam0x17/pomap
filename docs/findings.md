@@ -58,10 +58,20 @@ early-terminating probes, (c) a comparison-free single-pass streaming resize.
   its own region; boundaries are *data-defined* by the sort, not geometric — no
   fixed buckets exist) and giving **deterministic whole-map iteration** as an API
   property; (b) **the ordering criterion is the hash, not the key** — a key
-  comparison is never on the layout path (verified: only `u64` compares navigate;
-  `==` does the final match; the `Key: Ord` bound is vestigial — functionally only
-  `Hash + Eq + Clone` is needed), distinguishing it from classical ordered hashing
-  (key comparison) and Robin Hood (probe distance); (c) an **AoS inline-full-hash
+  comparison executes only to canonicalize a *full 64-bit hash collision*
+  (probability ≈ n²/2⁶⁵; never on any probe, lookup, remove, or resize path),
+  distinguishing it from classical ordered hashing (key comparison on every
+  probe) and Robin Hood (probe distance). Canonicalized ties make iteration
+  order a pure function of contents, which legalizes **`Eq`, `Ord`,
+  `PartialOrd`, and `Hash` on the map itself** — a total order and hashability
+  over maps that unordered hash tables cannot lawfully provide (no canonical
+  sequence exists to compare); maps become usable as keys in maps and members
+  of sorted/hashed collections. (Requires a per-type-deterministic hasher;
+  documented on the impls. Fixing this also repaired a latent `Eq` bug: the
+  zip-compare `PartialEq` silently assumed canonical order and would have
+  judged content-equal maps unequal under a hash collision — unhit in testing
+  because 64-bit collisions never occur naturally; the same species of latent
+  bug as the `repr(C)` incident in §3.); (c) an **AoS inline-full-hash
   layout** that makes a probe one cache line, with `u64::MAX` doubling as empty
   sentinel and scan terminator.
 - **(C2) Comparison-free streaming resize, and its measured consequences.**
@@ -823,6 +833,14 @@ result.)
   (background load present; Mac remove anchor soft). The in-run ordering is
   robust; magnitudes need an AMD re-run (`family_bench.rs` is portable — run via
   the same collection scripts).
+- **Canonical-ties change (540db31): perf-validated with one flag.** get_hits
+  keeps its improvement (median 0.963 vs pre-opt snapshot); insert_allocate
+  within noise. `insert_preallocated` read +10% in the validation — but the tie
+  compare executes only behind `stored == hash` (false for every non-colliding
+  key: the hot-loop instruction stream for unique-key inserts is unchanged),
+  and this group swung 0.85-1.16 on UNTOUCHED insert code throughout the same
+  night (see the layout-artifact and anchor-anomaly bullets). Kept as a
+  correctness fix; the pristine per-machine step-1 A/B adjudicates the group.
 - **Open anomaly: `insert_preallocated` anchor instability on M5 (2026-08-18).**
   The canonical suite now reads 3.4-3.6x for insert_preallocated on this machine
   (two independent runs) vs June's committed 1.77x — while the SAME workload in
