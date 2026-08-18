@@ -58,10 +58,20 @@ early-terminating probes, (c) a comparison-free single-pass streaming resize.
   its own region; boundaries are *data-defined* by the sort, not geometric — no
   fixed buckets exist) and giving **deterministic whole-map iteration** as an API
   property; (b) **the ordering criterion is the hash, not the key** — a key
-  comparison is never on the layout path (verified: only `u64` compares navigate;
-  `==` does the final match; the `Key: Ord` bound is vestigial — functionally only
-  `Hash + Eq + Clone` is needed), distinguishing it from classical ordered hashing
-  (key comparison) and Robin Hood (probe distance); (c) an **AoS inline-full-hash
+  comparison executes only to canonicalize a *full 64-bit hash collision*
+  (probability ≈ n²/2⁶⁵; never on any probe, lookup, remove, or resize path),
+  distinguishing it from classical ordered hashing (key comparison on every
+  probe) and Robin Hood (probe distance). Canonicalized ties make iteration
+  order a pure function of contents, which legalizes **`Eq`, `Ord`,
+  `PartialOrd`, and `Hash` on the map itself** — a total order and hashability
+  over maps that unordered hash tables cannot lawfully provide (no canonical
+  sequence exists to compare); maps become usable as keys in maps and members
+  of sorted/hashed collections. (Requires a per-type-deterministic hasher;
+  documented on the impls. Fixing this also repaired a latent `Eq` bug: the
+  zip-compare `PartialEq` silently assumed canonical order and would have
+  judged content-equal maps unequal under a hash collision — unhit in testing
+  because 64-bit collisions never occur naturally; the same species of latent
+  bug as the `repr(C)` incident in §3.); (c) an **AoS inline-full-hash
   layout** that makes a probe one cache line, with `u64::MAX` doubling as empty
   sentinel and scan terminator.
 - **(C2) Comparison-free streaming resize, and its measured consequences.**
