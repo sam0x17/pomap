@@ -1076,15 +1076,20 @@ STOC 2001), strongly history-independent hashing (Blelloch & Golovin, FOCS
 2007), and phase-concurrent deterministic hash tables (Shun & Blelloch, PPoPP
 2014 — linear probing with a priority order; quiescent array content
 independent of operation history) establish canonical-layout hashing, motivated
-by privacy and parallel determinism. **Precision required by this line:** PoMap
-guarantees canonical *iteration order* (hash order, always) but NOT canonical
-*bytes* — cursor-spacing gap seeding makes physical slot positions depend on
-the growth history (with_capacity-then-fill vs incremental growth yield
-different gap placements). So the claim is "deterministic iteration order,"
-never "history-independent layout." PoMap's delta from this line: the property
-is surfaced as an iteration/reproducibility API feature and combined with the
-prefix-addressing payoffs (streaming resize, locality); theirs is exact layout
-canonicity for security/parallelism. Checked and clean: LCFS hashing (Poblete
+by privacy and parallel determinism. **PoMap's position is a two-tier
+determinism model (sharpened 2026-08-18):** canonical *iteration order* at all
+times (hash order, collision ties key-canonicalized), and canonical
+*representation on demand* — `compact()` repacks into the minimal table with
+gap placement a pure function of ordered contents, after which content-equal
+maps built by arbitrary histories are **byte-identical** (memcmp-verified in
+the test suite for padding-free payloads; structurally identical otherwise).
+The *live* layout is deliberately history-dependent — grow-time cursor spacing
+trades layout canonicity for insert performance — so canonicity is a
+checkpoint operation, not a per-operation tax. That is the delta from strongly
+history-independent structures, which pay for exact canonicity on every
+update; PoMap offers order-determinism free and representation-determinism
+when asked (the natural hook for canonical commitments — hash the compacted
+table linearly — and for RCU replicas converging bytewise after copy-rebuild). Checked and clean: LCFS hashing (Poblete
 & Munro, *J. Algorithms* 1989) orders by arrival, not hash — no overlap.
 
 **Ordered-Hopscotch search: CLOSED (2026-08, two targeted searches).** No

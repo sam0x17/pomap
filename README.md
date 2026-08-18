@@ -15,6 +15,9 @@ in the hash) — pays repeatedly:
   a monotone write cursor — no re-hashing (the hash is stored), no re-sorting,
   no scatter. With expensive-to-hash keys (strings, paths, composites) this
   inverts resize-heavy workloads outright.
+- **Canonical representation on demand**: `compact()` repacks into the minimal
+  table with layout a pure function of contents — content-equal maps are
+  byte-identical after compaction, whatever their histories (memcmp-tested).
 - **The map itself is `Eq`, `Ord`, `PartialOrd`, and `Hash`**: canonical
   iteration order makes map-level comparison and hashing lawful — maps as keys
   in maps, sets of maps, `sort()`able collections of maps. Key comparisons
