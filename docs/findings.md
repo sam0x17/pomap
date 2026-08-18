@@ -454,11 +454,16 @@ G4 1.01× (parity), G8 0.877× — pomap faster than hashbrown at building from
 empty.** Every halving of repack volume keeps paying (total moved entries is
 n·G/(G−1): 2n at G2, 1.33n at G4, 1.14n at G8). With G8 the map beats hashbrown
 on *every* workload class on this machine except the §5.4 residuals
-(insert_preallocated, warm removes). The price is memory slack scaling with G
-(post-grow tables are up to G× oversized; the measured G8 footprint is TODO —
-the analytic model disagrees with the measured G2/G4 table, so only measured
-numbers will be published). G8 is a legitimate published configuration for
-build-heavy, memory-rich deployments; G4 stays the default.
+(insert_preallocated, warm removes). **Measured G8 footprint (examples/footprint.rs, validates cell-for-cell against
+the §5.5 table):** at the five standard sizes, G8 *averages the same as G4*
+(67.5 vs 69.6 B/entry; G2 49.6) with the same observed worst case (104.1 at
+N=500) — G8's sparser growth sequence sometimes lands tighter than G4 (50.3 vs
+100.7 at 500k). Caveat: over arbitrary N the *expected* slack grows with G (the
+sampled parity is power-of-two coincidence; worst-case overshoot is ~G× just
+past a grow); `with_capacity` provisioning is growth-independent and sidesteps
+it entirely. Net: **G8 buys the build-from-empty inversion at ≈G4's average
+memory on these sizes** — a legitimate published configuration for build-heavy
+deployments; G4 stays the default.
 
 **Growth factor: a two-point dial, GROWTH=4 as the performance-canonical
 configuration.** GROWTH affects *only* `insert_allocate` (build-from-empty) and
