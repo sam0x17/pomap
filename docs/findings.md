@@ -189,6 +189,25 @@ it (all other workloads provision via `with_capacity` and never grow mid-measure
   added. **Lesson for the paper's methods/threats section: type-monomorphic
   microbenchmarks can hide layout bugs; test a non-trivial payload type.**
 
+### 3.1 The trailing-vacant invariant (audit find, 2026-08-18)
+
+The probe loops carry no bounds checks by design — "blank slots at the end"
+terminate every scan (EMPTY is `u64::MAX`, the maximum, so both cutoffs fire).
+The production audit found the invariant was *probabilistic*, not enforced:
+the insert slow path could legally occupy the final slot, after which a
+miss-probe for a larger hash reads past the allocation; and the repack had no
+cursor bound, so shrink/compact under adversarially clustered hashes could
+write out of bounds (grow-repacks are inductively safe; shrink-repacks are
+not). Both are unreachable with a well-distributed 64-bit hasher — and
+reachable with a user-supplied degenerate one, which safe Rust must tolerate.
+The fix enforces the invariant at the cold write sites only (two insert
+landing guards; a fallible repack with deterministic doubled-target retry),
+preserving zero-branch probes and `compact()`'s canonical bytes. **Methods
+lesson (pairs with §3's repr(C) and the Eq-under-collision bug in C1): design
+invariants that hold "with probability 1" under an honest hasher must still
+be *enforced*, because the hasher is caller-supplied; an adversarial-hasher
+test (total collision at the top of the range) now guards it.**
+
 ## 4. Experimental methodology
 
 ### 4.1 Platforms

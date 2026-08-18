@@ -757,8 +757,10 @@ impl<K: Key, V: Value, H: BuildHasher, const GROWTH: usize> PoMap<K, V, H, GROWT
 
     /// Retains only the elements specified by the predicate.
     ///
-    /// The predicate is called with each key-value pair; if it returns `false`,
-    /// the entry is removed.
+    /// The predicate is called with each key-value pair **in canonical (hash,
+    /// key) order**; if it returns `false`, the entry is removed. Determinism
+    /// carries over: for equal contents, the predicate sees the same sequence
+    /// regardless of how the map was built.
     #[inline]
     pub fn retain<F>(&mut self, mut f: F)
     where
@@ -851,10 +853,15 @@ impl<K: Key, V: Value, H: BuildHasher, const GROWTH: usize> PoMap<K, V, H, GROWT
         }
     }
 
-    /// Drains all entries from the map, returning an iterator over them.
+    /// Drains all entries from the map, returning an iterator over them in
+    /// canonical (hash, key) order.
     ///
     /// After the drain iterator is dropped (whether fully consumed or not),
-    /// the map is empty.
+    /// the map is empty. If the iterator is **leaked** (`mem::forget`), the
+    /// map is left in a valid but unspecified state — the unyielded entries
+    /// remain allocated while the map reports itself empty; any further use
+    /// beyond dropping the map is unsupported (matching the leak posture of
+    /// std's draining iterators).
     #[inline]
     pub fn drain(&mut self) -> Drain<'_, K, V> {
         let drain = Drain {
