@@ -670,19 +670,32 @@ Whole-map iteration (sum keys+values; medians of 3; ratio vs hashbrown):
 | 100k | 4.40× (5.26 ns/e) | 1.00 (1.20) | 0.99 | 1.60 (1.91) |
 | 1M | 2.49× (4.93 ns/e) | 1.00 (1.98) | 1.00 | 2.44 (4.84) |
 
-**PoMap iteration is a loss, and the mechanism is instructive.** The iterator
-takes one *unpredictable* branch per slot over a 24-byte stride; hashbrown's
-iterator SIMD-scans its compact control bytes and skips 16 empties at a time.
-The ratio tracks slot density exactly: worst at 100k (with_capacity provisioning
-lands at ~38% density just above a power-of-two boundary), mildest near ~48%.
-This is the AoS tradeoff on a third axis — inline hashes buy one-cache-line
-probes (§5.2) but cannot be SIMD-skipped during iteration; the SoA family
-variants would iterate at hashbrown speed (unmeasured, expected). **Honest
-headline: deterministic hash-order iteration at BTreeMap-class throughput
-(≈parity with BTreeMap at 1M) with O(1) point operations** — the feature is the
-determinism and the point-op speed, not iteration throughput. A branch-lighter
-unrolled iterator is a plausible mitigation (untested; candidate for the
-optimizer loop).
+**The naive iterator was a loss, and the mechanism was instructive**: one
+*unpredictable* branch per slot over a 24-byte stride (~40–50% slot density
+makes the skip branch a coin flip), vs hashbrown's SIMD scan of compact control
+bytes. The ratio tracked slot density exactly (worst at 100k, where
+with_capacity provisioning lands at ~38% density).
+
+**Fixed the same night (2026-08-18): a branchless 64-slot occupancy-mask
+iterator** (refill a u64 mask with a cmp/set/or pass over the inline hashes —
+predictable loop — then pop set bits; `remaining == 0` skips the tail).
+Measured (median of 3, vs in-run hashbrown):
+
+| entries | before | after | pomap speedup |
+|---|---|---|---|
+| 1k | 2.36× | 1.66× | 1.40× |
+| 100k | 4.39× | **1.07×** | 4.20× |
+| 1M | 2.49× | **0.61×** | 4.14× |
+
+At 1M PoMap now iterates **39% faster than hashbrown** (~1.19 vs 1.98 ns/entry):
+with the branch misses gone, whole-map iteration is a sequential stream over one
+flat allocation — the same sequential-vs-scatter character as C2, surfacing on a
+read path. Small maps still pay fixed overheads (1.66× at 1k). `Keys`/`Values`/
+`values_mut` inherit via delegation; `IterMut` carries the same scheme;
+`IntoIter`/`Drain` remain on the simple path (their `Drop` must account for
+unconsumed entries — follow-up). **Headline: deterministic hash-order iteration
+that beats the unordered incumbent at scale** — strictly dominating BTreeMap
+(4.8 ns/e) on both order-availability-per-cost and point-op speed.
 
 ## 6. The design space: a measured Pareto frontier, plus negative results
 
@@ -898,10 +911,20 @@ growth-independent (provisioned builds).
 3. The only durable losses are the small-cache-resident miss-scan (a TLB/locality
    effect) and the pure insert shift tax (warm/medium writes); neither has a fix
    that preserves the read wins.
-4. The design is at/near its optimum on the architectures tested — the optimizer
-   found no validated gain on the latest — so the contribution is the structure
-   (C1) and the measured read/write behavior, not further micro-optimization.
-5. **The resize is a first-class result, not an implementation detail**: the
+4. The point-op design is at its optimum on the architectures tested: the
+   2026-08 optimizer loop (in-run A/B vs a frozen snapshot, measured noise
+   floor, median-of-3 protocol) validated exactly one point-op improvement (the
+   hit-biased `get` compare order, −2 to −5% on get_hits) and rejected every
+   other micro-candidate — several as instruction-layout artifacts (§7). The
+   same loop found one *large* non-point-op win: the branchless occupancy-mask
+   iterator (§5.8, 4× — iteration now beats hashbrown at scale).
+5. **With String keys the write story inverts at G4** (§5.7): builds 0.71×,
+   shrink 0.35×, removes 0.74× — because the inline full hash makes resize
+   **hash-free** while SwissTable re-hashes every key. The map's strongest
+   workload class is expensive-to-hash keys, which is the common case.
+6. **The growth dial reaches inversion**: G8 builds from empty at 0.877×
+   hashbrown with ≈G4's average measured memory at the standard sizes (§5.5).
+7. **The resize is a first-class result, not an implementation detail**: the
    growth-invariance of hash-prefix order makes rehash a comparison-free
    streaming pass (§2, C2) — the flat-open-addressing realization of an invariant
    previously used only in concurrent chained tables (split-ordered lists,
